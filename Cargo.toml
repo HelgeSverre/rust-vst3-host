@@ -1,0 +1,11 @@
+[package]
+name = "vst-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.31.0"
+raw-window-handle = "0.6.2"
+vst3 = "0.1.2"
+libloading = "0.8.6"
+core-foundation = "0.10.0"
