@@ -12,8 +12,8 @@ use vst3::{ComPtr, Interface};
 use core_foundation::base::TCFType;
 use libloading::os::unix::{Library, Symbol};
 
-const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3/Contents/MacOS/Surge XT";
-// const PLUGIN_PATH: &str = "/Users/helge/code/vst-host/tmp/Dexed.vst3/Contents/MacOS/Dexed";
+// const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3/Contents/MacOS/Surge XT";
+const PLUGIN_PATH: &str = "/Users/helge/code/vst-host/tmp/Dexed.vst3/Contents/MacOS/Dexed";
 
 fn main() {
     if !std::path::Path::new(PLUGIN_PATH).exists() {
@@ -33,74 +33,91 @@ fn main() {
 }
 
 unsafe fn load_vst3_plugin(path: &str) -> Result<(ComPtr<IPluginBase>, ComPtr<IPlugView>), String> {
-    // Try loading the VST3 bundle
-    let lib = unsafe { Library::new(path) }
-        .map_err(|e| format!("❌ Failed to load VST3 bundle: {}", e))?;
+    let lib = Library::new(path).map_err(|e| format!("❌ Failed to load VST3 bundle: {}", e))?;
 
-    // Get the factory symbol
-    let get_factory: Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> =
-        unsafe { lib.get(b"GetPluginFactory") }
-            .map_err(|e| format!("❌ Failed to load `GetPluginFactory`: {}", e))?;
+    let get_factory: Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> = lib
+        .get(b"GetPluginFactory")
+        .map_err(|e| format!("❌ Failed to load `GetPluginFactory`: {}", e))?;
 
-    let factory_ptr = unsafe { get_factory() };
+    let factory_ptr = get_factory();
     if factory_ptr.is_null() {
         return Err("❌ `GetPluginFactory` returned NULL".into());
     }
 
-    let factory = unsafe { ComPtr::<IPluginFactory>::from_raw(factory_ptr) }
+    let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr)
         .ok_or("❌ Failed to wrap IPluginFactory")?;
 
-    // Query the first available plugin's class ID
-    let mut class_info = std::mem::zeroed::<vst3::Steinberg::PClassInfo>();
-    let result = unsafe { factory.getClassInfo(0, &mut class_info as *mut _ as *mut _) };
-    if result != vst3::Steinberg::kResultOk {
-        return Err("❌ Failed to retrieve VST3 class ID".into());
+    // Iterate through available plugin classes
+    let mut class_id = None;
+    for i in 0..factory.countClasses() {
+        let mut class_info = std::mem::zeroed();
+        if factory.getClassInfo(i, &mut class_info) == vst3::Steinberg::kResultOk {
+            let category = std::str::from_utf8(std::slice::from_raw_parts(
+                class_info.category.as_ptr() as *const u8,
+                class_info.category.len(),
+            ))
+            .unwrap_or("Invalid UTF-8");
+
+            println!(
+                "🔹 Found Class: {} (Category: {:?})",
+                std::str::from_utf8(std::slice::from_raw_parts(
+                    class_info.name.as_ptr() as *const u8,
+                    class_info.name.len()
+                ))
+                .unwrap_or("Invalid UTF-8"),
+                category
+            );
+
+            // Choose the correct class (e.g., "Audio Module Class")
+            if category.contains("Audio Module Class") {
+                println!(
+                    "🔹 -------- Using class: {} - {}, cid: {:?}",
+                    std::str::from_utf8(std::slice::from_raw_parts(
+                        class_info.name.as_ptr() as *const u8,
+                        class_info.name.len()
+                    ))
+                    .unwrap_or("Invalid UTF-8"),
+                    category,
+                    class_info.cid
+                );
+                class_id = Some(class_info.cid);
+                break;
+            }
+        }
     }
 
-    let class_id = class_info.cid; // The actual Class ID of the first plugin
-
-for i in 0..factory.countClasses() {
-    let mut class_info = std::mem::zeroed();
-    if factory.getClassInfo(i, &mut class_info) == vst3::Steinberg::kResultOk {
-        println!(
-            "🔹 Found Class: {} (Category: {:?})",
-            std::str::from_utf8(unsafe { std::slice::from_raw_parts(class_info.name.as_ptr() as *const u8, class_info.name.len()) }).unwrap_or("Invalid UTF-8"),
-            std::str::from_utf8(unsafe { std::slice::from_raw_parts(class_info.category.as_ptr() as *const u8, class_info.category.len()) }).unwrap_or("Invalid UTF-8")
-        );
-    }
-}
-
+    let class_id = class_id.ok_or("❌ No valid VST3 plugin class found")?;
 
     // Create the plugin instance
     let mut plugin_ptr: *mut IPluginBase = ptr::null_mut();
-    let result = unsafe {
-        factory.createInstance(
-            class_id.as_ptr() as *const i8, // Correctly using dynamic Class ID
-            IPluginBase::IID.as_ptr() as *const i8, // Convert to FIDString
-            &mut plugin_ptr as *mut _ as *mut _,
-        )
-    };
+    let result = factory.createInstance(
+        class_id.as_ptr() as *const i8,
+        IPluginBase::IID.as_ptr() as *const i8,
+        &mut plugin_ptr as *mut _ as *mut _,
+    );
 
     if result != vst3::Steinberg::kResultOk {
         return Err(format!(
-            "Failed to create plugin instance, result: {}",
+            "❌ Failed to create plugin instance, result: {}",
             result
         ));
     }
 
-    let plugin = unsafe { ComPtr::<IPluginBase>::from_raw(plugin_ptr) }
-        .ok_or("Failed to wrap IPluginBase")?;
+    let plugin =
+        ComPtr::<IPluginBase>::from_raw(plugin_ptr).ok_or("❌ Failed to wrap IPluginBase")?;
 
-    let edit_controller =
-        { plugin.cast::<IEditController>() }.ok_or("Failed to get IEditController")?;
+    // Use `cast` instead of `query_interface`
+    let edit_controller = plugin
+        .cast::<IEditController>()
+        .ok_or("❌ Failed to get IEditController")?;
 
-    let plug_view_ptr = unsafe { edit_controller.createView(b"editor\0".as_ptr() as *const _) };
+    let plug_view_ptr = edit_controller.createView(b"editor\0".as_ptr() as *const _);
     if plug_view_ptr.is_null() {
-        return Err("Failed to create IPlugView".into());
+        return Err("❌ Failed to create IPlugView".into());
     }
 
-    let plug_view = unsafe { ComPtr::<IPlugView>::from_raw(plug_view_ptr) }
-        .ok_or("Failed to wrap IPlugView")?;
+    let plug_view =
+        ComPtr::<IPlugView>::from_raw(plug_view_ptr).ok_or("❌ Failed to wrap IPlugView")?;
 
     Ok((plugin, plug_view))
 }
