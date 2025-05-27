@@ -885,14 +885,12 @@ impl VST3Inspector {
 
         #[cfg(target_os = "macos")]
         unsafe {
-            // Use the existing controller from our plugin_info if available
             if let Some(plugin_info) = &self.plugin_info {
                 if !plugin_info.has_gui {
                     return Err("Plugin does not have GUI according to inspection".to_string());
                 }
 
-                // We need to recreate the controller for GUI purposes
-                // This is necessary because the inspection process terminates the components
+                // Recreate the plugin components for GUI
                 let binary_path = match get_vst3_binary_path(self.plugin_path.as_str()) {
                     Ok(path) => path,
                     Err(e) => return Err(format!("Failed to get binary path: {}", e)),
@@ -942,24 +940,31 @@ impl VST3Inspector {
                     .ok_or("Failed to wrap component")?;
 
                 // Initialize component
-                component.initialize(ptr::null_mut());
+                let init_result = component.initialize(ptr::null_mut());
+                if init_result != vst3::Steinberg::kResultOk {
+                    component.terminate();
+                    return Err("Failed to initialize component".to_string());
+                }
 
                 // Get controller
                 let controller = match get_or_create_controller(&component, &factory, &audio_class_id)? {
                     Some(ctrl) => ctrl,
-                    None => return Err("No controller available for GUI".to_string()),
+                    None => {
+                        component.terminate();
+                        return Err("No controller available for GUI".to_string());
+                    }
                 };
 
                 // Connect components
                 let _ = connect_component_and_controller(&component, &controller);
 
-                // Try to create view with the standard "editor" view type
-                let editor_view_type = b"editor\\0".as_ptr() as *const i8;
+                // Create view using ViewType::kEditor (which is "editor")
+                let editor_view_type = b"editor\0".as_ptr() as *const i8;
                 let view_ptr = controller.createView(editor_view_type);
                 if view_ptr.is_null() {
                     controller.terminate();
                     component.terminate();
-                    return Err("Plugin does not support GUI".to_string());
+                    return Err("Controller does not provide editor view".to_string());
                 }
 
                 let view = ComPtr::<IPlugView>::from_raw(view_ptr).ok_or("Failed to wrap view")?;
@@ -972,7 +977,13 @@ impl VST3Inspector {
                     bottom: 300,
                 };
 
-                view.getSize(&mut view_rect);
+                let size_result = view.getSize(&mut view_rect);
+                if size_result != vst3::Steinberg::kResultOk {
+                    controller.terminate();
+                    component.terminate();
+                    return Err("Could not get editor view size".to_string());
+                }
+
                 let width = view_rect.right - view_rect.left;
                 let height = view_rect.bottom - view_rect.top;
 
@@ -984,8 +995,20 @@ impl VST3Inspector {
                 // Get the content view of the window
                 let content_view: id = msg_send![window, contentView];
 
+                // Check platform type support
+                let platform_type = b"NSView\0".as_ptr() as *const i8;
+                let platform_support = view.isPlatformTypeSupported(platform_type);
+                if platform_support != vst3::Steinberg::kResultOk {
+                    controller.terminate();
+                    component.terminate();
+                    let _: () = msg_send![window, close];
+                    return Err("PlugView does not support NSView platform type".to_string());
+                }
+
+                // Create a simple plug frame (we don't need full implementation for basic GUI)
+                // The view.setFrame call is optional for basic display
+                
                 // Attach the plugin view to the native window
-                let platform_type = b"NSView\\0".as_ptr() as *const i8;
                 let attach_result = view.attached(content_view as *mut _, platform_type);
 
                 if attach_result == vst3::Steinberg::kResultOk {
@@ -1008,6 +1031,7 @@ impl VST3Inspector {
                 } else {
                     controller.terminate();
                     component.terminate();
+                    let _: () = msg_send![window, close];
                     Err(format!("Failed to attach plugin view: {:#x}", attach_result))
                 }
             } else {
