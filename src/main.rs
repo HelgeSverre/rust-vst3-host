@@ -850,7 +850,7 @@ impl eframe::App for VST3Inspector {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                // Plugin info
+                // Plugin info - left side
                 ui.vertical(|ui| {
                     ui.heading(format!(
                         "{}",
@@ -867,53 +867,27 @@ impl eframe::App for VST3Inspector {
                     ));
                 });
 
-                // Justified layout - push GUI and Stats to the right
+                // Push GUI button to the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Stats section
-                    ui.vertical(|ui| {
-                        ui.strong("Stats");
-                        ui.add_space(6.0);
-                        if let Some(plugin_info) = &self.plugin_info {
-                            if let Some(ref controller_info) = plugin_info.controller_info {
-                                ui.label(format!(
-                                    "Parameters: {}",
-                                    controller_info.parameter_count
-                                ));
+                    // Large GUI button
+                    if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
+                        if self.gui_attached {
+                            if ui.add_sized([120.0, 40.0], egui::Button::new("🎨 Close GUI")).clicked() {
+                                self.close_plugin_gui();
                             }
-                            ui.label(format!("Classes: {}", plugin_info.classes.len()));
-                        }
-                    });
-
-                    ui.separator();
-                    ui.add_space(10.0);
-
-                    // GUI controls - always show to maintain consistent layout
-                    ui.vertical(|ui| {
-                        ui.strong("Plugin GUI");
-                        ui.add_space(6.0);
-
-                        ui.horizontal(|ui| {
-                            if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
-                                if self.gui_attached {
-                                    if ui.button("Close GUI").clicked() {
-                                        self.close_plugin_gui();
-                                    }
-                                } else {
-                                    if ui.button("Open GUI").clicked() {
-                                        if let Err(e) = self.create_plugin_gui() {
-                                            println!("❌ Failed to create plugin GUI: {}", e);
-                                        }
-                                    }
+                        } else {
+                            if ui.add_sized([120.0, 40.0], egui::Button::new("🎨 Open GUI")).clicked() {
+                                if let Err(e) = self.create_plugin_gui() {
+                                    println!("❌ Failed to create plugin GUI: {}", e);
                                 }
-                            } else {
-                                // Show disabled button and status when no GUI is available
-                                ui.add_enabled_ui(false, |ui| {
-                                    ui.button("Open GUI");
-                                });
-                                ui.colored_label(egui::Color32::DARK_GRAY, "No GUI Available");
                             }
+                        }
+                    } else {
+                        // Show disabled button when no GUI is available
+                        ui.add_enabled_ui(false, |ui| {
+                            ui.add_sized([120.0, 40.0], egui::Button::new("❌ No GUI"));
                         });
-                    });
+                    }
                 });
             });
             ui.add_space(8.0);
