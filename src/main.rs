@@ -5,7 +5,8 @@ use std::ptr;
 use vst3::Steinberg::Vst::{BusDirections_::*, MediaTypes_::*};
 // Import the constants
 use vst3::Steinberg::Vst::{
-    IAudioProcessor, IComponent, IComponentTrait, IConnectionPoint, IConnectionPointTrait,
+    IAudioProcessor, IComponent, IComponentHandler, IComponentHandlerTrait, IComponentTrait,
+    IConnectionPoint, IConnectionPointTrait,
     IEditController, IEditControllerTrait,
 };
 use vst3::Steinberg::{IPlugView, IPlugViewTrait, IPluginFactoryTrait};
@@ -148,6 +149,38 @@ impl PlugFrame {
 
     fn set_window(&mut self, window: id) {
         self.window = Some(window);
+    }
+}
+
+// ComponentHandler implementation for parameter change notifications
+struct ComponentHandler;
+
+impl ComponentHandler {
+    fn new() -> Self {
+        Self
+    }
+}
+
+// We need to implement the VST3 interface manually since the vst3 crate doesn't provide a trait impl
+impl ComponentHandler {
+    unsafe fn begin_edit(&self, id: u32) -> i32 {
+        println!("🎛️ Parameter edit started: ID {}", id);
+        vst3::Steinberg::kResultOk
+    }
+
+    unsafe fn perform_edit(&self, id: u32, value_normalized: f64) -> i32 {
+        println!("🎛️ Parameter changed: ID {} = {:.3}", id, value_normalized);
+        vst3::Steinberg::kResultOk
+    }
+
+    unsafe fn end_edit(&self, id: u32) -> i32 {
+        println!("🎛️ Parameter edit ended: ID {}", id);
+        vst3::Steinberg::kResultOk
+    }
+
+    unsafe fn restart_component(&self, flags: i32) -> i32 {
+        println!("🔄 Component restart requested: flags {:#x}", flags);
+        vst3::Steinberg::kResultOk
     }
 }
 
@@ -672,6 +705,9 @@ struct VST3Inspector {
     gui_attached: bool,
     #[cfg(target_os = "macos")]
     native_window: Option<id>,
+    // Parameter editing
+    component_handler: Option<ComponentHandler>,
+    selected_parameter: Option<usize>,
 }
 
 impl eframe::App for VST3Inspector {
@@ -802,40 +838,112 @@ impl VST3Inspector {
         }
     }
 
-    fn show_controller_info(&self, ui: &mut egui::Ui) {
+    fn show_controller_info(&mut self, ui: &mut egui::Ui) {
         ui.heading("🎛️ Controller Information");
 
-        if let Some(plugin_info) = &self.plugin_info {
+        // Clone the plugin info to avoid borrowing issues
+        let plugin_info_clone = self.plugin_info.clone();
+        
+        if let Some(plugin_info) = plugin_info_clone {
             if let Some(ref info) = plugin_info.controller_info {
                 ui.group(|ui| {
                     ui.strong(format!("Parameters: {}", info.parameter_count));
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("🔄 Refresh Parameter Values").clicked() {
+                            if let Err(e) = self.refresh_parameter_values() {
+                                println!("❌ Failed to refresh parameters: {}", e);
+                            }
+                        }
+                        
+                        if ui.button("❌ Close All Editors").clicked() {
+                            self.selected_parameter = None;
+                        }
+                    });
                 });
 
                 if !info.parameters.is_empty() {
                     ui.group(|ui| {
-                        ui.strong("Parameters");
+                        ui.strong("Parameter Controls");
+                        ui.label("Click on a parameter to edit its value:");
+                        
                         egui::ScrollArea::vertical()
-                            .max_height(300.0)
+                            .max_height(400.0)
                             .show(ui, |ui| {
-                                for param in &info.parameters {
+                                for (param_index, param) in info.parameters.iter().enumerate() {
                                     ui.group(|ui| {
-                                        ui.strong(&param.title);
-                                        ui.label(format!("ID: {}", param.id));
-                                        if !param.short_title.is_empty() {
-                                            ui.label(format!("Short: {}", param.short_title));
-                                        }
-                                        if !param.units.is_empty() {
-                                            ui.label(format!("Units: {}", param.units));
-                                        }
-                                        ui.label(format!(
-                                            "Default: {:.3}",
-                                            param.default_normalized_value
-                                        ));
-                                        ui.label(format!("Current: {:.3}", param.current_value));
-                                        if param.step_count > 0 {
-                                            ui.label(format!("Steps: {}", param.step_count));
-                                        }
-                                        ui.label(format!("Flags: 0x{:x}", param.flags));
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.strong(&param.title);
+                                                ui.label(format!("ID: {}", param.id));
+                                                if !param.short_title.is_empty() {
+                                                    ui.label(format!("Short: {}", param.short_title));
+                                                }
+                                                if !param.units.is_empty() {
+                                                    ui.label(format!("Units: {}", param.units));
+                                                }
+                                                ui.label(format!("Default: {:.3}", param.default_normalized_value));
+                                                if param.step_count > 0 {
+                                                    ui.label(format!("Steps: {}", param.step_count));
+                                                }
+                                                ui.label(format!("Flags: 0x{:x}", param.flags));
+                                            });
+                                            
+                                            ui.separator();
+                                            
+                                            ui.vertical(|ui| {
+                                                ui.label("Current Value:");
+                                                ui.strong(format!("{:.3}", param.current_value));
+                                                
+                                                // Add parameter editing controls
+                                                if ui.button("🎛️ Edit Parameter").clicked() {
+                                                    self.selected_parameter = Some(param_index);
+                                                    println!("Selected parameter {} for editing", param.title);
+                                                }
+                                                
+                                                // Show slider for selected parameter
+                                                if self.selected_parameter == Some(param_index) {
+                                                    ui.separator();
+                                                    ui.label("🎚️ Parameter Editor:");
+                                                    
+                                                    let mut new_value = param.current_value as f32;
+                                                    let changed = ui.add(
+                                                        egui::Slider::new(&mut new_value, 0.0..=1.0)
+                                                            .text("Value")
+                                                            .step_by(if param.step_count > 0 { (1.0 / param.step_count as f32) as f64 } else { 0.001 })
+                                                    ).changed();
+                                                    
+                                                    if changed {
+                                                        // Store the parameter change for later processing
+                                                        let param_id = param.id;
+                                                        let new_val = new_value as f64;
+                                                        
+                                                        // We'll process this after the UI update
+                                                        ui.ctx().request_repaint();
+                                                        
+                                                        // Set parameter value directly
+                                                        if let Err(e) = self.set_parameter_value(param_id, new_val) {
+                                                            println!("❌ Failed to set parameter: {}", e);
+                                                        }
+                                                    }
+                                                    
+                                                    ui.horizontal(|ui| {
+                                                        let param_id = param.id;
+                                                        let default_val = param.default_normalized_value;
+                                                        
+                                                        if ui.button("Reset to Default").clicked() {
+                                                            if let Err(e) = self.set_parameter_value(param_id, default_val) {
+                                                                println!("❌ Failed to reset parameter: {}", e);
+                                                            }
+                                                        }
+                                                        
+                                                        if ui.button("Close Editor").clicked() {
+                                                            self.selected_parameter = None;
+                                                        }
+                                                    });
+                                                }
+                                            });
+                                        });
                                     });
                                 }
                             });
@@ -965,6 +1073,10 @@ impl VST3Inspector {
 
                 // Connect components
                 let _ = connect_component_and_controller(&component, &controller);
+
+                // Set up component handler for parameter notifications
+                // Note: For now we'll skip the component handler setup as it requires
+                // more complex interface implementation. We'll focus on direct parameter control.
 
                 // Create view using ViewType::kEditor (which is "editor")
                 let editor_view_type = b"editor\0".as_ptr() as *const i8;
@@ -1117,6 +1229,50 @@ impl VST3Inspector {
             println!("✅ Plugin GUI closed");
         }
     }
+
+    fn set_parameter_value(&mut self, param_id: u32, normalized_value: f64) -> Result<(), String> {
+        if let Some(ref controller) = self.controller {
+            unsafe {
+                // Set the parameter value on the controller
+                let result = controller.setParamNormalized(param_id, normalized_value);
+                if result == vst3::Steinberg::kResultOk {
+                    println!("✅ Parameter {} set to {:.3}", param_id, normalized_value);
+                    
+                    // Update our cached parameter info
+                    if let Some(ref mut plugin_info) = self.plugin_info {
+                        if let Some(ref mut controller_info) = plugin_info.controller_info {
+                            if let Some(param) = controller_info.parameters.iter_mut().find(|p| p.id == param_id) {
+                                param.current_value = normalized_value;
+                            }
+                        }
+                    }
+                    
+                    Ok(())
+                } else {
+                    Err(format!("Failed to set parameter: {:#x}", result))
+                }
+            }
+        } else {
+            Err("No controller available".to_string())
+        }
+    }
+
+    fn refresh_parameter_values(&mut self) -> Result<(), String> {
+        if let Some(ref controller) = self.controller {
+            if let Some(ref mut plugin_info) = self.plugin_info {
+                if let Some(ref mut controller_info) = plugin_info.controller_info {
+                    unsafe {
+                        for param in &mut controller_info.parameters {
+                            param.current_value = controller.getParamNormalized(param.id);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            Err("No controller available".to_string())
+        }
+    }
 }
 
 impl VST3Inspector {
@@ -1131,6 +1287,9 @@ impl VST3Inspector {
             gui_attached: false,
             #[cfg(target_os = "macos")]
             native_window: None,
+            // Parameter editing
+            component_handler: None,
+            selected_parameter: None,
         }
     }
 }
