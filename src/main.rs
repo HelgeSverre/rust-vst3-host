@@ -5,8 +5,8 @@ use std::ptr;
 use vst3::Steinberg::Vst::{BusDirections_::*, MediaTypes_::*};
 // Import the constants
 use vst3::Steinberg::Vst::{
-    IAudioProcessor, IComponent, IComponentTrait,
-    IConnectionPoint, IConnectionPointTrait, IEditController, IEditControllerTrait,
+    IAudioProcessor, IComponent, IComponentTrait, IConnectionPoint, IConnectionPointTrait,
+    IEditController, IEditControllerTrait,
 };
 use vst3::Steinberg::{IPlugView, IPlugViewTrait, IPluginFactoryTrait};
 use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory};
