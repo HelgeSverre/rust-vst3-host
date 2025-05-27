@@ -837,6 +837,8 @@ struct VST3Inspector {
     items_per_page: usize,
     // Tab management
     current_tab: Tab,
+    // Inline editing state
+    parameter_being_edited: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -859,7 +861,7 @@ impl eframe::App for VST3Inspector {
         // Top header panel
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
-            
+
             // Plugin info - always shown at top
             ui.horizontal(|ui| {
                 // Plugin info - left side
@@ -910,10 +912,10 @@ impl eframe::App for VST3Inspector {
                     });
                 }
             });
-            
+
             ui.separator();
             ui.add_space(4.0);
-            
+
             // Tab buttons
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, Tab::Plugins, "🔌 Plugins");
@@ -956,7 +958,7 @@ impl VST3Inspector {
 
         TableBuilder::new(ui)
             .striped(true)
-            .resizable(true)
+            .resizable(false)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::remainder().at_least(200.0)) // Plugin Name
             .column(Column::remainder().at_least(300.0)) // Directory
@@ -985,7 +987,10 @@ impl VST3Inspector {
                         // Plugin Name
                         row.col(|ui| {
                             if is_current {
-                                ui.colored_label(egui::Color32::GREEN, format!("► {}", plugin_name));
+                                ui.colored_label(
+                                    egui::Color32::GREEN,
+                                    format!("► {}", plugin_name),
+                                );
                             } else {
                                 ui.label(&plugin_name);
                             }
@@ -993,7 +998,7 @@ impl VST3Inspector {
 
                         // Directory
                         row.col(|ui| {
-                            ui.label(directory);
+                            ui.label(plugin_path);
                         });
 
                         // Actions
@@ -1174,7 +1179,6 @@ impl VST3Inspector {
                                         });
                                     ui.add_space(4.0);
                                 });
-
                         } else {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(50.0);
@@ -1449,11 +1453,11 @@ impl VST3Inspector {
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::auto().at_least(40.0)) // Index
             .column(Column::auto().at_least(60.0)) // ID
-            .column(Column::remainder().at_least(200.0)) // Title
-            .column(Column::auto().at_least(80.0)) // Current Value
-            .column(Column::auto().at_least(80.0)) // Default
-            .column(Column::auto().at_least(60.0)) // Units
-            .column(Column::auto().at_least(60.0)) // Steps
+            .column(Column::remainder().at_least(180.0)) // Title
+            .column(Column::auto().at_least(150.0)) // Current Value (Slider)
+            .column(Column::auto().at_least(70.0)) // Default
+            .column(Column::auto().at_least(50.0)) // Units
+            .column(Column::auto().at_least(50.0)) // Steps
             .column(Column::auto().at_least(80.0)) // Actions
             .header(20.0, |mut header| {
                 header.col(|ui| {
@@ -1466,7 +1470,7 @@ impl VST3Inspector {
                     ui.strong("Parameter Name");
                 });
                 header.col(|ui| {
-                    ui.strong("Current");
+                    ui.strong("Value");
                 });
                 header.col(|ui| {
                     ui.strong("Default");
@@ -1486,8 +1490,9 @@ impl VST3Inspector {
                     let is_selected = self.selected_parameter == Some(*original_index);
                     let is_modified =
                         (param.current_value - param.default_normalized_value).abs() > 0.001;
+                    let is_read_only = (param.flags & 0x1) != 0;
 
-                    body.row(25.0, |mut row| {
+                    body.row(30.0, |mut row| {
                         // Index
                         row.col(|ui| {
                             if is_selected {
@@ -1514,15 +1519,101 @@ impl VST3Inspector {
                             }
                         });
 
-                        // Current Value
+                        // Current Value - Inline Editor
                         row.col(|ui| {
-                            if is_modified {
-                                ui.colored_label(
-                                    egui::Color32::LIGHT_GREEN,
-                                    format!("{:.3}", param.current_value),
-                                );
+                            if is_read_only {
+                                // Read-only parameters - just show the value
+                                ui.add_enabled(false, |ui: &mut egui::Ui| {
+                                    ui.label(format!("{:.3}", param.current_value))
+                                });
                             } else {
-                                ui.label(format!("{:.3}", param.current_value));
+                                // Editable parameters - show slider or drag value
+                                let mut new_value = param.current_value as f32;
+                                let step_size = if param.step_count > 0 {
+                                    1.0 / param.step_count as f32
+                                } else {
+                                    0.001
+                                };
+
+                                let is_being_edited = self.parameter_being_edited == Some(param.id);
+
+                                ui.horizontal(|ui| {
+                                    let response = if param.step_count > 0 && param.step_count <= 10
+                                    {
+                                        // For parameters with few steps, use a combo box
+                                        let current_step =
+                                            (param.current_value * param.step_count as f64).round()
+                                                as i32;
+                                        let mut selected_step = current_step;
+
+                                        let combo_response = egui::ComboBox::from_id_source(
+                                            format!("param_{}", param.id),
+                                        )
+                                        .selected_text(format!("{}", current_step))
+                                        .width(60.0)
+                                        .show_ui(ui, |ui| {
+                                            let mut changed = false;
+                                            for step in 0..=param.step_count {
+                                                if ui
+                                                    .selectable_value(
+                                                        &mut selected_step,
+                                                        step,
+                                                        format!("{}", step),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    changed = true;
+                                                }
+                                            }
+                                            changed
+                                        });
+
+                                        if combo_response.inner.unwrap_or(false) {
+                                            new_value =
+                                                selected_step as f32 / param.step_count as f32;
+                                            self.parameter_being_edited = Some(param.id);
+                                            if let Err(e) =
+                                                self.set_parameter_value(param.id, new_value as f64)
+                                            {
+                                                println!("❌ Failed to set parameter: {}", e);
+                                            }
+                                        }
+                                        combo_response.response
+                                    } else {
+                                        // For continuous parameters, use a compact slider
+                                        let slider_response = ui.add_sized(
+                                            [100.0, 20.0],
+                                            egui::Slider::new(&mut new_value, 0.0..=1.0)
+                                                .step_by(step_size as f64)
+                                                .show_value(false),
+                                        );
+
+                                        if slider_response.changed() {
+                                            self.parameter_being_edited = Some(param.id);
+                                            if let Err(e) =
+                                                self.set_parameter_value(param.id, new_value as f64)
+                                            {
+                                                println!("❌ Failed to set parameter: {}", e);
+                                            }
+                                        }
+
+                                        if slider_response.drag_stopped() {
+                                            self.parameter_being_edited = None;
+                                        }
+
+                                        slider_response
+                                    };
+
+                                    // Show numeric value with enhanced visual feedback
+                                    let color = if is_being_edited {
+                                        egui::Color32::YELLOW
+                                    } else if is_modified {
+                                        egui::Color32::LIGHT_GREEN
+                                    } else {
+                                        ui.style().visuals.text_color()
+                                    };
+                                    ui.colored_label(color, format!("{:.3}", param.current_value));
+                                });
                             }
                         });
 
@@ -1548,18 +1639,9 @@ impl VST3Inspector {
                         // Actions
                         row.col(|ui| {
                             ui.horizontal(|ui| {
-                                if ui
-                                    .small_button("Edit")
-                                    .on_hover_text("Edit parameter")
-                                    .clicked()
-                                {
-                                    self.selected_parameter = Some(*original_index);
-                                    self.table_scroll_to_selected = true;
-                                }
-
                                 if is_modified
                                     && ui
-                                        .small_button("Reset")
+                                        .small_button("↺")
                                         .on_hover_text("Reset to default")
                                         .clicked()
                                 {
@@ -1569,6 +1651,15 @@ impl VST3Inspector {
                                     ) {
                                         println!("❌ Failed to reset parameter: {}", e);
                                     }
+                                }
+
+                                if ui
+                                    .small_button("ⓘ")
+                                    .on_hover_text("Show detailed editor")
+                                    .clicked()
+                                {
+                                    self.selected_parameter = Some(*original_index);
+                                    self.table_scroll_to_selected = true;
                                 }
                             });
                         });
@@ -2215,6 +2306,7 @@ impl VST3Inspector {
             current_page: 0,
             items_per_page: 50,
             current_tab: Tab::Plugins,
+            parameter_being_edited: None,
         }
     }
 }
