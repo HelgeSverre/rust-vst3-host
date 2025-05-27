@@ -708,6 +708,20 @@ struct VST3Inspector {
     // Parameter editing
     component_handler: Option<ComponentHandler>,
     selected_parameter: Option<usize>,
+    // Parameter table UI
+    parameter_search: String,
+    parameter_filter: ParameterFilter,
+    show_only_modified: bool,
+    table_scroll_to_selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ParameterFilter {
+    All,
+    Writable,
+    ReadOnly,
+    HasSteps,
+    HasUnits,
 }
 
 impl eframe::App for VST3Inspector {
@@ -846,108 +860,80 @@ impl VST3Inspector {
         
         if let Some(plugin_info) = plugin_info_clone {
             if let Some(ref info) = plugin_info.controller_info {
+                // Get filtered parameters first
+                let filtered_params = self.get_filtered_parameters(&info.parameters);
+                
+                // Header with stats and controls
                 ui.group(|ui| {
-                    ui.strong(format!("Parameters: {}", info.parameter_count));
-                    
                     ui.horizontal(|ui| {
-                        if ui.button("🔄 Refresh Parameter Values").clicked() {
-                            if let Err(e) = self.refresh_parameter_values() {
-                                println!("❌ Failed to refresh parameters: {}", e);
+                        ui.vertical(|ui| {
+                            ui.strong(format!("Total Parameters: {}", info.parameter_count));
+                            if filtered_params.len() != info.parameters.len() {
+                                ui.label(format!("Filtered: {} parameters", filtered_params.len()));
                             }
-                        }
+                        });
                         
-                        if ui.button("❌ Close All Editors").clicked() {
-                            self.selected_parameter = None;
-                        }
+                        ui.separator();
+                        
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                if ui.button("🔄 Refresh Values").clicked() {
+                                    if let Err(e) = self.refresh_parameter_values() {
+                                        println!("❌ Failed to refresh parameters: {}", e);
+                                    }
+                                }
+                                
+                                if ui.button("❌ Close Editor").clicked() {
+                                    self.selected_parameter = None;
+                                }
+                            });
+                        });
                     });
                 });
 
-                if !info.parameters.is_empty() {
-                    ui.group(|ui| {
-                        ui.strong("Parameter Controls");
-                        ui.label("Click on a parameter to edit its value:");
+                ui.separator();
+
+                // Search and filter controls
+                ui.group(|ui| {
+                    ui.label("🔍 Search & Filter");
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Search:");
+                        let search_response = ui.text_edit_singleline(&mut self.parameter_search);
+                        if search_response.changed() {
+                            self.table_scroll_to_selected = true;
+                        }
                         
-                        egui::ScrollArea::vertical()
-                            .max_height(400.0)
-                            .show(ui, |ui| {
-                                for (param_index, param) in info.parameters.iter().enumerate() {
-                                    ui.group(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.vertical(|ui| {
-                                                ui.strong(&param.title);
-                                                ui.label(format!("ID: {}", param.id));
-                                                if !param.short_title.is_empty() {
-                                                    ui.label(format!("Short: {}", param.short_title));
-                                                }
-                                                if !param.units.is_empty() {
-                                                    ui.label(format!("Units: {}", param.units));
-                                                }
-                                                ui.label(format!("Default: {:.3}", param.default_normalized_value));
-                                                if param.step_count > 0 {
-                                                    ui.label(format!("Steps: {}", param.step_count));
-                                                }
-                                                ui.label(format!("Flags: 0x{:x}", param.flags));
-                                            });
-                                            
-                                            ui.separator();
-                                            
-                                            ui.vertical(|ui| {
-                                                ui.label("Current Value:");
-                                                ui.strong(format!("{:.3}", param.current_value));
-                                                
-                                                // Add parameter editing controls
-                                                if ui.button("🎛️ Edit Parameter").clicked() {
-                                                    self.selected_parameter = Some(param_index);
-                                                    println!("Selected parameter {} for editing", param.title);
-                                                }
-                                                
-                                                // Show slider for selected parameter
-                                                if self.selected_parameter == Some(param_index) {
-                                                    ui.separator();
-                                                    ui.label("🎚️ Parameter Editor:");
-                                                    
-                                                    let mut new_value = param.current_value as f32;
-                                                    let changed = ui.add(
-                                                        egui::Slider::new(&mut new_value, 0.0..=1.0)
-                                                            .text("Value")
-                                                            .step_by(if param.step_count > 0 { (1.0 / param.step_count as f32) as f64 } else { 0.001 })
-                                                    ).changed();
-                                                    
-                                                    if changed {
-                                                        // Store the parameter change for later processing
-                                                        let param_id = param.id;
-                                                        let new_val = new_value as f64;
-                                                        
-                                                        // We'll process this after the UI update
-                                                        ui.ctx().request_repaint();
-                                                        
-                                                        // Set parameter value directly
-                                                        if let Err(e) = self.set_parameter_value(param_id, new_val) {
-                                                            println!("❌ Failed to set parameter: {}", e);
-                                                        }
-                                                    }
-                                                    
-                                                    ui.horizontal(|ui| {
-                                                        let param_id = param.id;
-                                                        let default_val = param.default_normalized_value;
-                                                        
-                                                        if ui.button("Reset to Default").clicked() {
-                                                            if let Err(e) = self.set_parameter_value(param_id, default_val) {
-                                                                println!("❌ Failed to reset parameter: {}", e);
-                                                            }
-                                                        }
-                                                        
-                                                        if ui.button("Close Editor").clicked() {
-                                                            self.selected_parameter = None;
-                                                        }
-                                                    });
-                                                }
-                                            });
-                                        });
-                                    });
-                                }
-                            });
+                        if ui.button("❌").clicked() {
+                            self.parameter_search.clear();
+                        }
                     });
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Filter:");
+                        egui::ComboBox::from_label("")
+                            .selected_text(format!("{:?}", self.parameter_filter))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.parameter_filter, ParameterFilter::All, "All Parameters");
+                                ui.selectable_value(&mut self.parameter_filter, ParameterFilter::Writable, "Writable Only");
+                                ui.selectable_value(&mut self.parameter_filter, ParameterFilter::ReadOnly, "Read-Only");
+                                ui.selectable_value(&mut self.parameter_filter, ParameterFilter::HasSteps, "Has Steps");
+                                ui.selectable_value(&mut self.parameter_filter, ParameterFilter::HasUnits, "Has Units");
+                            });
+                        
+                        ui.checkbox(&mut self.show_only_modified, "Modified Only");
+                    });
+                });
+
+                ui.separator();
+
+                // Parameter table
+                if !info.parameters.is_empty() {
+                    if filtered_params.is_empty() {
+                        ui.label("No parameters match the current filter criteria.");
+                    } else {
+                        self.show_parameter_table(ui, &filtered_params);
+                    }
                 } else {
                     ui.label("No parameters found");
                 }
@@ -957,6 +943,215 @@ impl VST3Inspector {
         } else {
             ui.label("No plugin loaded");
         }
+    }
+
+    fn get_filtered_parameters<'a>(&self, parameters: &'a [ParameterInfo]) -> Vec<(usize, &'a ParameterInfo)> {
+        parameters
+            .iter()
+            .enumerate()
+            .filter(|(_, param)| {
+                // Search filter
+                if !self.parameter_search.is_empty() {
+                    let search_lower = self.parameter_search.to_lowercase();
+                    let title_match = param.title.to_lowercase().contains(&search_lower);
+                    let id_match = param.id.to_string().contains(&search_lower);
+                    let units_match = param.units.to_lowercase().contains(&search_lower);
+                    
+                    if !(title_match || id_match || units_match) {
+                        return false;
+                    }
+                }
+                
+                // Type filter
+                let type_matches = match self.parameter_filter {
+                    ParameterFilter::All => true,
+                    ParameterFilter::Writable => (param.flags & 0x1) == 0, // Not read-only
+                    ParameterFilter::ReadOnly => (param.flags & 0x1) != 0, // Read-only
+                    ParameterFilter::HasSteps => param.step_count > 0,
+                    ParameterFilter::HasUnits => !param.units.is_empty(),
+                };
+                
+                // Modified filter
+                let modified_matches = !self.show_only_modified || (param.current_value - param.default_normalized_value).abs() > 0.001;
+                
+                type_matches && modified_matches
+            })
+            .collect()
+    }
+
+    fn show_parameter_table(&mut self, ui: &mut egui::Ui, filtered_params: &[(usize, &ParameterInfo)]) {
+        use egui_extras::{Column, TableBuilder};
+        
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::auto().at_least(40.0))  // Index
+            .column(Column::auto().at_least(60.0))  // ID
+            .column(Column::remainder().at_least(200.0)) // Title
+            .column(Column::auto().at_least(80.0))  // Current Value
+            .column(Column::auto().at_least(80.0))  // Default
+            .column(Column::auto().at_least(60.0))  // Units
+            .column(Column::auto().at_least(60.0))  // Steps
+            .column(Column::auto().at_least(80.0))  // Actions
+            .header(20.0, |mut header| {
+                header.col(|ui| { ui.strong("Index"); });
+                header.col(|ui| { ui.strong("ID"); });
+                header.col(|ui| { ui.strong("Parameter Name"); });
+                header.col(|ui| { ui.strong("Current"); });
+                header.col(|ui| { ui.strong("Default"); });
+                header.col(|ui| { ui.strong("Units"); });
+                header.col(|ui| { ui.strong("Steps"); });
+                header.col(|ui| { ui.strong("Actions"); });
+            })
+            .body(|mut body| {
+                for (original_index, param) in filtered_params {
+                    let is_selected = self.selected_parameter == Some(*original_index);
+                    let is_modified = (param.current_value - param.default_normalized_value).abs() > 0.001;
+                    
+                    body.row(25.0, |mut row| {
+                        // Index
+                        row.col(|ui| {
+                            if is_selected {
+                                ui.colored_label(egui::Color32::YELLOW, format!("► {}", original_index));
+                            } else {
+                                ui.label(original_index.to_string());
+                            }
+                        });
+                        
+                        // ID
+                        row.col(|ui| {
+                            ui.label(param.id.to_string());
+                        });
+                        
+                        // Title
+                        row.col(|ui| {
+                            if is_modified {
+                                ui.colored_label(egui::Color32::LIGHT_GREEN, &param.title);
+                            } else {
+                                ui.label(&param.title);
+                            }
+                        });
+                        
+                        // Current Value
+                        row.col(|ui| {
+                            if is_modified {
+                                ui.colored_label(egui::Color32::LIGHT_GREEN, format!("{:.3}", param.current_value));
+                            } else {
+                                ui.label(format!("{:.3}", param.current_value));
+                            }
+                        });
+                        
+                        // Default Value
+                        row.col(|ui| {
+                            ui.label(format!("{:.3}", param.default_normalized_value));
+                        });
+                        
+                        // Units
+                        row.col(|ui| {
+                            ui.label(&param.units);
+                        });
+                        
+                        // Steps
+                        row.col(|ui| {
+                            if param.step_count > 0 {
+                                ui.label(param.step_count.to_string());
+                            } else {
+                                ui.label("∞");
+                            }
+                        });
+                        
+                        // Actions
+                        row.col(|ui| {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Edit️").on_hover_text("Edit parameter").clicked() {
+                                    self.selected_parameter = Some(*original_index);
+                                    self.table_scroll_to_selected = true;
+                                }
+                                
+                                if is_modified && ui.small_button("↺").on_hover_text("Reset to default").clicked() {
+                                    if let Err(e) = self.set_parameter_value(param.id, param.default_normalized_value) {
+                                        println!("❌ Failed to reset parameter: {}", e);
+                                    }
+                                }
+                            });
+                        });
+                    });
+                }
+            });
+
+        // Parameter editor panel (shown below table when parameter is selected)
+        if let Some(selected_index) = self.selected_parameter {
+            if let Some((_, selected_param)) = filtered_params.iter().find(|(idx, _)| *idx == selected_index) {
+                ui.separator();
+                self.show_parameter_editor(ui, selected_param);
+            }
+        }
+    }
+
+    fn show_parameter_editor(&mut self, ui: &mut egui::Ui, param: &ParameterInfo) {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.strong(format!("🎚️ Editing: {}", param.title));
+                    ui.label(format!("ID: {} | Range: 0.0 - 1.0", param.id));
+                    if !param.units.is_empty() {
+                        ui.label(format!("Units: {}", param.units));
+                    }
+                });
+                
+                ui.separator();
+                
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Value:");
+                        
+                        let mut new_value = param.current_value as f32;
+                        let step_size = if param.step_count > 0 { 
+                            1.0 / param.step_count as f32 
+                        } else { 
+                            0.001 
+                        };
+                        
+                        let slider_response = ui.add(
+                            egui::Slider::new(&mut new_value, 0.0..=1.0)
+                                .step_by(step_size as f64)
+                                .show_value(true)
+                        );
+                        
+                        if slider_response.changed() {
+                            if let Err(e) = self.set_parameter_value(param.id, new_value as f64) {
+                                println!("❌ Failed to set parameter: {}", e);
+                            }
+                        }
+                    });
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset to Default").clicked() {
+                            if let Err(e) = self.set_parameter_value(param.id, param.default_normalized_value) {
+                                println!("❌ Failed to reset parameter: {}", e);
+                            }
+                        }
+                        
+                        if ui.button("Set to 0.0").clicked() {
+                            if let Err(e) = self.set_parameter_value(param.id, 0.0) {
+                                println!("❌ Failed to set parameter: {}", e);
+                            }
+                        }
+                        
+                        if ui.button("Set to 1.0").clicked() {
+                            if let Err(e) = self.set_parameter_value(param.id, 1.0) {
+                                println!("❌ Failed to set parameter: {}", e);
+                            }
+                        }
+                        
+                        if ui.button("❌ Close Editor").clicked() {
+                            self.selected_parameter = None;
+                        }
+                    });
+                });
+            });
+        });
     }
 
     fn show_gui_info(&mut self, ui: &mut egui::Ui) {
@@ -1290,6 +1485,11 @@ impl VST3Inspector {
             // Parameter editing
             component_handler: None,
             selected_parameter: None,
+            // Parameter table UI
+            parameter_search: String::new(),
+            parameter_filter: ParameterFilter::All,
+            show_only_modified: false,
+            table_scroll_to_selected: false,
         }
     }
 }
