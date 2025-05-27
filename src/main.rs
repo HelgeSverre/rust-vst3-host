@@ -24,13 +24,32 @@ use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
 #[cfg(target_os = "macos")]
 use objc::{msg_send, sel, sel_impl};
 
-// const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/SPAN.vst3";
-// const PLUGIN_PATH: &str = "/Users/helge/code/vst-host/tmp/Dexed.vst3";
-// const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/Ozone Imager 2.vst3";
-// const PLUGIN_PATH: &str = "/Users/helge/code/vst-host/tmp/Dexed.vst3/Contents/MacOS/Dexed";
-// const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/OsTIrus.vst3";
+// Windows native window support
+#[cfg(target_os = "windows")]
+use std::ffi::OsStr;
+#[cfg(target_os = "windows")]
+use std::iter::once;
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use winapi::shared::minwindef::{HINSTANCE, HWND, LPARAM, LRESULT, UINT, WPARAM};
+#[cfg(target_os = "windows")]
+use winapi::shared::windef::RECT;
+#[cfg(target_os = "windows")]
+use winapi::um::libloaderapi::GetModuleHandleW;
+#[cfg(target_os = "windows")]
+use winapi::um::winuser::{
+    CreateWindowExW, DefWindowProcW, LoadCursorW, RegisterClassExW, ShowWindow, UpdateWindow,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, SW_SHOW, WM_DESTROY, WM_QUIT, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW,
+};
+
+// Platform-specific plugin paths - adjust these for your system
+#[cfg(target_os = "macos")]
 const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/HY-MPS3 free.vst3";
-// const PLUGIN_PATH: &str = "/Users/helge/code/vst-host/tmp/nimble/Nimble Kick.vst3/Contents/MacOS/Nimble Kick";
+
+#[cfg(target_os = "windows")]
+const PLUGIN_PATH: &str = r"C:\Program Files\Common Files\VST3\HY-MPS3 free.vst3";
 
 // Helper function to find the correct binary path in VST3 bundle
 fn get_vst3_binary_path(bundle_path: &str) -> Result<String, String> {
@@ -41,30 +60,61 @@ fn get_vst3_binary_path(bundle_path: &str) -> Result<String, String> {
         return Ok(bundle_path.to_string());
     }
 
-    // If it's a .vst3 bundle, look for the binary inside
-    if bundle_path.ends_with(".vst3") {
-        let contents_path = path.join("Contents").join("MacOS");
-        if let Ok(entries) = std::fs::read_dir(&contents_path) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let file_path = entry.path();
-                    if file_path.is_file() {
-                        if let Some(name) = file_path.file_name() {
-                            if let Some(name_str) = name.to_str() {
-                                // Skip hidden files and common non-binary files
-                                if !name_str.starts_with('.')
-                                    && !name_str.ends_with(".plist")
-                                    && !name_str.ends_with(".txt")
-                                {
-                                    return Ok(file_path.to_string_lossy().to_string());
+    // Platform-specific VST3 bundle handling
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: .vst3 bundle structure
+        if bundle_path.ends_with(".vst3") {
+            let contents_path = path.join("Contents").join("MacOS");
+            if let Ok(entries) = std::fs::read_dir(&contents_path) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let file_path = entry.path();
+                        if file_path.is_file() {
+                            if let Some(name) = file_path.file_name() {
+                                if let Some(name_str) = name.to_str() {
+                                    // Skip hidden files and common non-binary files
+                                    if !name_str.starts_with('.')
+                                        && !name_str.ends_with(".plist")
+                                        && !name_str.ends_with(".txt")
+                                    {
+                                        return Ok(file_path.to_string_lossy().to_string());
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            return Err(format!("No binary found in VST3 bundle: {}", bundle_path));
         }
-        return Err(format!("No binary found in VST3 bundle: {}", bundle_path));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: .vst3 bundle structure
+        if bundle_path.ends_with(".vst3") {
+            let contents_path = path.join("Contents");
+            let arch_path = if cfg!(target_arch = "x86_64") {
+                contents_path.join("x86_64-win")
+            } else {
+                contents_path.join("x86-win")
+            };
+
+            if let Ok(entries) = std::fs::read_dir(&arch_path) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let file_path = entry.path();
+                        if file_path.is_file()
+                            && file_path.extension() == Some(std::ffi::OsStr::new("vst3"))
+                        {
+                            return Ok(file_path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+            return Err(format!("No binary found in VST3 bundle: {}", bundle_path));
+        }
     }
 
     Err(format!("Invalid VST3 path: {}", bundle_path))
@@ -134,7 +184,7 @@ struct ParameterInfo {
     current_value: f64,
 }
 
-// Simple PlugFrame implementation for GUI support
+// Platform-specific PlugFrame implementations
 #[cfg(target_os = "macos")]
 struct PlugFrame {
     window: Option<id>,
@@ -147,6 +197,22 @@ impl PlugFrame {
     }
 
     fn set_window(&mut self, window: id) {
+        self.window = Some(window);
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct PlugFrame {
+    window: Option<HWND>,
+}
+
+#[cfg(target_os = "windows")]
+impl PlugFrame {
+    fn new() -> Self {
+        Self { window: None }
+    }
+
+    fn set_window(&mut self, window: HWND) {
         self.window = Some(window);
     }
 }
@@ -199,6 +265,9 @@ fn main() {
         Box::new(|_cc| {
             let mut inspector = VST3Inspector::from_path(PLUGIN_PATH);
 
+            // Scan for available plugins
+            inspector.discovered_plugins = scan_vst3_directories();
+
             // Try to load the default plugin
             let binary_path = match get_vst3_binary_path(&inspector.plugin_path) {
                 Ok(path) => path,
@@ -223,17 +292,40 @@ fn main() {
     );
 }
 
+// Platform-specific library loading
+#[cfg(target_os = "macos")]
+unsafe fn load_vst3_library(path: &str) -> Result<Library, String> {
+    Library::new(path).map_err(|e| format!("❌ Failed to load VST3 bundle: {}", e))
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn load_vst3_library(path: &str) -> Result<libloading::Library, String> {
+    libloading::Library::new(path).map_err(|e| format!("❌ Failed to load VST3 bundle: {}", e))
+}
+
 unsafe fn inspect_vst3_plugin(path: &str) -> Result<PluginInfo, String> {
     println!("🔍 ========== VST3 PLUGIN INSPECTION ==========");
     println!("📂 Loading library: {}", path);
 
-    let lib = Library::new(path).map_err(|e| format!("❌ Failed to load VST3 bundle: {}", e))?;
+    #[cfg(target_os = "macos")]
+    let lib = load_vst3_library(path)?;
+    #[cfg(target_os = "windows")]
+    let lib = load_vst3_library(path)?;
+
     println!("✅ Library loaded successfully");
 
     println!("🔧 Looking for GetPluginFactory symbol...");
+
+    #[cfg(target_os = "macos")]
     let get_factory: Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> = lib
         .get(b"GetPluginFactory")
         .map_err(|e| format!("❌ Failed to load `GetPluginFactory`: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    let get_factory: libloading::Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> = lib
+        .get(b"GetPluginFactory")
+        .map_err(|e| format!("❌ Failed to load `GetPluginFactory`: {}", e))?;
+
     println!("✅ GetPluginFactory symbol found");
 
     println!("🔧 Calling GetPluginFactory...");
@@ -693,17 +785,43 @@ unsafe fn utf16_to_string_i16(ptr: &[i16]) -> String {
     String::from_utf16_lossy(&u16_slice)
 }
 
+// Windows-specific helper functions
+#[cfg(target_os = "windows")]
+fn win32_string(value: &str) -> Vec<u16> {
+    OsStr::new(value).encode_wide().chain(once(0)).collect()
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn window_proc(
+    hwnd: HWND,
+    msg: UINT,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_DESTROY => {
+            winapi::um::winuser::PostQuitMessage(0);
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
 struct VST3Inspector {
     plugin_path: String,
     plugin_info: Option<PluginInfo>,
-    selected_tab: usize,
+    // Plugin discovery
+    discovered_plugins: Vec<String>,
     // GUI management
     plugin_view: Option<ComPtr<IPlugView>>,
     controller: Option<ComPtr<IEditController>>,
     component: Option<ComPtr<IComponent>>,
     gui_attached: bool,
+    // Platform-specific native window
     #[cfg(target_os = "macos")]
     native_window: Option<id>,
+    #[cfg(target_os = "windows")]
+    native_window: Option<HWND>,
     // Parameter editing
     component_handler: Option<ComponentHandler>,
     selected_parameter: Option<usize>,
@@ -712,6 +830,9 @@ struct VST3Inspector {
     parameter_filter: ParameterFilter,
     show_only_modified: bool,
     table_scroll_to_selected: bool,
+    // Pagination
+    current_page: usize,
+    items_per_page: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -725,283 +846,499 @@ enum ParameterFilter {
 
 impl eframe::App for VST3Inspector {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading(format!(
-                "VST3 Plugin Inspector - {} - {}",
-                self.plugin_info
-                    .as_ref()
-                    .map_or("Unknown", |p| &p.factory_info.vendor),
-                self.plugin_info
-                    .as_ref()
-                    .and_then(|p| p.classes.first())
-                    .map_or("Unknown", |c| &c.name)
-            ));
-
-            // Tab selection
+        // Top header panel
+        egui::TopBottomPanel::top("header").show(ctx, |ui| {
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.selected_tab, 0, "Factory");
-                ui.selectable_value(&mut self.selected_tab, 1, "Classes");
-                ui.selectable_value(&mut self.selected_tab, 2, "Component");
-                ui.selectable_value(&mut self.selected_tab, 3, "Controller");
+                // Plugin info
+                ui.vertical(|ui| {
+                    ui.heading(format!(
+                        "{}",
+                        self.plugin_info
+                            .as_ref()
+                            .and_then(|p| p.classes.first())
+                            .map_or("VST3 Plugin Inspector", |c| &c.name)
+                    ));
+                    ui.label(format!(
+                        "by {}",
+                        self.plugin_info
+                            .as_ref()
+                            .map_or("Unknown", |p| &p.factory_info.vendor)
+                    ));
+                });
+
+                ui.add_space(20.0);
+
+                // GUI controls
                 if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
-                    ui.selectable_value(&mut self.selected_tab, 4, "GUI");
+                    ui.separator();
+                    ui.add_space(10.0);
+
+                    ui.vertical(|ui| {
+                        ui.strong("Plugin GUI");
+                        ui.horizontal(|ui| {
+                            if self.gui_attached {
+                                if ui.button("Close GUI").clicked() {
+                                    self.close_plugin_gui();
+                                }
+                                ui.colored_label(egui::Color32::GREEN, "Open");
+                            } else {
+                                if ui.button("Open GUI").clicked() {
+                                    if let Err(e) = self.create_plugin_gui() {
+                                        println!("❌ Failed to create plugin GUI: {}", e);
+                                    }
+                                }
+                                ui.colored_label(egui::Color32::GRAY, "Closed");
+                            }
+                        });
+                    });
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.vertical(|ui| {
+                        ui.strong("Stats");
+                        if let Some(plugin_info) = &self.plugin_info {
+                            if let Some(ref controller_info) = plugin_info.controller_info {
+                                ui.label(format!(
+                                    "Parameters: {}",
+                                    controller_info.parameter_count
+                                ));
+                            }
+                            ui.label(format!("Classes: {}", plugin_info.classes.len()));
+                        }
+                    });
+                });
+            });
+            ui.add_space(8.0);
+        });
+
+        // Left sidebar for plugin information
+        egui::SidePanel::left("plugin_info_panel")
+            .resizable(true)
+            .default_width(300.0)
+            .min_width(250.0)
+            .max_width(500.0)
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+
+                // Plugin Scanner Section
+                ui.heading("Available Plugins");
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(format!("Found {} plugins", self.discovered_plugins.len()));
+                    if ui.button("Refresh").clicked() {
+                        self.discovered_plugins = scan_vst3_directories();
+                    }
+                });
+
+                ui.add_space(4.0);
+
+                let mut selected_plugin: Option<String> = None;
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        for plugin_path in &self.discovered_plugins {
+                            let plugin_name = get_plugin_name_from_path(plugin_path);
+                            let is_current = self.plugin_path == *plugin_path;
+
+                            ui.horizontal(|ui| {
+                                if is_current {
+                                    ui.colored_label(egui::Color32::GREEN, "►");
+                                } else {
+                                    ui.label(" ");
+                                }
+
+                                if ui.selectable_label(is_current, &plugin_name).clicked()
+                                    && !is_current
+                                {
+                                    selected_plugin = Some(plugin_path.clone());
+                                }
+                            });
+                        }
+                    });
+
+                if let Some(plugin_path) = selected_plugin {
+                    self.load_plugin(plugin_path);
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.heading("Plugin Information");
+                ui.add_space(8.0);
+
+                if let Some(plugin_info) = &self.plugin_info {
+                    // Factory Information
+                    ui.strong("Factory Information");
+                    ui.add_space(4.0);
+                    egui::Grid::new("factory_grid")
+                        .num_columns(2)
+                        .spacing([10.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label("Vendor:");
+                            ui.label(&plugin_info.factory_info.vendor);
+                            ui.end_row();
+
+                            ui.label("URL:");
+                            ui.label(&plugin_info.factory_info.url);
+                            ui.end_row();
+
+                            ui.label("Email:");
+                            ui.label(&plugin_info.factory_info.email);
+                            ui.end_row();
+
+                            ui.label("Flags:");
+                            ui.label(format!("0x{:x}", plugin_info.factory_info.flags));
+                            ui.end_row();
+                        });
+
+                    ui.add_space(8.0);
+
+                    ui.add_space(8.0);
+                    ui.strong("Plugin Classes");
+                    ui.add_space(4.0);
+                    ui.add_space(4.0);
+                    if plugin_info.classes.is_empty() {
+                        ui.label("No classes found.");
+                    } else {
+                        for (i, class) in plugin_info.classes.iter().enumerate() {
+                            ui.group(|ui| {
+                                ui.strong(format!("Class {}: {}", i, class.name));
+                                ui.separator();
+                                egui::Grid::new(format!("class_grid_{}", i))
+                                    .num_columns(2)
+                                    .spacing([10.0, 2.0])
+                                    .show(ui, |ui| {
+                                        ui.label("Category:");
+                                        ui.label(&class.category);
+                                        ui.end_row();
+
+                                        ui.label("Flags:");
+                                        ui.label(format!("0x{:x}", class.cardinality));
+                                        ui.end_row();
+                                    });
+                            });
+                            ui.add_space(4.0);
+                        }
+                    }
+
+                    ui.add_space(8.0);
+
+                    // Component Information
+                    if let Some(ref info) = plugin_info.component_info {
+                        ui.collapsing("🔧 Component Information", |ui| {
+                            ui.add_space(4.0);
+
+                            ui.strong("Bus Counts");
+                            egui::Grid::new("bus_counts_grid")
+                                .num_columns(2)
+                                .spacing([10.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.label("Audio Inputs:");
+                                    ui.label(info.audio_inputs.len().to_string());
+                                    ui.end_row();
+
+                                    ui.label("Audio Outputs:");
+                                    ui.label(info.audio_outputs.len().to_string());
+                                    ui.end_row();
+
+                                    ui.label("Event Inputs:");
+                                    ui.label(info.event_inputs.len().to_string());
+                                    ui.end_row();
+
+                                    ui.label("Event Outputs:");
+                                    ui.label(info.event_outputs.len().to_string());
+                                    ui.end_row();
+                                });
+
+                            ui.add_space(8.0);
+
+                            if !info.audio_inputs.is_empty() {
+                                ui.strong("🎤 Audio Inputs");
+                                for (i, bus) in info.audio_inputs.iter().enumerate() {
+                                    ui.label(format!(
+                                        "  {} - {} channels",
+                                        bus.name, bus.channel_count
+                                    ));
+                                }
+                                ui.add_space(4.0);
+                            }
+
+                            if !info.audio_outputs.is_empty() {
+                                ui.strong("🔊 Audio Outputs");
+                                for (i, bus) in info.audio_outputs.iter().enumerate() {
+                                    ui.label(format!(
+                                        "  {} - {} channels",
+                                        bus.name, bus.channel_count
+                                    ));
+                                }
+                                ui.add_space(4.0);
+                            }
+                        });
+                    }
+                } else {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(50.0);
+                        ui.label("❌ No plugin loaded");
+                        ui.add_space(10.0);
+                        ui.label("Load a VST3 plugin to view its information");
+                    });
                 }
             });
 
-            ui.separator();
+        // Central panel for parameters
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.heading("Parameter Control");
+            ui.add_space(8.0);
 
-            egui::ScrollArea::vertical().show(ui, |ui| match self.selected_tab {
-                0 => self.show_factory_info(ui),
-                1 => self.show_classes_info(ui),
-                2 => self.show_component_tab(ui),
-                3 => self.show_controller_info(ui),
-                4 => self.show_gui_info(ui),
-                _ => {}
-            });
+            // Clone the plugin info to avoid borrowing issues
+            let plugin_info_clone = self.plugin_info.clone();
+
+            if let Some(plugin_info) = plugin_info_clone {
+                if let Some(ref info) = plugin_info.controller_info {
+                    // Get filtered parameters first
+                    let filtered_params = self.get_filtered_parameters(&info.parameters);
+
+                    // Parameter editor (shown prominently at top when selected)
+                    if let Some(selected_index) = self.selected_parameter {
+                        if let Some((_, selected_param)) = filtered_params
+                            .iter()
+                            .find(|(idx, _)| *idx == selected_index)
+                        {
+                            ui.group(|ui| {
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.heading("Parameter Editor");
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.button("Close").clicked() {
+                                                self.selected_parameter = None;
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.separator();
+                                ui.add_space(4.0);
+                                self.show_parameter_editor(ui, selected_param);
+                                ui.add_space(8.0);
+                            });
+                            ui.add_space(8.0);
+                        }
+                    }
+
+                    // Control panel
+                    ui.group(|ui| {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            // Stats
+                            ui.vertical(|ui| {
+                                ui.strong(format!("{} Parameters Total", info.parameter_count));
+                                if filtered_params.len() != info.parameters.len() {
+                                    ui.label(format!("{} Filtered", filtered_params.len()));
+                                }
+                            });
+
+                            ui.separator();
+
+                            // Actions
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.button("Refresh Values").clicked() {
+                                        if let Err(e) = self.refresh_parameter_values() {
+                                            println!("❌ Failed to refresh parameters: {}", e);
+                                        }
+                                    }
+                                });
+                            });
+                        });
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // Search and filter controls
+                        ui.horizontal(|ui| {
+                            ui.label("Search:");
+                            let search_response =
+                                ui.text_edit_singleline(&mut self.parameter_search);
+                            if search_response.changed() {
+                                self.current_page = 0;
+                                self.table_scroll_to_selected = true;
+                            }
+
+                            if ui.button("Clear").clicked() {
+                                self.parameter_search.clear();
+                                self.current_page = 0;
+                            }
+
+                            ui.separator();
+
+                            ui.label("Filter:");
+                            let filter_changed = egui::ComboBox::from_label("")
+                                .selected_text(format!("{:?}", self.parameter_filter))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.parameter_filter,
+                                        ParameterFilter::All,
+                                        "All Parameters",
+                                    )
+                                    .clicked()
+                                        || ui
+                                            .selectable_value(
+                                                &mut self.parameter_filter,
+                                                ParameterFilter::Writable,
+                                                "Writable Only",
+                                            )
+                                            .clicked()
+                                        || ui
+                                            .selectable_value(
+                                                &mut self.parameter_filter,
+                                                ParameterFilter::ReadOnly,
+                                                "Read-Only",
+                                            )
+                                            .clicked()
+                                        || ui
+                                            .selectable_value(
+                                                &mut self.parameter_filter,
+                                                ParameterFilter::HasSteps,
+                                                "Has Steps",
+                                            )
+                                            .clicked()
+                                        || ui
+                                            .selectable_value(
+                                                &mut self.parameter_filter,
+                                                ParameterFilter::HasUnits,
+                                                "Has Units",
+                                            )
+                                            .clicked()
+                                })
+                                .inner
+                                .unwrap_or(false);
+
+                            if filter_changed {
+                                self.current_page = 0;
+                            }
+
+                            let modified_changed =
+                                ui.checkbox(&mut self.show_only_modified, "Modified Only");
+                            if modified_changed.changed() {
+                                self.current_page = 0;
+                            }
+                        });
+                        ui.add_space(4.0);
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Pagination and table
+                    if !filtered_params.is_empty() {
+                        let total_pages =
+                            (filtered_params.len() + self.items_per_page - 1) / self.items_per_page;
+                        let start_idx = self.current_page * self.items_per_page;
+                        let end_idx = (start_idx + self.items_per_page).min(filtered_params.len());
+
+                        // Pagination controls
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "Page {} of {} - Showing {}-{} of {} parameters",
+                                    self.current_page + 1,
+                                    total_pages,
+                                    start_idx + 1,
+                                    end_idx,
+                                    filtered_params.len()
+                                ));
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        // Items per page
+                                        egui::ComboBox::from_label("Items per page")
+                                            .selected_text(self.items_per_page.to_string())
+                                            .show_ui(ui, |ui| {
+                                                for &size in &[25, 50, 100, 200] {
+                                                    if ui
+                                                        .selectable_value(
+                                                            &mut self.items_per_page,
+                                                            size,
+                                                            size.to_string(),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        self.current_page = 0;
+                                                    }
+                                                }
+                                            });
+
+                                        ui.separator();
+
+                                        // Navigation
+                                        ui.add_enabled_ui(
+                                            self.current_page + 1 < total_pages,
+                                            |ui| {
+                                                if ui.button("Next ▶").clicked() {
+                                                    self.current_page += 1;
+                                                }
+                                            },
+                                        );
+
+                                        ui.add_enabled_ui(self.current_page > 0, |ui| {
+                                            if ui.button("◀ Previous").clicked() {
+                                                self.current_page -= 1;
+                                            }
+                                        });
+                                    },
+                                );
+                            });
+                        });
+
+                        ui.add_space(8.0);
+
+                        // Get current page parameters
+                        let page_params: Vec<_> = filtered_params
+                            .iter()
+                            .skip(start_idx)
+                            .take(self.items_per_page)
+                            .cloned()
+                            .collect();
+
+                        self.show_parameter_table(ui, &page_params);
+                    } else if !info.parameters.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(50.0);
+                            ui.label("No parameters match the current filter criteria.");
+                            ui.add_space(10.0);
+                            ui.label("Try adjusting your search or filter settings.");
+                        });
+                    } else {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(50.0);
+                            ui.label("No parameters found");
+                        });
+                    }
+                } else {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(50.0);
+                        ui.label("No controller information available");
+                    });
+                }
+            } else {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(100.0);
+                    ui.heading("🎵 VST3 Plugin Inspector");
+                    ui.add_space(20.0);
+                    ui.label("Load a VST3 plugin to begin inspection");
+                });
+            }
         });
     }
 }
 
 impl VST3Inspector {
-    fn show_factory_info(&self, ui: &mut egui::Ui) {
-        ui.heading("Factory Information");
-
-        ui.group(|ui| {
-            ui.label(format!(
-                "Vendor: {}",
-                self.plugin_info
-                    .as_ref()
-                    .map_or("Unknown", |p| &p.factory_info.vendor)
-            ));
-            ui.label(format!(
-                "URL: {}",
-                self.plugin_info
-                    .as_ref()
-                    .map_or("Unknown", |p| &p.factory_info.url)
-            ));
-            ui.label(format!(
-                "Email: {}",
-                self.plugin_info
-                    .as_ref()
-                    .map_or("Unknown", |p| &p.factory_info.email)
-            ));
-            ui.label(format!(
-                "Flags: 0x{:x}",
-                self.plugin_info
-                    .as_ref()
-                    .map_or(0, |p| p.factory_info.flags)
-            ));
-        });
-    }
-
-    fn show_classes_info(&self, ui: &mut egui::Ui) {
-        ui.heading("Plugin Classes");
-
-        if let Some(plugin_info) = &self.plugin_info {
-            for (i, class) in plugin_info.classes.iter().enumerate() {
-                ui.group(|ui| {
-                    ui.strong(format!("Class {}: {}", i, class.name));
-                    ui.label(format!("Category: {}", class.category));
-                    ui.label(format!("Flags: 0x{:x}", class.cardinality));
-                    ui.label(format!("Class ID: {}", class.class_id));
-                });
-            }
-        } else {
-            ui.label("No plugin loaded");
-        }
-    }
-
-    fn show_component_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Component Information");
-
-        if let Some(plugin_info) = &self.plugin_info {
-            if let Some(ref info) = plugin_info.component_info {
-                ui.group(|ui| {
-                    ui.strong("Bus Counts");
-                    ui.label(format!("Audio Input Buses: {}", info.audio_inputs.len()));
-                    ui.label(format!("Audio Output Buses: {}", info.audio_outputs.len()));
-                    ui.label(format!("Event Input Buses: {}", info.event_inputs.len()));
-                    ui.label(format!("Event Output Buses: {}", info.event_outputs.len()));
-                });
-
-                ui.group(|ui| {
-                    ui.strong("Audio Input Buses");
-                    for (i, bus) in info.audio_inputs.iter().enumerate() {
-                        ui.label(format!(
-                            "Bus {}: {} - {} channels",
-                            i, bus.name, bus.channel_count
-                        ));
-                    }
-                });
-
-                ui.group(|ui| {
-                    ui.strong("Audio Output Buses");
-                    for (i, bus) in info.audio_outputs.iter().enumerate() {
-                        ui.label(format!(
-                            "Bus {}: {} - {} channels",
-                            i, bus.name, bus.channel_count
-                        ));
-                    }
-                });
-            } else {
-                ui.label("No component information available");
-            }
-        } else {
-            ui.label("No plugin loaded");
-        }
-    }
-
-    fn show_controller_info(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Controller Information");
-
-        // Clone the plugin info to avoid borrowing issues
-        let plugin_info_clone = self.plugin_info.clone();
-
-        if let Some(plugin_info) = plugin_info_clone {
-            if let Some(ref info) = plugin_info.controller_info {
-                // Get filtered parameters first
-                let filtered_params = self.get_filtered_parameters(&info.parameters);
-
-                // Header with stats and controls
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.strong(format!("Total Parameters: {}", info.parameter_count));
-                            if filtered_params.len() != info.parameters.len() {
-                                ui.label(format!("Filtered: {} parameters", filtered_params.len()));
-                            }
-                        });
-
-                        ui.separator();
-
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                if ui.button("Refresh Values").clicked() {
-                                    if let Err(e) = self.refresh_parameter_values() {
-                                        println!("❌ Failed to refresh parameters: {}", e);
-                                    }
-                                }
-
-                                if ui.button("Close Editor").clicked() {
-                                    self.selected_parameter = None;
-                                }
-                            });
-                        });
-                    });
-                });
-
-                ui.separator();
-
-                // Search and filter controls
-                ui.group(|ui| {
-                    ui.label("Search & Filter");
-
-                    ui.horizontal(|ui| {
-                        ui.label("Search:");
-                        let search_response = ui.text_edit_singleline(&mut self.parameter_search);
-                        if search_response.changed() {
-                            self.table_scroll_to_selected = true;
-                        }
-
-                        if ui.button("Clear").clicked() {
-                            self.parameter_search.clear();
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Filter:");
-                        egui::ComboBox::from_label("")
-                            .selected_text(format!("{:?}", self.parameter_filter))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.parameter_filter,
-                                    ParameterFilter::All,
-                                    "All Parameters",
-                                );
-                                ui.selectable_value(
-                                    &mut self.parameter_filter,
-                                    ParameterFilter::Writable,
-                                    "Writable Only",
-                                );
-                                ui.selectable_value(
-                                    &mut self.parameter_filter,
-                                    ParameterFilter::ReadOnly,
-                                    "Read-Only",
-                                );
-                                ui.selectable_value(
-                                    &mut self.parameter_filter,
-                                    ParameterFilter::HasSteps,
-                                    "Has Steps",
-                                );
-                                ui.selectable_value(
-                                    &mut self.parameter_filter,
-                                    ParameterFilter::HasUnits,
-                                    "Has Units",
-                                );
-                            });
-
-                        ui.checkbox(&mut self.show_only_modified, "Modified Only");
-                    });
-                });
-
-                ui.separator();
-
-                // Parameter table
-                if !info.parameters.is_empty() {
-                    if filtered_params.is_empty() {
-                        ui.label("No parameters match the current filter criteria.");
-                    } else {
-                        self.show_parameter_table(ui, &filtered_params);
-                    }
-                } else {
-                    ui.label("No parameters found");
-                }
-            } else {
-                ui.label("No controller information available");
-            }
-        } else {
-            ui.label("No plugin loaded");
-        }
-    }
-
-    fn get_filtered_parameters<'a>(
-        &self,
-        parameters: &'a [ParameterInfo],
-    ) -> Vec<(usize, &'a ParameterInfo)> {
-        parameters
-            .iter()
-            .enumerate()
-            .filter(|(_, param)| {
-                // Search filter
-                if !self.parameter_search.is_empty() {
-                    let search_lower = self.parameter_search.to_lowercase();
-                    let title_match = param.title.to_lowercase().contains(&search_lower);
-                    let id_match = param.id.to_string().contains(&search_lower);
-                    let units_match = param.units.to_lowercase().contains(&search_lower);
-
-                    if !(title_match || id_match || units_match) {
-                        return false;
-                    }
-                }
-
-                // Type filter
-                let type_matches = match self.parameter_filter {
-                    ParameterFilter::All => true,
-                    ParameterFilter::Writable => (param.flags & 0x1) == 0, // Not read-only
-                    ParameterFilter::ReadOnly => (param.flags & 0x1) != 0, // Read-only
-                    ParameterFilter::HasSteps => param.step_count > 0,
-                    ParameterFilter::HasUnits => !param.units.is_empty(),
-                };
-
-                // Modified filter
-                let modified_matches = !self.show_only_modified
-                    || (param.current_value - param.default_normalized_value).abs() > 0.001;
-
-                type_matches && modified_matches
-            })
-            .collect()
-    }
-
     fn show_parameter_table(
         &mut self,
         ui: &mut egui::Ui,
@@ -1141,17 +1478,6 @@ impl VST3Inspector {
                     });
                 }
             });
-
-        // Parameter editor panel (shown below table when parameter is selected)
-        if let Some(selected_index) = self.selected_parameter {
-            if let Some((_, selected_param)) = filtered_params
-                .iter()
-                .find(|(idx, _)| *idx == selected_index)
-            {
-                ui.separator();
-                self.show_parameter_editor(ui, selected_param);
-            }
-        }
     }
 
     fn show_parameter_editor(&mut self, ui: &mut egui::Ui, param: &ParameterInfo) {
@@ -1221,217 +1547,320 @@ impl VST3Inspector {
         });
     }
 
-    fn show_gui_info(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Plugin GUI");
-
-        if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
-            ui.group(|ui| {
-                ui.strong("GUI Information");
-                if let Some((width, height)) = self.plugin_info.as_ref().and_then(|p| p.gui_size) {
-                    ui.label(format!("Size: {}x{} pixels", width, height));
-                } else {
-                    ui.label("Size: Unknown");
-                }
-
-                ui.separator();
-
-                if ui.button("Open Plugin GUI").clicked() {
-                    if let Err(e) = self.create_plugin_gui() {
-                        println!("❌ Failed to create plugin GUI: {}", e);
-                    }
-                }
-
-                if self.gui_attached {
-                    ui.label("Plugin GUI is open");
-                    if ui.button("Close Plugin GUI").clicked() {
-                        self.close_plugin_gui();
-                    }
-                } else {
-                    ui.label("Plugin GUI is not open");
-                }
-            });
-        } else {
-            ui.group(|ui| {
-                ui.label("This plugin does not have a GUI");
-            });
-        }
-    }
-
     fn create_plugin_gui(&mut self) -> Result<(), String> {
         println!("🎨 Creating plugin GUI...");
 
-        #[cfg(target_os = "macos")]
-        unsafe {
-            if let Some(plugin_info) = &self.plugin_info {
-                if !plugin_info.has_gui {
-                    return Err("Plugin does not have GUI according to inspection".to_string());
-                }
-
-                // Recreate the plugin components for GUI
-                let binary_path = match get_vst3_binary_path(self.plugin_path.as_str()) {
-                    Ok(path) => path,
-                    Err(e) => return Err(format!("Failed to get binary path: {}", e)),
-                };
-
-                let lib = Library::new(&binary_path)
-                    .map_err(|e| format!("Failed to load library: {}", e))?;
-
-                let get_factory: Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> = lib
-                    .get(b"GetPluginFactory")
-                    .map_err(|e| format!("Failed to get factory: {}", e))?;
-
-                let factory_ptr = get_factory();
-                let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr)
-                    .ok_or("Failed to wrap factory")?;
-
-                // Find the Audio Module class
-                let class_count = factory.countClasses();
-                let mut audio_class_id = None;
-
-                for i in 0..class_count {
-                    let mut class_info = std::mem::zeroed();
-                    if factory.getClassInfo(i, &mut class_info) == vst3::Steinberg::kResultOk {
-                        let category = c_str_to_string(&class_info.category);
-                        if category.contains("Audio Module") {
-                            audio_class_id = Some(class_info.cid);
-                            break;
-                        }
-                    }
-                }
-
-                let audio_class_id = audio_class_id.ok_or("No Audio Module class found")?;
-
-                // Create component
-                let mut component_ptr: *mut IComponent = ptr::null_mut();
-                let create_result = factory.createInstance(
-                    audio_class_id.as_ptr(),
-                    IComponent::IID.as_ptr() as *const i8,
-                    &mut component_ptr as *mut _ as *mut _,
-                );
-
-                if create_result != vst3::Steinberg::kResultOk || component_ptr.is_null() {
-                    return Err("Failed to create component for GUI".to_string());
-                }
-
-                let component = ComPtr::<IComponent>::from_raw(component_ptr)
-                    .ok_or("Failed to wrap component")?;
-
-                // Initialize component
-                let init_result = component.initialize(ptr::null_mut());
-                if init_result != vst3::Steinberg::kResultOk {
-                    component.terminate();
-                    return Err("Failed to initialize component".to_string());
-                }
-
-                // Get controller
-                let controller =
-                    match get_or_create_controller(&component, &factory, &audio_class_id)? {
-                        Some(ctrl) => ctrl,
-                        None => {
-                            component.terminate();
-                            return Err("No controller available for GUI".to_string());
-                        }
-                    };
-
-                // Connect components
-                let _ = connect_component_and_controller(&component, &controller);
-
-                // Set up component handler for parameter notifications
-                // Note: For now we'll skip the component handler setup as it requires
-                // more complex interface implementation. We'll focus on direct parameter control.
-
-                // Create view using ViewType::kEditor (which is "editor")
-                let editor_view_type = b"editor\0".as_ptr() as *const i8;
-                let view_ptr = controller.createView(editor_view_type);
-                if view_ptr.is_null() {
-                    controller.terminate();
-                    component.terminate();
-                    return Err("Controller does not provide editor view".to_string());
-                }
-
-                let view = ComPtr::<IPlugView>::from_raw(view_ptr).ok_or("Failed to wrap view")?;
-
-                // Get view size
-                let mut view_rect = vst3::Steinberg::ViewRect {
-                    left: 0,
-                    top: 0,
-                    right: 400,
-                    bottom: 300,
-                };
-
-                let size_result = view.getSize(&mut view_rect);
-                if size_result != vst3::Steinberg::kResultOk {
-                    controller.terminate();
-                    component.terminate();
-                    return Err("Could not get editor view size".to_string());
-                }
-
-                let width = view_rect.right - view_rect.left;
-                let height = view_rect.bottom - view_rect.top;
-
-                println!("🎨 Plugin view size: {}x{}", width, height);
-
-                // Create native window
-                let window = self.create_native_window(width as f64, height as f64)?;
-
-                // Get the content view of the window
-                let content_view: id = msg_send![window, contentView];
-
-                // Check platform type support
-                let platform_type = b"NSView\0".as_ptr() as *const i8;
-                let platform_support = view.isPlatformTypeSupported(platform_type);
-                if platform_support != vst3::Steinberg::kResultOk {
-                    controller.terminate();
-                    component.terminate();
-                    let _: () = msg_send![window, close];
-                    return Err("PlugView does not support NSView platform type".to_string());
-                }
-
-                // Create a simple plug frame (we don't need full implementation for basic GUI)
-                // The view.setFrame call is optional for basic display
-
-                // Attach the plugin view to the native window
-                let attach_result = view.attached(content_view as *mut _, platform_type);
-
-                if attach_result == vst3::Steinberg::kResultOk {
-                    println!("✅ Plugin GUI attached successfully!");
-
-                    // Store references for cleanup
-                    self.plugin_view = Some(view);
-                    self.controller = Some(controller);
-                    self.component = Some(component);
-                    self.native_window = Some(window);
-                    self.gui_attached = true;
-
-                    // Show the window
-                    let _: () = msg_send![window, makeKeyAndOrderFront: nil];
-
-                    // Keep library alive
-                    std::mem::forget(lib);
-
-                    Ok(())
-                } else {
-                    controller.terminate();
-                    component.terminate();
-                    let _: () = msg_send![window, close];
-                    Err(format!(
-                        "Failed to attach plugin view: {:#x}",
-                        attach_result
-                    ))
-                }
-            } else {
-                Err("No plugin loaded".to_string())
+        if let Some(plugin_info) = &self.plugin_info {
+            if !plugin_info.has_gui {
+                return Err("Plugin does not have GUI according to inspection".to_string());
             }
-        }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            Err("GUI creation only supported on macOS".to_string())
+            // Recreate the plugin components for GUI
+            let binary_path = match get_vst3_binary_path(self.plugin_path.as_str()) {
+                Ok(path) => path,
+                Err(e) => return Err(format!("Failed to get binary path: {}", e)),
+            };
+
+            unsafe {
+                #[cfg(target_os = "macos")]
+                return self.create_macos_gui(binary_path);
+
+                #[cfg(target_os = "windows")]
+                return self.create_windows_gui(binary_path);
+
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                return Err("GUI creation not supported on this platform".to_string());
+            }
+        } else {
+            Err("No plugin loaded".to_string())
         }
     }
 
+    // macOS GUI creation
     #[cfg(target_os = "macos")]
-    unsafe fn create_native_window(&self, width: f64, height: f64) -> Result<id, String> {
+    unsafe fn create_macos_gui(&mut self, binary_path: String) -> Result<(), String> {
+        let lib = load_vst3_library(&binary_path)?;
+
+        let get_factory: Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> = lib
+            .get(b"GetPluginFactory")
+            .map_err(|e| format!("Failed to get factory: {}", e))?;
+
+        let factory_ptr = get_factory();
+        let factory =
+            ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or("Failed to wrap factory")?;
+
+        // Find the Audio Module class
+        let class_count = factory.countClasses();
+        let mut audio_class_id = None;
+
+        for i in 0..class_count {
+            let mut class_info = std::mem::zeroed();
+            if factory.getClassInfo(i, &mut class_info) == vst3::Steinberg::kResultOk {
+                let category = c_str_to_string(&class_info.category);
+                if category.contains("Audio Module") {
+                    audio_class_id = Some(class_info.cid);
+                    break;
+                }
+            }
+        }
+
+        let audio_class_id = audio_class_id.ok_or("No Audio Module class found")?;
+
+        // Create component
+        let mut component_ptr: *mut IComponent = ptr::null_mut();
+        let create_result = factory.createInstance(
+            audio_class_id.as_ptr(),
+            IComponent::IID.as_ptr() as *const i8,
+            &mut component_ptr as *mut _ as *mut _,
+        );
+
+        if create_result != vst3::Steinberg::kResultOk || component_ptr.is_null() {
+            return Err("Failed to create component for GUI".to_string());
+        }
+
+        let component =
+            ComPtr::<IComponent>::from_raw(component_ptr).ok_or("Failed to wrap component")?;
+
+        // Initialize component
+        let init_result = component.initialize(ptr::null_mut());
+        if init_result != vst3::Steinberg::kResultOk {
+            component.terminate();
+            return Err("Failed to initialize component".to_string());
+        }
+
+        // Get controller
+        let controller = match get_or_create_controller(&component, &factory, &audio_class_id)? {
+            Some(ctrl) => ctrl,
+            None => {
+                component.terminate();
+                return Err("No controller available for GUI".to_string());
+            }
+        };
+
+        // Connect components
+        let _ = connect_component_and_controller(&component, &controller);
+
+        // Create view using ViewType::kEditor (which is "editor")
+        let editor_view_type = b"editor\0".as_ptr() as *const i8;
+        let view_ptr = controller.createView(editor_view_type);
+        if view_ptr.is_null() {
+            controller.terminate();
+            component.terminate();
+            return Err("Controller does not provide editor view".to_string());
+        }
+
+        let view = ComPtr::<IPlugView>::from_raw(view_ptr).ok_or("Failed to wrap view")?;
+
+        // Get view size
+        let mut view_rect = vst3::Steinberg::ViewRect {
+            left: 0,
+            top: 0,
+            right: 400,
+            bottom: 300,
+        };
+
+        let size_result = view.getSize(&mut view_rect);
+        if size_result != vst3::Steinberg::kResultOk {
+            controller.terminate();
+            component.terminate();
+            return Err("Could not get editor view size".to_string());
+        }
+
+        let width = view_rect.right - view_rect.left;
+        let height = view_rect.bottom - view_rect.top;
+
+        println!("🎨 Plugin view size: {}x{}", width, height);
+
+        // Create native window
+        let window = self.create_native_macos_window(width as f64, height as f64)?;
+
+        // Get the content view of the window
+        let content_view: id = msg_send![window, contentView];
+
+        // Check platform type support
+        let platform_type = b"NSView\0".as_ptr() as *const i8;
+        let platform_support = view.isPlatformTypeSupported(platform_type);
+        if platform_support != vst3::Steinberg::kResultOk {
+            controller.terminate();
+            component.terminate();
+            let _: () = msg_send![window, close];
+            return Err("PlugView does not support NSView platform type".to_string());
+        }
+
+        // Attach the plugin view to the native window
+        let attach_result = view.attached(content_view as *mut _, platform_type);
+
+        if attach_result == vst3::Steinberg::kResultOk {
+            println!("✅ Plugin GUI attached successfully!");
+
+            // Store references for cleanup
+            self.plugin_view = Some(view);
+            self.controller = Some(controller);
+            self.component = Some(component);
+            self.native_window = Some(window);
+            self.gui_attached = true;
+
+            // Show the window
+            let _: () = msg_send![window, makeKeyAndOrderFront: nil];
+
+            // Keep library alive
+            std::mem::forget(lib);
+
+            Ok(())
+        } else {
+            controller.terminate();
+            component.terminate();
+            let _: () = msg_send![window, close];
+            Err(format!(
+                "Failed to attach plugin view: {:#x}",
+                attach_result
+            ))
+        }
+    }
+
+    // Windows GUI creation
+    #[cfg(target_os = "windows")]
+    unsafe fn create_windows_gui(&mut self, binary_path: String) -> Result<(), String> {
+        let lib = load_vst3_library(&binary_path)?;
+
+        let get_factory: libloading::Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> = lib
+            .get(b"GetPluginFactory")
+            .map_err(|e| format!("Failed to get factory: {}", e))?;
+
+        let factory_ptr = get_factory();
+        let factory =
+            ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or("Failed to wrap factory")?;
+
+        // Find the Audio Module class
+        let class_count = factory.countClasses();
+        let mut audio_class_id = None;
+
+        for i in 0..class_count {
+            let mut class_info = std::mem::zeroed();
+            if factory.getClassInfo(i, &mut class_info) == vst3::Steinberg::kResultOk {
+                let category = c_str_to_string(&class_info.category);
+                if category.contains("Audio Module") {
+                    audio_class_id = Some(class_info.cid);
+                    break;
+                }
+            }
+        }
+
+        let audio_class_id = audio_class_id.ok_or("No Audio Module class found")?;
+
+        // Create component
+        let mut component_ptr: *mut IComponent = ptr::null_mut();
+        let create_result = factory.createInstance(
+            audio_class_id.as_ptr(),
+            IComponent::IID.as_ptr() as *const i8,
+            &mut component_ptr as *mut _ as *mut _,
+        );
+
+        if create_result != vst3::Steinberg::kResultOk || component_ptr.is_null() {
+            return Err("Failed to create component for GUI".to_string());
+        }
+
+        let component =
+            ComPtr::<IComponent>::from_raw(component_ptr).ok_or("Failed to wrap component")?;
+
+        // Initialize component
+        let init_result = component.initialize(ptr::null_mut());
+        if init_result != vst3::Steinberg::kResultOk {
+            component.terminate();
+            return Err("Failed to initialize component".to_string());
+        }
+
+        // Get controller
+        let controller = match get_or_create_controller(&component, &factory, &audio_class_id)? {
+            Some(ctrl) => ctrl,
+            None => {
+                component.terminate();
+                return Err("No controller available for GUI".to_string());
+            }
+        };
+
+        // Connect components
+        let _ = connect_component_and_controller(&component, &controller);
+
+        // Create view using ViewType::kEditor (which is "editor")
+        let editor_view_type = b"editor\0".as_ptr() as *const i8;
+        let view_ptr = controller.createView(editor_view_type);
+        if view_ptr.is_null() {
+            controller.terminate();
+            component.terminate();
+            return Err("Controller does not provide editor view".to_string());
+        }
+
+        let view = ComPtr::<IPlugView>::from_raw(view_ptr).ok_or("Failed to wrap view")?;
+
+        // Get view size
+        let mut view_rect = vst3::Steinberg::ViewRect {
+            left: 0,
+            top: 0,
+            right: 400,
+            bottom: 300,
+        };
+
+        let size_result = view.getSize(&mut view_rect);
+        if size_result != vst3::Steinberg::kResultOk {
+            controller.terminate();
+            component.terminate();
+            return Err("Could not get editor view size".to_string());
+        }
+
+        let width = view_rect.right - view_rect.left;
+        let height = view_rect.bottom - view_rect.top;
+
+        println!("🎨 Plugin view size: {}x{}", width, height);
+
+        // Create native window
+        let window = self.create_native_windows_window(width, height)?;
+
+        // Check platform type support
+        let platform_type = b"HWND\0".as_ptr() as *const i8;
+        let platform_support = view.isPlatformTypeSupported(platform_type);
+        if platform_support != vst3::Steinberg::kResultOk {
+            winapi::um::winuser::DestroyWindow(window);
+            controller.terminate();
+            component.terminate();
+            return Err("PlugView does not support HWND platform type".to_string());
+        }
+
+        // Attach the plugin view to the native window
+        let attach_result = view.attached(window as *mut _, platform_type);
+
+        if attach_result == vst3::Steinberg::kResultOk {
+            println!("✅ Plugin GUI attached successfully!");
+
+            // Store references for cleanup
+            self.plugin_view = Some(view);
+            self.controller = Some(controller);
+            self.component = Some(component);
+            self.native_window = Some(window);
+            self.gui_attached = true;
+
+            // Show the window
+            ShowWindow(window, SW_SHOW);
+            UpdateWindow(window);
+
+            // Keep library alive
+            std::mem::forget(lib);
+
+            Ok(())
+        } else {
+            winapi::um::winuser::DestroyWindow(window);
+            controller.terminate();
+            component.terminate();
+            Err(format!(
+                "Failed to attach plugin view: {:#x}",
+                attach_result
+            ))
+        }
+    }
+
+    // Platform-specific native window creation
+    #[cfg(target_os = "macos")]
+    unsafe fn create_native_macos_window(&self, width: f64, height: f64) -> Result<id, String> {
         // Create window frame
         let frame = NSRect::new(NSPoint::new(100.0, 100.0), NSSize::new(width, height));
 
@@ -1458,11 +1887,56 @@ impl VST3Inspector {
         Ok(window)
     }
 
+    #[cfg(target_os = "windows")]
+    unsafe fn create_native_windows_window(&self, width: i32, height: i32) -> Result<HWND, String> {
+        let class_name = win32_string("VST3PluginWindow");
+        let window_name = win32_string("VST3 Plugin GUI");
+
+        let hinstance = GetModuleHandleW(ptr::null());
+
+        let wnd_class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(window_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinstance,
+            hIcon: ptr::null_mut(),
+            hCursor: LoadCursorW(ptr::null_mut(), IDC_ARROW),
+            hbrBackground: ptr::null_mut(),
+            lpszMenuName: ptr::null(),
+            lpszClassName: class_name.as_ptr(),
+            hIconSm: ptr::null_mut(),
+        };
+
+        RegisterClassExW(&wnd_class);
+
+        let hwnd = CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            window_name.as_ptr(),
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            width,
+            height,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            hinstance,
+            ptr::null_mut(),
+        );
+
+        if hwnd.is_null() {
+            return Err("Failed to create native window".to_string());
+        }
+
+        Ok(hwnd)
+    }
+
     fn close_plugin_gui(&mut self) {
         if self.gui_attached {
             println!("🎨 Closing plugin GUI...");
 
-            #[cfg(target_os = "macos")]
             unsafe {
                 // Detach the plugin view
                 if let Some(ref view) = self.plugin_view {
@@ -1470,23 +1944,32 @@ impl VST3Inspector {
                 }
 
                 // Close the native window
+                #[cfg(target_os = "macos")]
                 if let Some(window) = self.native_window {
                     let _: () = msg_send![window, close];
+                }
+
+                #[cfg(target_os = "windows")]
+                if let Some(window) = self.native_window {
+                    winapi::um::winuser::DestroyWindow(window);
                 }
 
                 // Terminate the controller
                 if let Some(ref controller) = self.controller {
                     controller.terminate();
                 }
+
+                // Terminate the component
+                if let Some(ref component) = self.component {
+                    component.terminate();
+                }
             }
 
             self.gui_attached = false;
             self.plugin_view = None;
             self.controller = None;
-            #[cfg(target_os = "macos")]
-            {
-                self.native_window = None;
-            }
+            self.component = None;
+            self.native_window = None;
 
             println!("✅ Plugin GUI closed");
         }
@@ -1539,6 +2022,80 @@ impl VST3Inspector {
             Err("No controller available".to_string())
         }
     }
+
+    fn get_filtered_parameters<'a>(
+        &self,
+        parameters: &'a [ParameterInfo],
+    ) -> Vec<(usize, &'a ParameterInfo)> {
+        parameters
+            .iter()
+            .enumerate()
+            .filter(|(_, param)| {
+                // Search filter
+                if !self.parameter_search.is_empty() {
+                    let search_lower = self.parameter_search.to_lowercase();
+                    let title_match = param.title.to_lowercase().contains(&search_lower);
+                    let id_match = param.id.to_string().contains(&search_lower);
+                    let units_match = param.units.to_lowercase().contains(&search_lower);
+
+                    if !(title_match || id_match || units_match) {
+                        return false;
+                    }
+                }
+
+                // Type filter
+                let type_matches = match self.parameter_filter {
+                    ParameterFilter::All => true,
+                    ParameterFilter::Writable => (param.flags & 0x1) == 0, // Not read-only
+                    ParameterFilter::ReadOnly => (param.flags & 0x1) != 0, // Read-only
+                    ParameterFilter::HasSteps => param.step_count > 0,
+                    ParameterFilter::HasUnits => !param.units.is_empty(),
+                };
+
+                // Modified filter
+                let modified_matches = !self.show_only_modified
+                    || (param.current_value - param.default_normalized_value).abs() > 0.001;
+
+                type_matches && modified_matches
+            })
+            .collect()
+    }
+
+    fn load_plugin(&mut self, plugin_path: String) {
+        println!("Loading plugin: {}", plugin_path);
+
+        // Close any existing GUI
+        if self.gui_attached {
+            self.close_plugin_gui();
+        }
+
+        // Update plugin path
+        self.plugin_path = plugin_path;
+
+        // Reset current state
+        self.plugin_info = None;
+        self.selected_parameter = None;
+        self.current_page = 0;
+
+        // Try to load the new plugin
+        let binary_path = match get_vst3_binary_path(&self.plugin_path) {
+            Ok(path) => path,
+            Err(e) => {
+                println!("❌ Failed to get binary path: {}", e);
+                return;
+            }
+        };
+
+        match unsafe { inspect_vst3_plugin(&binary_path) } {
+            Ok(plugin_info) => {
+                println!("✅ Plugin loaded successfully!");
+                self.plugin_info = Some(plugin_info);
+            }
+            Err(e) => {
+                println!("❌ Failed to load plugin: {}", e);
+            }
+        }
+    }
 }
 
 impl VST3Inspector {
@@ -1546,21 +2103,77 @@ impl VST3Inspector {
         Self {
             plugin_path: path.to_string(),
             plugin_info: None,
-            selected_tab: 0,
+            discovered_plugins: Vec::new(),
             plugin_view: None,
             controller: None,
             component: None,
             gui_attached: false,
-            #[cfg(target_os = "macos")]
             native_window: None,
-            // Parameter editing
             component_handler: None,
             selected_parameter: None,
-            // Parameter table UI
             parameter_search: String::new(),
             parameter_filter: ParameterFilter::All,
             show_only_modified: false,
             table_scroll_to_selected: false,
+            current_page: 0,
+            items_per_page: 50,
         }
     }
+}
+
+// Plugin discovery functions
+fn scan_vst3_directories() -> Vec<String> {
+    let mut plugins = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        let paths = [
+            "/Library/Audio/Plug-Ins/VST3",
+            &format!(
+                "{}/Library/Audio/Plug-Ins/VST3",
+                std::env::var("HOME").unwrap_or_default()
+            ),
+        ];
+
+        for path in &paths {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension() == Some(std::ffi::OsStr::new("vst3")) {
+                        plugins.push(path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let paths = [
+            r"C:\Program Files\Common Files\VST3",
+            r"C:\Program Files (x86)\Common Files\VST3",
+        ];
+
+        for path in &paths {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension() == Some(std::ffi::OsStr::new("vst3")) {
+                        plugins.push(path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    plugins.sort();
+    plugins
+}
+
+fn get_plugin_name_from_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+        .to_string()
 }
