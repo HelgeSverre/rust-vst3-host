@@ -24,14 +24,12 @@ use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
 #[cfg(target_os = "macos")]
 use objc::{msg_send, sel, sel_impl};
 
-// Add IPlugFrame interface import
-use vst3::Steinberg::{IPlugFrame, IPlugFrameTrait};
-
 // const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/SPAN.vst3";
-const PLUGIN_PATH: &str = "/Users/helge/code/vst-host/tmp/Dexed.vst3";
 // const PLUGIN_PATH: &str = "/Users/helge/code/vst-host/tmp/Dexed.vst3";
 // const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/Ozone Imager 2.vst3";
 // const PLUGIN_PATH: &str = "/Users/helge/code/vst-host/tmp/Dexed.vst3/Contents/MacOS/Dexed";
+// const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/OsTIrus.vst3";
+const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/HY-MPS3 free.vst3";
 // const PLUGIN_PATH: &str = "/Users/helge/code/vst-host/tmp/nimble/Nimble Kick.vst3/Contents/MacOS/Nimble Kick";
 
 // Helper function to find the correct binary path in VST3 bundle
@@ -147,7 +145,7 @@ impl PlugFrame {
     fn new() -> Self {
         Self { window: None }
     }
-    
+
     fn set_window(&mut self, window: id) {
         self.window = Some(window);
     }
@@ -294,8 +292,8 @@ unsafe fn properly_initialize_plugin(
         return Err("Failed to create component".to_string());
     }
 
-    let component = ComPtr::<IComponent>::from_raw(component_ptr)
-        .ok_or("Failed to wrap component")?;
+    let component =
+        ComPtr::<IComponent>::from_raw(component_ptr).ok_or("Failed to wrap component")?;
 
     let init_result = component.initialize(ptr::null_mut());
     if init_result != vst3::Steinberg::kResultOk {
@@ -358,7 +356,12 @@ unsafe fn properly_initialize_plugin(
     component.terminate();
     controller.terminate();
 
-    Ok((Some(component_info), Some(controller_info), gui_available, gui_size))
+    Ok((
+        Some(component_info),
+        Some(controller_info),
+        gui_available,
+        gui_size,
+    ))
 }
 
 unsafe fn get_or_create_controller(
@@ -391,7 +394,11 @@ unsafe fn get_or_create_controller(
     );
 
     if create_result != vst3::Steinberg::kResultOk || controller_ptr.is_null() {
-        println!("❌ Failed to create controller: {:#x}, ptr is null: {}", create_result, controller_ptr.is_null());
+        println!(
+            "❌ Failed to create controller: {:#x}, ptr is null: {}",
+            create_result,
+            controller_ptr.is_null()
+        );
         return Ok(None);
     }
 
@@ -947,13 +954,14 @@ impl VST3Inspector {
                 }
 
                 // Get controller
-                let controller = match get_or_create_controller(&component, &factory, &audio_class_id)? {
-                    Some(ctrl) => ctrl,
-                    None => {
-                        component.terminate();
-                        return Err("No controller available for GUI".to_string());
-                    }
-                };
+                let controller =
+                    match get_or_create_controller(&component, &factory, &audio_class_id)? {
+                        Some(ctrl) => ctrl,
+                        None => {
+                            component.terminate();
+                            return Err("No controller available for GUI".to_string());
+                        }
+                    };
 
                 // Connect components
                 let _ = connect_component_and_controller(&component, &controller);
@@ -1007,7 +1015,7 @@ impl VST3Inspector {
 
                 // Create a simple plug frame (we don't need full implementation for basic GUI)
                 // The view.setFrame call is optional for basic display
-                
+
                 // Attach the plugin view to the native window
                 let attach_result = view.attached(content_view as *mut _, platform_type);
 
@@ -1032,7 +1040,10 @@ impl VST3Inspector {
                     controller.terminate();
                     component.terminate();
                     let _: () = msg_send![window, close];
-                    Err(format!("Failed to attach plugin view: {:#x}", attach_result))
+                    Err(format!(
+                        "Failed to attach plugin view: {:#x}",
+                        attach_result
+                    ))
                 }
             } else {
                 Err("No plugin loaded".to_string())
