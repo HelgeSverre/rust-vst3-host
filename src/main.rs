@@ -263,6 +263,8 @@ fn main() {
         "VST3 Plugin Inspector",
         options,
         Box::new(|cc| {
+            catppuccin_egui::set_theme(&cc.egui_ctx, catppuccin_egui::FRAPPE);
+
             let mut inspector = VST3Inspector::from_path(PLUGIN_PATH);
 
             // Scan for available plugins
@@ -833,6 +835,14 @@ struct VST3Inspector {
     // Pagination
     current_page: usize,
     items_per_page: usize,
+    // Tab management
+    current_tab: Tab,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Tab {
+    Plugins,
+    Plugin,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -849,6 +859,8 @@ impl eframe::App for VST3Inspector {
         // Top header panel
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
+            
+            // Plugin info - always shown at top
             ui.horizontal(|ui| {
                 // Plugin info - left side
                 ui.vertical(|ui| {
@@ -867,32 +879,140 @@ impl eframe::App for VST3Inspector {
                     ));
                 });
 
-                // Push GUI button to the right
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Large GUI button
-                    if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
-                        if self.gui_attached {
-                            if ui.add_sized([120.0, 40.0], egui::Button::new("🎨 Close GUI")).clicked() {
-                                self.close_plugin_gui();
-                            }
-                        } else {
-                            if ui.add_sized([120.0, 40.0], egui::Button::new("🎨 Open GUI")).clicked() {
-                                if let Err(e) = self.create_plugin_gui() {
-                                    println!("❌ Failed to create plugin GUI: {}", e);
+                // Push GUI button to the right - only show on Plugin tab
+                if self.current_tab == Tab::Plugin {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Large GUI button
+                        if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
+                            if self.gui_attached {
+                                if ui
+                                    .add_sized([120.0, 40.0], egui::Button::new("🎨 Close GUI"))
+                                    .clicked()
+                                {
+                                    self.close_plugin_gui();
+                                }
+                            } else {
+                                if ui
+                                    .add_sized([120.0, 40.0], egui::Button::new("🎨 Open GUI"))
+                                    .clicked()
+                                {
+                                    if let Err(e) = self.create_plugin_gui() {
+                                        println!("❌ Failed to create plugin GUI: {}", e);
+                                    }
                                 }
                             }
+                        } else {
+                            // Show disabled button when no GUI is available
+                            ui.add_enabled_ui(false, |ui| {
+                                ui.add_sized([120.0, 40.0], egui::Button::new("❌ No GUI"));
+                            });
                         }
-                    } else {
-                        // Show disabled button when no GUI is available
-                        ui.add_enabled_ui(false, |ui| {
-                            ui.add_sized([120.0, 40.0], egui::Button::new("❌ No GUI"));
-                        });
-                    }
-                });
+                    });
+                }
+            });
+            
+            ui.separator();
+            ui.add_space(4.0);
+            
+            // Tab buttons
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.current_tab, Tab::Plugins, "🔌 Plugins");
+                ui.selectable_value(&mut self.current_tab, Tab::Plugin, "🎛️ Plugin");
             });
             ui.add_space(8.0);
         });
 
+        // Route to appropriate tab content
+        match self.current_tab {
+            Tab::Plugins => self.show_plugins_tab(ctx),
+            Tab::Plugin => self.show_plugin_tab(ctx),
+        }
+    }
+}
+
+impl VST3Inspector {
+    fn show_plugins_tab(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.heading("Available VST3 Plugins");
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label(format!("Found {} plugins", self.discovered_plugins.len()));
+                if ui.button("🔄 Refresh").clicked() {
+                    self.discovered_plugins = scan_vst3_directories();
+                }
+            });
+
+            ui.add_space(8.0);
+
+            // Plugin table
+            self.show_plugins_table(ui);
+        });
+    }
+
+    fn show_plugins_table(&mut self, ui: &mut egui::Ui) {
+        use egui_extras::{Column, TableBuilder};
+
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::remainder().at_least(200.0)) // Plugin Name
+            .column(Column::remainder().at_least(300.0)) // Directory
+            .column(Column::auto().at_least(80.0)) // Actions
+            .header(20.0, |mut header| {
+                header.col(|ui| {
+                    ui.strong("Plugin Name");
+                });
+                header.col(|ui| {
+                    ui.strong("Directory");
+                });
+                header.col(|ui| {
+                    ui.strong("Actions");
+                });
+            })
+            .body(|mut body| {
+                for plugin_path in &self.discovered_plugins.clone() {
+                    let plugin_name = get_plugin_name_from_path(plugin_path);
+                    let directory = std::path::Path::new(plugin_path)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or("Unknown");
+                    let is_current = self.plugin_path == *plugin_path;
+
+                    body.row(25.0, |mut row| {
+                        // Plugin Name
+                        row.col(|ui| {
+                            if is_current {
+                                ui.colored_label(egui::Color32::GREEN, format!("► {}", plugin_name));
+                            } else {
+                                ui.label(&plugin_name);
+                            }
+                        });
+
+                        // Directory
+                        row.col(|ui| {
+                            ui.label(directory);
+                        });
+
+                        // Actions
+                        row.col(|ui| {
+                            if is_current {
+                                ui.label("Current");
+                            } else {
+                                if ui.button("Load").clicked() {
+                                    self.load_plugin(plugin_path.clone());
+                                    self.current_tab = Tab::Plugin; // Switch to plugin tab after loading
+                                }
+                            }
+                        });
+                    });
+                }
+            });
+    }
+
+    fn show_plugin_tab(&mut self, ctx: &egui::Context) {
         // Left sidebar for plugin information
         egui::SidePanel::left("plugin_info_panel")
             .resizable(true)
@@ -900,52 +1020,6 @@ impl eframe::App for VST3Inspector {
             .min_width(250.0)
             .max_width(500.0)
             .show(ctx, |ui| {
-                ui.add_space(8.0);
-
-                // Plugin Scanner Section
-                ui.heading("Available Plugins");
-                ui.add_space(4.0);
-
-                ui.horizontal(|ui| {
-                    ui.label(format!("Found {} plugins", self.discovered_plugins.len()));
-                    if ui.button("Refresh").clicked() {
-                        self.discovered_plugins = scan_vst3_directories();
-                    }
-                });
-
-                ui.add_space(4.0);
-
-                let mut selected_plugin: Option<String> = None;
-                egui::ScrollArea::vertical()
-                    .id_salt("plugin_list_scroll")
-                    .max_height(200.0)
-                    .show(ui, |ui| {
-                        for plugin_path in &self.discovered_plugins {
-                            let plugin_name = get_plugin_name_from_path(plugin_path);
-                            let is_current = self.plugin_path == *plugin_path;
-
-                            ui.horizontal(|ui| {
-                                if is_current {
-                                    ui.colored_label(egui::Color32::GREEN, "►");
-                                } else {
-                                    ui.label(" ");
-                                }
-
-                                if ui.selectable_label(is_current, &plugin_name).clicked()
-                                    && !is_current
-                                {
-                                    selected_plugin = Some(plugin_path.clone());
-                                }
-                            });
-                        }
-                    });
-
-                if let Some(plugin_path) = selected_plugin {
-                    self.load_plugin(plugin_path);
-                }
-
-                ui.add_space(8.0);
-                ui.separator();
                 ui.add_space(8.0);
 
                 ui.heading("Plugin Information");
@@ -1100,6 +1174,7 @@ impl eframe::App for VST3Inspector {
                                         });
                                     ui.add_space(4.0);
                                 });
+
                         } else {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(50.0);
@@ -1359,9 +1434,7 @@ impl eframe::App for VST3Inspector {
             }
         });
     }
-}
 
-impl VST3Inspector {
     fn show_parameter_table(
         &mut self,
         ui: &mut egui::Ui,
@@ -2141,6 +2214,7 @@ impl VST3Inspector {
             table_scroll_to_selected: false,
             current_page: 0,
             items_per_page: 50,
+            current_tab: Tab::Plugins,
         }
     }
 }
