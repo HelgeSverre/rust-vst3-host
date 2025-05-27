@@ -5,9 +5,8 @@ use std::ptr;
 use vst3::Steinberg::Vst::{BusDirections_::*, MediaTypes_::*};
 // Import the constants
 use vst3::Steinberg::Vst::{
-    IAudioProcessor, IComponent, IComponentHandler, IComponentHandlerTrait, IComponentTrait,
-    IConnectionPoint, IConnectionPointTrait,
-    IEditController, IEditControllerTrait,
+    IAudioProcessor, IComponent, IComponentTrait,
+    IConnectionPoint, IConnectionPointTrait, IEditController, IEditControllerTrait,
 };
 use vst3::Steinberg::{IPlugView, IPlugViewTrait, IPluginFactoryTrait};
 use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory};
@@ -728,7 +727,7 @@ impl eframe::App for VST3Inspector {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading(format!(
-                "🔍 VST3 Plugin Inspector - {} - {}",
+                "VST3 Plugin Inspector - {} - {}",
                 self.plugin_info
                     .as_ref()
                     .map_or("Unknown", |p| &p.factory_info.vendor),
@@ -740,12 +739,12 @@ impl eframe::App for VST3Inspector {
 
             // Tab selection
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.selected_tab, 0, "🏭 Factory");
-                ui.selectable_value(&mut self.selected_tab, 1, "📋 Classes");
-                ui.selectable_value(&mut self.selected_tab, 2, "🎵 Component");
-                ui.selectable_value(&mut self.selected_tab, 3, "🎛️ Controller");
+                ui.selectable_value(&mut self.selected_tab, 0, "Factory");
+                ui.selectable_value(&mut self.selected_tab, 1, "Classes");
+                ui.selectable_value(&mut self.selected_tab, 2, "Component");
+                ui.selectable_value(&mut self.selected_tab, 3, "Controller");
                 if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
-                    ui.selectable_value(&mut self.selected_tab, 4, "🎨 GUI");
+                    ui.selectable_value(&mut self.selected_tab, 4, "GUI");
                 }
             });
 
@@ -765,7 +764,7 @@ impl eframe::App for VST3Inspector {
 
 impl VST3Inspector {
     fn show_factory_info(&self, ui: &mut egui::Ui) {
-        ui.heading("🏭 Factory Information");
+        ui.heading("Factory Information");
 
         ui.group(|ui| {
             ui.label(format!(
@@ -796,7 +795,7 @@ impl VST3Inspector {
     }
 
     fn show_classes_info(&self, ui: &mut egui::Ui) {
-        ui.heading("📋 Plugin Classes");
+        ui.heading("Plugin Classes");
 
         if let Some(plugin_info) = &self.plugin_info {
             for (i, class) in plugin_info.classes.iter().enumerate() {
@@ -813,7 +812,7 @@ impl VST3Inspector {
     }
 
     fn show_component_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("🎵 Component Information");
+        ui.heading("Component Information");
 
         if let Some(plugin_info) = &self.plugin_info {
             if let Some(ref info) = plugin_info.component_info {
@@ -853,16 +852,16 @@ impl VST3Inspector {
     }
 
     fn show_controller_info(&mut self, ui: &mut egui::Ui) {
-        ui.heading("🎛️ Controller Information");
+        ui.heading("Controller Information");
 
         // Clone the plugin info to avoid borrowing issues
         let plugin_info_clone = self.plugin_info.clone();
-        
+
         if let Some(plugin_info) = plugin_info_clone {
             if let Some(ref info) = plugin_info.controller_info {
                 // Get filtered parameters first
                 let filtered_params = self.get_filtered_parameters(&info.parameters);
-                
+
                 // Header with stats and controls
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
@@ -872,18 +871,18 @@ impl VST3Inspector {
                                 ui.label(format!("Filtered: {} parameters", filtered_params.len()));
                             }
                         });
-                        
+
                         ui.separator();
-                        
+
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
-                                if ui.button("🔄 Refresh Values").clicked() {
+                                if ui.button("Refresh Values").clicked() {
                                     if let Err(e) = self.refresh_parameter_values() {
                                         println!("❌ Failed to refresh parameters: {}", e);
                                     }
                                 }
-                                
-                                if ui.button("❌ Close Editor").clicked() {
+
+                                if ui.button("Close Editor").clicked() {
                                     self.selected_parameter = None;
                                 }
                             });
@@ -895,32 +894,52 @@ impl VST3Inspector {
 
                 // Search and filter controls
                 ui.group(|ui| {
-                    ui.label("🔍 Search & Filter");
-                    
+                    ui.label("Search & Filter");
+
                     ui.horizontal(|ui| {
                         ui.label("Search:");
                         let search_response = ui.text_edit_singleline(&mut self.parameter_search);
                         if search_response.changed() {
                             self.table_scroll_to_selected = true;
                         }
-                        
-                        if ui.button("❌").clicked() {
+
+                        if ui.button("Clear").clicked() {
                             self.parameter_search.clear();
                         }
                     });
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("Filter:");
                         egui::ComboBox::from_label("")
                             .selected_text(format!("{:?}", self.parameter_filter))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.parameter_filter, ParameterFilter::All, "All Parameters");
-                                ui.selectable_value(&mut self.parameter_filter, ParameterFilter::Writable, "Writable Only");
-                                ui.selectable_value(&mut self.parameter_filter, ParameterFilter::ReadOnly, "Read-Only");
-                                ui.selectable_value(&mut self.parameter_filter, ParameterFilter::HasSteps, "Has Steps");
-                                ui.selectable_value(&mut self.parameter_filter, ParameterFilter::HasUnits, "Has Units");
+                                ui.selectable_value(
+                                    &mut self.parameter_filter,
+                                    ParameterFilter::All,
+                                    "All Parameters",
+                                );
+                                ui.selectable_value(
+                                    &mut self.parameter_filter,
+                                    ParameterFilter::Writable,
+                                    "Writable Only",
+                                );
+                                ui.selectable_value(
+                                    &mut self.parameter_filter,
+                                    ParameterFilter::ReadOnly,
+                                    "Read-Only",
+                                );
+                                ui.selectable_value(
+                                    &mut self.parameter_filter,
+                                    ParameterFilter::HasSteps,
+                                    "Has Steps",
+                                );
+                                ui.selectable_value(
+                                    &mut self.parameter_filter,
+                                    ParameterFilter::HasUnits,
+                                    "Has Units",
+                                );
                             });
-                        
+
                         ui.checkbox(&mut self.show_only_modified, "Modified Only");
                     });
                 });
@@ -945,7 +964,10 @@ impl VST3Inspector {
         }
     }
 
-    fn get_filtered_parameters<'a>(&self, parameters: &'a [ParameterInfo]) -> Vec<(usize, &'a ParameterInfo)> {
+    fn get_filtered_parameters<'a>(
+        &self,
+        parameters: &'a [ParameterInfo],
+    ) -> Vec<(usize, &'a ParameterInfo)> {
         parameters
             .iter()
             .enumerate()
@@ -956,12 +978,12 @@ impl VST3Inspector {
                     let title_match = param.title.to_lowercase().contains(&search_lower);
                     let id_match = param.id.to_string().contains(&search_lower);
                     let units_match = param.units.to_lowercase().contains(&search_lower);
-                    
+
                     if !(title_match || id_match || units_match) {
                         return false;
                     }
                 }
-                
+
                 // Type filter
                 let type_matches = match self.parameter_filter {
                     ParameterFilter::All => true,
@@ -970,60 +992,85 @@ impl VST3Inspector {
                     ParameterFilter::HasSteps => param.step_count > 0,
                     ParameterFilter::HasUnits => !param.units.is_empty(),
                 };
-                
+
                 // Modified filter
-                let modified_matches = !self.show_only_modified || (param.current_value - param.default_normalized_value).abs() > 0.001;
-                
+                let modified_matches = !self.show_only_modified
+                    || (param.current_value - param.default_normalized_value).abs() > 0.001;
+
                 type_matches && modified_matches
             })
             .collect()
     }
 
-    fn show_parameter_table(&mut self, ui: &mut egui::Ui, filtered_params: &[(usize, &ParameterInfo)]) {
+    fn show_parameter_table(
+        &mut self,
+        ui: &mut egui::Ui,
+        filtered_params: &[(usize, &ParameterInfo)],
+    ) {
         use egui_extras::{Column, TableBuilder};
-        
+
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::auto().at_least(40.0))  // Index
-            .column(Column::auto().at_least(60.0))  // ID
+            .column(Column::auto().at_least(40.0)) // Index
+            .column(Column::auto().at_least(60.0)) // ID
             .column(Column::remainder().at_least(200.0)) // Title
-            .column(Column::auto().at_least(80.0))  // Current Value
-            .column(Column::auto().at_least(80.0))  // Default
-            .column(Column::auto().at_least(60.0))  // Units
-            .column(Column::auto().at_least(60.0))  // Steps
-            .column(Column::auto().at_least(80.0))  // Actions
+            .column(Column::auto().at_least(80.0)) // Current Value
+            .column(Column::auto().at_least(80.0)) // Default
+            .column(Column::auto().at_least(60.0)) // Units
+            .column(Column::auto().at_least(60.0)) // Steps
+            .column(Column::auto().at_least(80.0)) // Actions
             .header(20.0, |mut header| {
-                header.col(|ui| { ui.strong("Index"); });
-                header.col(|ui| { ui.strong("ID"); });
-                header.col(|ui| { ui.strong("Parameter Name"); });
-                header.col(|ui| { ui.strong("Current"); });
-                header.col(|ui| { ui.strong("Default"); });
-                header.col(|ui| { ui.strong("Units"); });
-                header.col(|ui| { ui.strong("Steps"); });
-                header.col(|ui| { ui.strong("Actions"); });
+                header.col(|ui| {
+                    ui.strong("Index");
+                });
+                header.col(|ui| {
+                    ui.strong("ID");
+                });
+                header.col(|ui| {
+                    ui.strong("Parameter Name");
+                });
+                header.col(|ui| {
+                    ui.strong("Current");
+                });
+                header.col(|ui| {
+                    ui.strong("Default");
+                });
+                header.col(|ui| {
+                    ui.strong("Units");
+                });
+                header.col(|ui| {
+                    ui.strong("Steps");
+                });
+                header.col(|ui| {
+                    ui.strong("Actions");
+                });
             })
             .body(|mut body| {
                 for (original_index, param) in filtered_params {
                     let is_selected = self.selected_parameter == Some(*original_index);
-                    let is_modified = (param.current_value - param.default_normalized_value).abs() > 0.001;
-                    
+                    let is_modified =
+                        (param.current_value - param.default_normalized_value).abs() > 0.001;
+
                     body.row(25.0, |mut row| {
                         // Index
                         row.col(|ui| {
                             if is_selected {
-                                ui.colored_label(egui::Color32::YELLOW, format!("► {}", original_index));
+                                ui.colored_label(
+                                    egui::Color32::YELLOW,
+                                    format!("> {}", original_index),
+                                );
                             } else {
                                 ui.label(original_index.to_string());
                             }
                         });
-                        
+
                         // ID
                         row.col(|ui| {
                             ui.label(param.id.to_string());
                         });
-                        
+
                         // Title
                         row.col(|ui| {
                             if is_modified {
@@ -1032,26 +1079,29 @@ impl VST3Inspector {
                                 ui.label(&param.title);
                             }
                         });
-                        
+
                         // Current Value
                         row.col(|ui| {
                             if is_modified {
-                                ui.colored_label(egui::Color32::LIGHT_GREEN, format!("{:.3}", param.current_value));
+                                ui.colored_label(
+                                    egui::Color32::LIGHT_GREEN,
+                                    format!("{:.3}", param.current_value),
+                                );
                             } else {
                                 ui.label(format!("{:.3}", param.current_value));
                             }
                         });
-                        
+
                         // Default Value
                         row.col(|ui| {
                             ui.label(format!("{:.3}", param.default_normalized_value));
                         });
-                        
+
                         // Units
                         row.col(|ui| {
                             ui.label(&param.units);
                         });
-                        
+
                         // Steps
                         row.col(|ui| {
                             if param.step_count > 0 {
@@ -1060,17 +1110,29 @@ impl VST3Inspector {
                                 ui.label("∞");
                             }
                         });
-                        
+
                         // Actions
                         row.col(|ui| {
                             ui.horizontal(|ui| {
-                                if ui.small_button("Edit️").on_hover_text("Edit parameter").clicked() {
+                                if ui
+                                    .small_button("Edit")
+                                    .on_hover_text("Edit parameter")
+                                    .clicked()
+                                {
                                     self.selected_parameter = Some(*original_index);
                                     self.table_scroll_to_selected = true;
                                 }
-                                
-                                if is_modified && ui.small_button("↺").on_hover_text("Reset to default").clicked() {
-                                    if let Err(e) = self.set_parameter_value(param.id, param.default_normalized_value) {
+
+                                if is_modified
+                                    && ui
+                                        .small_button("Reset")
+                                        .on_hover_text("Reset to default")
+                                        .clicked()
+                                {
+                                    if let Err(e) = self.set_parameter_value(
+                                        param.id,
+                                        param.default_normalized_value,
+                                    ) {
                                         println!("❌ Failed to reset parameter: {}", e);
                                     }
                                 }
@@ -1082,7 +1144,10 @@ impl VST3Inspector {
 
         // Parameter editor panel (shown below table when parameter is selected)
         if let Some(selected_index) = self.selected_parameter {
-            if let Some((_, selected_param)) = filtered_params.iter().find(|(idx, _)| *idx == selected_index) {
+            if let Some((_, selected_param)) = filtered_params
+                .iter()
+                .find(|(idx, _)| *idx == selected_index)
+            {
                 ui.separator();
                 self.show_parameter_editor(ui, selected_param);
             }
@@ -1093,59 +1158,61 @@ impl VST3Inspector {
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.strong(format!("🎚️ Editing: {}", param.title));
+                    ui.strong(format!("Editing: {}", param.title));
                     ui.label(format!("ID: {} | Range: 0.0 - 1.0", param.id));
                     if !param.units.is_empty() {
                         ui.label(format!("Units: {}", param.units));
                     }
                 });
-                
+
                 ui.separator();
-                
+
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label("Value:");
-                        
+
                         let mut new_value = param.current_value as f32;
-                        let step_size = if param.step_count > 0 { 
-                            1.0 / param.step_count as f32 
-                        } else { 
-                            0.001 
+                        let step_size = if param.step_count > 0 {
+                            1.0 / param.step_count as f32
+                        } else {
+                            0.001
                         };
-                        
+
                         let slider_response = ui.add(
                             egui::Slider::new(&mut new_value, 0.0..=1.0)
                                 .step_by(step_size as f64)
-                                .show_value(true)
+                                .show_value(true),
                         );
-                        
+
                         if slider_response.changed() {
                             if let Err(e) = self.set_parameter_value(param.id, new_value as f64) {
                                 println!("❌ Failed to set parameter: {}", e);
                             }
                         }
                     });
-                    
+
                     ui.horizontal(|ui| {
                         if ui.button("Reset to Default").clicked() {
-                            if let Err(e) = self.set_parameter_value(param.id, param.default_normalized_value) {
+                            if let Err(e) =
+                                self.set_parameter_value(param.id, param.default_normalized_value)
+                            {
                                 println!("❌ Failed to reset parameter: {}", e);
                             }
                         }
-                        
+
                         if ui.button("Set to 0.0").clicked() {
                             if let Err(e) = self.set_parameter_value(param.id, 0.0) {
                                 println!("❌ Failed to set parameter: {}", e);
                             }
                         }
-                        
+
                         if ui.button("Set to 1.0").clicked() {
                             if let Err(e) = self.set_parameter_value(param.id, 1.0) {
                                 println!("❌ Failed to set parameter: {}", e);
                             }
                         }
-                        
-                        if ui.button("❌ Close Editor").clicked() {
+
+                        if ui.button("Close Editor").clicked() {
                             self.selected_parameter = None;
                         }
                     });
@@ -1155,7 +1222,7 @@ impl VST3Inspector {
     }
 
     fn show_gui_info(&mut self, ui: &mut egui::Ui) {
-        ui.heading("🎨 Plugin GUI");
+        ui.heading("Plugin GUI");
 
         if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
             ui.group(|ui| {
@@ -1168,24 +1235,24 @@ impl VST3Inspector {
 
                 ui.separator();
 
-                if ui.button("🚀 Open Plugin GUI").clicked() {
+                if ui.button("Open Plugin GUI").clicked() {
                     if let Err(e) = self.create_plugin_gui() {
                         println!("❌ Failed to create plugin GUI: {}", e);
                     }
                 }
 
                 if self.gui_attached {
-                    ui.label("✅ Plugin GUI is open");
-                    if ui.button("❌ Close Plugin GUI").clicked() {
+                    ui.label("Plugin GUI is open");
+                    if ui.button("Close Plugin GUI").clicked() {
                         self.close_plugin_gui();
                     }
                 } else {
-                    ui.label("❌ Plugin GUI is not open");
+                    ui.label("Plugin GUI is not open");
                 }
             });
         } else {
             ui.group(|ui| {
-                ui.label("❌ This plugin does not have a GUI");
+                ui.label("This plugin does not have a GUI");
             });
         }
     }
@@ -1432,16 +1499,20 @@ impl VST3Inspector {
                 let result = controller.setParamNormalized(param_id, normalized_value);
                 if result == vst3::Steinberg::kResultOk {
                     println!("✅ Parameter {} set to {:.3}", param_id, normalized_value);
-                    
+
                     // Update our cached parameter info
                     if let Some(ref mut plugin_info) = self.plugin_info {
                         if let Some(ref mut controller_info) = plugin_info.controller_info {
-                            if let Some(param) = controller_info.parameters.iter_mut().find(|p| p.id == param_id) {
+                            if let Some(param) = controller_info
+                                .parameters
+                                .iter_mut()
+                                .find(|p| p.id == param_id)
+                            {
                                 param.current_value = normalized_value;
                             }
                         }
                     }
-                    
+
                     Ok(())
                 } else {
                     Err(format!("Failed to set parameter: {:#x}", result))
