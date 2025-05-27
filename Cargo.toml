@@ -4,11 +4,25 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = "0.29.1"
+eframe = "0.31.1"
 raw-window-handle = "0.6.2"
 vst3 = "0.1.2"
-libloading = "0.8.5"
+libloading = "0.8.8"
+egui_extras = "0.31.1"
+
+# Platform-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10.0"
 cocoa = "0.26.0"
 objc = "0.2.7"
-egui_extras = "0.29.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3.9", features = [
+    "winuser",
+    "windef",
+    "libloaderapi",
+    "processenv",
+    "winbase",
+    "handleapi",
+    "errhandlingapi"
+] }

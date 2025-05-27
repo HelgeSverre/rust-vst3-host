@@ -262,7 +262,7 @@ fn main() {
     let _ = eframe::run_native(
         "VST3 Plugin Inspector",
         options,
-        Box::new(|_cc| {
+        Box::new(|cc| {
             let mut inspector = VST3Inspector::from_path(PLUGIN_PATH);
 
             // Scan for available plugins
@@ -867,36 +867,12 @@ impl eframe::App for VST3Inspector {
                     ));
                 });
 
-                ui.add_space(20.0);
-
-                // GUI controls
-                if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
-                    ui.separator();
-                    ui.add_space(10.0);
-
-                    ui.vertical(|ui| {
-                        ui.strong("Plugin GUI");
-                        ui.horizontal(|ui| {
-                            if self.gui_attached {
-                                if ui.button("Close GUI").clicked() {
-                                    self.close_plugin_gui();
-                                }
-                                ui.colored_label(egui::Color32::GREEN, "Open");
-                            } else {
-                                if ui.button("Open GUI").clicked() {
-                                    if let Err(e) = self.create_plugin_gui() {
-                                        println!("❌ Failed to create plugin GUI: {}", e);
-                                    }
-                                }
-                                ui.colored_label(egui::Color32::GRAY, "Closed");
-                            }
-                        });
-                    });
-                }
-
+                // Justified layout - push GUI and Stats to the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Stats section
                     ui.vertical(|ui| {
                         ui.strong("Stats");
+                        ui.add_space(6.0);
                         if let Some(plugin_info) = &self.plugin_info {
                             if let Some(ref controller_info) = plugin_info.controller_info {
                                 ui.label(format!(
@@ -906,6 +882,37 @@ impl eframe::App for VST3Inspector {
                             }
                             ui.label(format!("Classes: {}", plugin_info.classes.len()));
                         }
+                    });
+
+                    ui.separator();
+                    ui.add_space(10.0);
+
+                    // GUI controls - always show to maintain consistent layout
+                    ui.vertical(|ui| {
+                        ui.strong("Plugin GUI");
+                        ui.add_space(6.0);
+
+                        ui.horizontal(|ui| {
+                            if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
+                                if self.gui_attached {
+                                    if ui.button("Close GUI").clicked() {
+                                        self.close_plugin_gui();
+                                    }
+                                } else {
+                                    if ui.button("Open GUI").clicked() {
+                                        if let Err(e) = self.create_plugin_gui() {
+                                            println!("❌ Failed to create plugin GUI: {}", e);
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Show disabled button and status when no GUI is available
+                                ui.add_enabled_ui(false, |ui| {
+                                    ui.button("Open GUI");
+                                });
+                                ui.colored_label(egui::Color32::DARK_GRAY, "No GUI Available");
+                            }
+                        });
                     });
                 });
             });
@@ -936,6 +943,7 @@ impl eframe::App for VST3Inspector {
 
                 let mut selected_plugin: Option<String> = None;
                 egui::ScrollArea::vertical()
+                    .id_salt("plugin_list_scroll")
                     .max_height(200.0)
                     .show(ui, |ui| {
                         for plugin_path in &self.discovered_plugins {
@@ -969,123 +977,164 @@ impl eframe::App for VST3Inspector {
                 ui.heading("Plugin Information");
                 ui.add_space(8.0);
 
-                if let Some(plugin_info) = &self.plugin_info {
-                    // Factory Information
-                    ui.strong("Factory Information");
-                    ui.add_space(4.0);
-                    egui::Grid::new("factory_grid")
-                        .num_columns(2)
-                        .spacing([10.0, 4.0])
-                        .show(ui, |ui| {
-                            ui.label("Vendor:");
-                            ui.label(&plugin_info.factory_info.vendor);
-                            ui.end_row();
-
-                            ui.label("URL:");
-                            ui.label(&plugin_info.factory_info.url);
-                            ui.end_row();
-
-                            ui.label("Email:");
-                            ui.label(&plugin_info.factory_info.email);
-                            ui.end_row();
-
-                            ui.label("Flags:");
-                            ui.label(format!("0x{:x}", plugin_info.factory_info.flags));
-                            ui.end_row();
-                        });
-
-                    ui.add_space(8.0);
-
-                    ui.add_space(8.0);
-                    ui.strong("Plugin Classes");
-                    ui.add_space(4.0);
-                    ui.add_space(4.0);
-                    if plugin_info.classes.is_empty() {
-                        ui.label("No classes found.");
-                    } else {
-                        for (i, class) in plugin_info.classes.iter().enumerate() {
-                            ui.group(|ui| {
-                                ui.strong(format!("Class {}: {}", i, class.name));
-                                ui.separator();
-                                egui::Grid::new(format!("class_grid_{}", i))
-                                    .num_columns(2)
-                                    .spacing([10.0, 2.0])
-                                    .show(ui, |ui| {
-                                        ui.label("Category:");
-                                        ui.label(&class.category);
-                                        ui.end_row();
-
-                                        ui.label("Flags:");
-                                        ui.label(format!("0x{:x}", class.cardinality));
-                                        ui.end_row();
-                                    });
-                            });
-                            ui.add_space(4.0);
-                        }
-                    }
-
-                    ui.add_space(8.0);
-
-                    // Component Information
-                    if let Some(ref info) = plugin_info.component_info {
-                        ui.collapsing("🔧 Component Information", |ui| {
-                            ui.add_space(4.0);
-
-                            ui.strong("Bus Counts");
-                            egui::Grid::new("bus_counts_grid")
-                                .num_columns(2)
-                                .spacing([10.0, 4.0])
+                // Make the plugin information section scrollable
+                egui::ScrollArea::vertical()
+                    .id_salt("plugin_info_scroll")
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        if let Some(plugin_info) = &self.plugin_info {
+                            // Factory Information - collapsible
+                            egui::CollapsingHeader::new("🏭 Factory Information")
+                                .id_source("factory_info_header")
                                 .show(ui, |ui| {
-                                    ui.label("Audio Inputs:");
-                                    ui.label(info.audio_inputs.len().to_string());
-                                    ui.end_row();
+                                    ui.add_space(4.0);
+                                    egui::Grid::new("factory_info_grid")
+                                        .num_columns(2)
+                                        .spacing([10.0, 4.0])
+                                        .show(ui, |ui| {
+                                            ui.label("Vendor:");
+                                            ui.label(&plugin_info.factory_info.vendor);
+                                            ui.end_row();
 
-                                    ui.label("Audio Outputs:");
-                                    ui.label(info.audio_outputs.len().to_string());
-                                    ui.end_row();
+                                            ui.label("URL:");
+                                            ui.label(&plugin_info.factory_info.url);
+                                            ui.end_row();
 
-                                    ui.label("Event Inputs:");
-                                    ui.label(info.event_inputs.len().to_string());
-                                    ui.end_row();
+                                            ui.label("Email:");
+                                            ui.label(&plugin_info.factory_info.email);
+                                            ui.end_row();
 
-                                    ui.label("Event Outputs:");
-                                    ui.label(info.event_outputs.len().to_string());
-                                    ui.end_row();
+                                            ui.label("Flags:");
+                                            ui.label(format!(
+                                                "0x{:x}",
+                                                plugin_info.factory_info.flags
+                                            ));
+                                            ui.end_row();
+                                        });
+                                    ui.add_space(4.0);
                                 });
 
                             ui.add_space(8.0);
 
-                            if !info.audio_inputs.is_empty() {
-                                ui.strong("🎤 Audio Inputs");
-                                for (i, bus) in info.audio_inputs.iter().enumerate() {
-                                    ui.label(format!(
-                                        "  {} - {} channels",
-                                        bus.name, bus.channel_count
-                                    ));
+                            // Plugin Classes - collapsible
+                            ui.collapsing("📋 Plugin Classes", |ui| {
+                                if plugin_info.classes.is_empty() {
+                                    ui.label("No classes found.");
+                                } else {
+                                    for (i, class) in plugin_info.classes.iter().enumerate() {
+                                        ui.group(|ui| {
+                                            ui.strong(format!("Class {}: {}", i, class.name));
+                                            ui.separator();
+                                            egui::Grid::new(format!("class_grid_{}", i))
+                                                .num_columns(2)
+                                                .spacing([10.0, 2.0])
+                                                .show(ui, |ui| {
+                                                    ui.label("Category:");
+                                                    ui.label(&class.category);
+                                                    ui.end_row();
+
+                                                    ui.label("Flags:");
+                                                    ui.label(format!("0x{:x}", class.cardinality));
+                                                    ui.end_row();
+                                                });
+                                        });
+                                        ui.add_space(4.0);
+                                    }
                                 }
                                 ui.add_space(4.0);
+                            });
+
+                            ui.add_space(8.0);
+
+                            // Component Information - collapsible
+                            if let Some(ref info) = plugin_info.component_info {
+                                egui::CollapsingHeader::new("🔧 Component Information")
+                                    .id_source("component_info_header")
+                                    .show(ui, |ui| {
+                                        ui.strong("Bus Counts");
+                                        egui::Grid::new("component_bus_counts_grid")
+                                            .num_columns(2)
+                                            .spacing([10.0, 4.0])
+                                            .show(ui, |ui| {
+                                                ui.label("Audio Inputs:");
+                                                ui.label(info.audio_inputs.len().to_string());
+                                                ui.end_row();
+
+                                                ui.label("Audio Outputs:");
+                                                ui.label(info.audio_outputs.len().to_string());
+                                                ui.end_row();
+
+                                                ui.label("Event Inputs:");
+                                                ui.label(info.event_inputs.len().to_string());
+                                                ui.end_row();
+
+                                                ui.label("Event Outputs:");
+                                                ui.label(info.event_outputs.len().to_string());
+                                                ui.end_row();
+                                            });
+
+                                        ui.add_space(8.0);
+
+                                        if !info.audio_inputs.is_empty() {
+                                            ui.strong("🎤 Audio Inputs");
+                                            for (_i, bus) in info.audio_inputs.iter().enumerate() {
+                                                ui.label(format!(
+                                                    "  {} - {} channels",
+                                                    bus.name, bus.channel_count
+                                                ));
+                                            }
+                                            ui.add_space(4.0);
+                                        }
+
+                                        if !info.audio_outputs.is_empty() {
+                                            ui.strong("🔊 Audio Outputs");
+                                            for (_i, bus) in info.audio_outputs.iter().enumerate() {
+                                                ui.label(format!(
+                                                    "  {} - {} channels",
+                                                    bus.name, bus.channel_count
+                                                ));
+                                            }
+                                            ui.add_space(4.0);
+                                        }
+
+                                        ui.add_space(4.0);
+                                    });
                             }
 
-                            if !info.audio_outputs.is_empty() {
-                                ui.strong("🔊 Audio Outputs");
-                                for (i, bus) in info.audio_outputs.iter().enumerate() {
-                                    ui.label(format!(
-                                        "  {} - {} channels",
-                                        bus.name, bus.channel_count
-                                    ));
-                                }
-                                ui.add_space(4.0);
-                            }
-                        });
-                    }
-                } else {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(50.0);
-                        ui.label("❌ No plugin loaded");
-                        ui.add_space(10.0);
-                        ui.label("Load a VST3 plugin to view its information");
+                            // GUI Information - collapsible
+                            egui::CollapsingHeader::new("🎨 GUI Information")
+                                .id_source("gui_info_header")
+                                .show(ui, |ui| {
+                                    ui.add_space(4.0);
+                                    egui::Grid::new("gui_information_grid")
+                                        .num_columns(2)
+                                        .spacing([10.0, 4.0])
+                                        .show(ui, |ui| {
+                                            ui.label("Has GUI:");
+                                            if plugin_info.has_gui {
+                                                ui.colored_label(egui::Color32::GREEN, "Yes");
+                                            } else {
+                                                ui.colored_label(egui::Color32::GRAY, "No");
+                                            }
+                                            ui.end_row();
+
+                                            if let Some((width, height)) = plugin_info.gui_size {
+                                                ui.label("GUI Size:");
+                                                ui.label(format!("{}x{}", width, height));
+                                                ui.end_row();
+                                            }
+                                        });
+                                    ui.add_space(4.0);
+                                });
+                        } else {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(50.0);
+                                ui.label("❌ No plugin loaded");
+                                ui.add_space(10.0);
+                                ui.label("Load a VST3 plugin to view its information");
+                            });
+                        }
                     });
-                }
             });
 
         // Central panel for parameters
@@ -1348,7 +1397,8 @@ impl VST3Inspector {
 
         TableBuilder::new(ui)
             .striped(true)
-            .resizable(true)
+            .resizable(false)
+            .animate_scrolling(false)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::auto().at_least(40.0)) // Index
             .column(Column::auto().at_least(60.0)) // ID
