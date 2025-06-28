@@ -2125,73 +2125,14 @@ impl VST3Inspector {
     // macOS GUI creation
     #[cfg(target_os = "macos")]
     unsafe fn create_macos_gui(&mut self, binary_path: String) -> Result<(), String> {
-        let lib = load_vst3_library(&binary_path)?;
-
-        let get_factory: Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> = lib
-            .get(b"GetPluginFactory")
-            .map_err(|e| format!("Failed to get factory: {}", e))?;
-
-        let factory_ptr = get_factory();
-        let factory =
-            ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or("Failed to wrap factory")?;
-
-        // Find the Audio Module class
-        let class_count = factory.countClasses();
-        let mut audio_class_id = None;
-
-        for i in 0..class_count {
-            let mut class_info = std::mem::zeroed();
-            if factory.getClassInfo(i, &mut class_info) == vst3::Steinberg::kResultOk {
-                let category = c_str_to_string(&class_info.category);
-                if category.contains("Audio Module") {
-                    audio_class_id = Some(class_info.cid);
-                    break;
-                }
-            }
-        }
-
-        let audio_class_id = audio_class_id.ok_or("No Audio Module class found")?;
-
-        // Create component
-        let mut component_ptr: *mut IComponent = ptr::null_mut();
-        let create_result = factory.createInstance(
-            audio_class_id.as_ptr(),
-            IComponent::IID.as_ptr() as *const i8,
-            &mut component_ptr as *mut _ as *mut _,
-        );
-
-        if create_result != vst3::Steinberg::kResultOk || component_ptr.is_null() {
-            return Err("Failed to create component for GUI".to_string());
-        }
-
-        let component =
-            ComPtr::<IComponent>::from_raw(component_ptr).ok_or("Failed to wrap component")?;
-
-        // Initialize component
-        let init_result = component.initialize(ptr::null_mut());
-        if init_result != vst3::Steinberg::kResultOk {
-            component.terminate();
-            return Err("Failed to initialize component".to_string());
-        }
-
-        // Get controller
-        let controller = match get_or_create_controller(&component, &factory, &audio_class_id)? {
-            Some(ctrl) => ctrl,
-            None => {
-                component.terminate();
-                return Err("No controller available for GUI".to_string());
-            }
-        };
-
-        // Connect components
-        let _ = connect_component_and_controller(&component, &controller);
+        // Use existing component and controller - don't create new ones!
+        let controller = self.controller.as_ref()
+            .ok_or("No controller instance available - plugin must be loaded first")?;
 
         // Create view using ViewType::kEditor (which is "editor")
         let editor_view_type = b"editor\0".as_ptr() as *const i8;
         let view_ptr = controller.createView(editor_view_type);
         if view_ptr.is_null() {
-            controller.terminate();
-            component.terminate();
             return Err("Controller does not provide editor view".to_string());
         }
 
@@ -2207,8 +2148,6 @@ impl VST3Inspector {
 
         let size_result = view.getSize(&mut view_rect);
         if size_result != vst3::Steinberg::kResultOk {
-            controller.terminate();
-            component.terminate();
             return Err("Could not get editor view size".to_string());
         }
 
@@ -2227,8 +2166,6 @@ impl VST3Inspector {
         let platform_type = b"NSView\0".as_ptr() as *const i8;
         let platform_support = view.isPlatformTypeSupported(platform_type);
         if platform_support != vst3::Steinberg::kResultOk {
-            controller.terminate();
-            component.terminate();
             let _: () = msg_send![window, close];
             return Err("PlugView does not support NSView platform type".to_string());
         }
@@ -2241,21 +2178,14 @@ impl VST3Inspector {
 
             // Store references for cleanup
             self.plugin_view = Some(view);
-            self.controller = Some(controller);
-            self.component = Some(component);
             self.native_window = Some(window);
             self.gui_attached = true;
 
             // Show the window
             let _: () = msg_send![window, makeKeyAndOrderFront: nil];
 
-            // Keep library alive
-            self.plugin_library = Some(lib);
-
             Ok(())
         } else {
-            controller.terminate();
-            component.terminate();
             let _: () = msg_send![window, close];
             Err(format!(
                 "Failed to attach plugin view: {:#x}",
@@ -2267,66 +2197,9 @@ impl VST3Inspector {
     // Windows GUI creation
     #[cfg(target_os = "windows")]
     unsafe fn create_windows_gui(&mut self, binary_path: String) -> Result<(), String> {
-        let lib = load_vst3_library(&binary_path)?;
-
-        let get_factory: libloading::Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> = lib
-            .get(b"GetPluginFactory")
-            .map_err(|e| format!("Failed to get factory: {}", e))?;
-
-        let factory_ptr = get_factory();
-        let factory =
-            ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or("Failed to wrap factory")?;
-
-        // Find the Audio Module class
-        let class_count = factory.countClasses();
-        let mut audio_class_id = None;
-
-        for i in 0..class_count {
-            let mut class_info = std::mem::zeroed();
-            if factory.getClassInfo(i, &mut class_info) == vst3::Steinberg::kResultOk {
-                let category = c_str_to_string(&class_info.category);
-                if category.contains("Audio Module") {
-                    audio_class_id = Some(class_info.cid);
-                    break;
-                }
-            }
-        }
-
-        let audio_class_id = audio_class_id.ok_or("No Audio Module class found")?;
-
-        // Create component
-        let mut component_ptr: *mut IComponent = ptr::null_mut();
-        let create_result = factory.createInstance(
-            audio_class_id.as_ptr(),
-            IComponent::IID.as_ptr() as *const i8,
-            &mut component_ptr as *mut _ as *mut _,
-        );
-
-        if create_result != vst3::Steinberg::kResultOk || component_ptr.is_null() {
-            return Err("Failed to create component for GUI".to_string());
-        }
-
-        let component =
-            ComPtr::<IComponent>::from_raw(component_ptr).ok_or("Failed to wrap component")?;
-
-        // Initialize component
-        let init_result = component.initialize(ptr::null_mut());
-        if init_result != vst3::Steinberg::kResultOk {
-            component.terminate();
-            return Err("Failed to initialize component".to_string());
-        }
-
-        // Get controller
-        let controller = match get_or_create_controller(&component, &factory, &audio_class_id)? {
-            Some(ctrl) => ctrl,
-            None => {
-                component.terminate();
-                return Err("No controller available for GUI".to_string());
-            }
-        };
-
-        // Connect components
-        let _ = connect_component_and_controller(&component, &controller);
+        // Use existing component and controller - don't create new ones!
+        let controller = self.controller.as_ref()
+            .ok_or("No controller instance available - plugin must be loaded first")?;
 
         // Create view using ViewType::kEditor (which is "editor")
         let editor_view_type = b"editor\0".as_ptr() as *const i8;
