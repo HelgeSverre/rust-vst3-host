@@ -2,15 +2,17 @@
 
 use eframe::egui;
 use std::ptr;
-use vst3::Steinberg::Vst::{BusDirections_::*, MediaTypes_::*};
+use vst3::Steinberg::Vst::{BusDirections_::*, IAudioProcessorTrait, MediaTypes_::*};
 // Import the constants
 use vst3::Steinberg::Vst::{
-    IAudioProcessor, IComponent, IComponentTrait, IConnectionPoint, IConnectionPointTrait,
-    IEditController, IEditControllerTrait,
+    Event, Event_, IAudioProcessor, IComponent, IComponentTrait, IConnectionPoint,
+    IConnectionPointTrait, IEditController, IEditControllerTrait, IEventList, IEventListTrait,
+    ProcessData, AudioBusBuffers, ProcessContext, ProcessSetup, IParameterChanges,
+    IParameterChangesTrait, IParamValueQueue, IParamValueQueueTrait,
 };
 use vst3::Steinberg::{IPlugView, IPlugViewTrait, IPluginFactoryTrait};
 use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory};
-use vst3::{ComPtr, Interface};
+use vst3::{ComPtr, Interface, Class, ComWrapper};
 
 use libloading::os::unix::{Library, Symbol};
 
@@ -421,9 +423,49 @@ unsafe fn properly_initialize_plugin(
     let component =
         ComPtr::<IComponent>::from_raw(component_ptr).ok_or("Failed to wrap component")?;
 
+    // Debugger here if needed
+    println!("✅ Component created successfully: {:p}", component_ptr);
+
     let init_result = component.initialize(ptr::null_mut());
+
     if init_result != vst3::Steinberg::kResultOk {
         return Err("Failed to initialize component".to_string());
+    }
+
+    // After component initialization and before controller creation
+    // Activate all event input and output buses
+    let event_input_count = component.getBusCount(kEvent as i32, kInput as i32);
+    let event_output_count = component.getBusCount(kEvent as i32, kOutput as i32);
+
+    // Activate event input buses
+    for i in 0..event_input_count {
+        let mut bus_info = std::mem::zeroed();
+        let info_result = component.getBusInfo(kEvent as i32, kInput as i32, i, &mut bus_info);
+        let name = if info_result == vst3::Steinberg::kResultOk {
+            utf16_to_string_i16(&bus_info.name)
+        } else {
+            format!("#{}", i)
+        };
+        let activate_result = component.activateBus(kEvent as i32, kInput as i32, i, 1);
+        println!(
+            "[Bus Activation] Event Input Bus {} (index {}): result = {:#x}",
+            name, i, activate_result
+        );
+    }
+    // Activate event output buses
+    for i in 0..event_output_count {
+        let mut bus_info = std::mem::zeroed();
+        let info_result = component.getBusInfo(kEvent as i32, kOutput as i32, i, &mut bus_info);
+        let name = if info_result == vst3::Steinberg::kResultOk {
+            utf16_to_string_i16(&bus_info.name)
+        } else {
+            format!("#{}", i)
+        };
+        let activate_result = component.activateBus(kEvent as i32, kOutput as i32, i, 1);
+        println!(
+            "[Bus Activation] Event Output Bus {} (index {}): result = {:#x}",
+            name, i, activate_result
+        );
     }
 
     // Get controller (same logic as in our working detection)
@@ -839,12 +881,20 @@ struct VST3Inspector {
     current_tab: Tab,
     // Inline editing state
     parameter_being_edited: Option<u32>,
+    plugin_library: Option<Library>,
+    // Audio processing
+    processor: Option<ComPtr<IAudioProcessor>>,
+    host_process_data: Option<Box<HostProcessData>>,
+    is_processing: bool,
+    block_size: i32,
+    sample_rate: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tab {
     Plugins,
     Plugin,
+    Processing,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -888,14 +938,14 @@ impl eframe::App for VST3Inspector {
                         if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
                             if self.gui_attached {
                                 if ui
-                                    .add_sized([120.0, 40.0], egui::Button::new("🎨 Close GUI"))
+                                    .add_sized([120.0, 40.0], egui::Button::new("Close GUI"))
                                     .clicked()
                                 {
                                     self.close_plugin_gui();
                                 }
                             } else {
                                 if ui
-                                    .add_sized([120.0, 40.0], egui::Button::new("🎨 Open GUI"))
+                                    .add_sized([120.0, 40.0], egui::Button::new("Open GUI"))
                                     .clicked()
                                 {
                                     if let Err(e) = self.create_plugin_gui() {
@@ -906,7 +956,7 @@ impl eframe::App for VST3Inspector {
                         } else {
                             // Show disabled button when no GUI is available
                             ui.add_enabled_ui(false, |ui| {
-                                ui.add_sized([120.0, 40.0], egui::Button::new("❌ No GUI"));
+                                ui.add_sized([120.0, 40.0], egui::Button::new("No GUI"));
                             });
                         }
                     });
@@ -918,8 +968,9 @@ impl eframe::App for VST3Inspector {
 
             // Tab buttons
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.current_tab, Tab::Plugins, "🔌 Plugins");
-                ui.selectable_value(&mut self.current_tab, Tab::Plugin, "🎛️ Plugin");
+                ui.selectable_value(&mut self.current_tab, Tab::Plugins, "Plugins");
+                ui.selectable_value(&mut self.current_tab, Tab::Plugin, "Plugin");
+                ui.selectable_value(&mut self.current_tab, Tab::Processing, "Processing");
             });
             ui.add_space(8.0);
         });
@@ -928,6 +979,7 @@ impl eframe::App for VST3Inspector {
         match self.current_tab {
             Tab::Plugins => self.show_plugins_tab(ctx),
             Tab::Plugin => self.show_plugin_tab(ctx),
+            Tab::Processing => self.show_processing_tab(ctx),
         }
     }
 }
@@ -941,7 +993,7 @@ impl VST3Inspector {
 
             ui.horizontal(|ui| {
                 ui.label(format!("Found {} plugins", self.discovered_plugins.len()));
-                if ui.button("🔄 Refresh").clicked() {
+                if ui.button("Refresh").clicked() {
                     self.discovered_plugins = scan_vst3_directories();
                 }
             });
@@ -959,8 +1011,8 @@ impl VST3Inspector {
         TableBuilder::new(ui)
             .striped(true)
             .resizable(false)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::remainder().at_least(200.0)) // Plugin Name
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center)) // Plugin Name
+            .column(Column::remainder().at_least(200.0))
             .column(Column::remainder().at_least(300.0)) // Directory
             .column(Column::auto().at_least(80.0)) // Actions
             .header(20.0, |mut header| {
@@ -977,7 +1029,7 @@ impl VST3Inspector {
             .body(|mut body| {
                 for plugin_path in &self.discovered_plugins.clone() {
                     let plugin_name = get_plugin_name_from_path(plugin_path);
-                    let directory = std::path::Path::new(plugin_path)
+                    let _directory = std::path::Path::new(plugin_path)
                         .parent()
                         .and_then(|p| p.to_str())
                         .unwrap_or("Unknown");
@@ -1195,6 +1247,22 @@ impl VST3Inspector {
             ui.add_space(8.0);
             ui.heading("Parameter Control");
             ui.add_space(8.0);
+
+            // Add MIDI monitor button
+            if ui.button("Monitor Outgoing MIDI Events").clicked() {
+                if let Err(e) = self.monitor_midi_output() {
+                    println!("❌ Failed to monitor MIDI output: {}", e);
+                }
+            }
+            // Add MIDI Note On test button
+            if ui
+                .button("Send MIDI Note On (Channel 0, Middle C, Velocity 1.0)")
+                .clicked()
+            {
+                if let Err(e) = self.send_midi_note_on(0, 60, 1.0) {
+                    println!("❌ Failed to send MIDI Note On: {}", e);
+                }
+            }
 
             // Clone the plugin info to avoid borrowing issues
             let plugin_info_clone = self.plugin_info.clone();
@@ -1538,7 +1606,7 @@ impl VST3Inspector {
                                 let is_being_edited = self.parameter_being_edited == Some(param.id);
 
                                 ui.horizontal(|ui| {
-                                    let response = if param.step_count > 0 && param.step_count <= 10
+                                    let _response = if param.step_count > 0 && param.step_count <= 10
                                     {
                                         // For parameters with few steps, use a combo box
                                         let current_step =
@@ -1734,6 +1802,178 @@ impl VST3Inspector {
             });
         });
     }
+    
+    fn show_processing_tab(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.heading("Audio & MIDI Processing");
+            ui.add_space(8.0);
+            
+            if self.plugin_info.is_none() {
+                ui.label("No plugin loaded. Please load a plugin first.");
+                return;
+            }
+            
+            // Processing controls
+            ui.horizontal(|ui| {
+                ui.label("Processing State:");
+                if self.is_processing {
+                    ui.colored_label(egui::Color32::GREEN, "Active");
+                    if ui.button("Stop Processing").clicked() {
+                        self.stop_processing();
+                    }
+                } else {
+                    ui.colored_label(egui::Color32::RED, "Stopped");
+                    if ui.button("Start Processing").clicked() {
+                        if let Err(e) = self.start_processing() {
+                            println!("Failed to start processing: {}", e);
+                        }
+                    }
+                }
+            });
+            
+            ui.separator();
+            
+            // Audio settings
+            ui.horizontal(|ui| {
+                ui.label("Sample Rate:");
+                ui.label(format!("{} Hz", self.sample_rate));
+                ui.separator();
+                ui.label("Block Size:");
+                ui.label(format!("{} samples", self.block_size));
+            });
+            
+            ui.separator();
+            ui.add_space(8.0);
+            
+            // MIDI Testing
+            ui.heading("MIDI Testing");
+            ui.add_space(8.0);
+            
+            // Virtual keyboard
+            ui.group(|ui| {
+                ui.label("Virtual MIDI Keyboard:");
+                ui.horizontal(|ui| {
+                    // White keys
+                    let white_keys = [(60, "C"), (62, "D"), (64, "E"), (65, "F"), (67, "G"), (69, "A"), (71, "B"), (72, "C")];
+                    for (note, label) in &white_keys {
+                        if ui.button(format!("{}\n{}", label, note)).clicked() {
+                            // Send note on
+                            if let Err(e) = self.send_midi_note_on(0, *note, 0.8) {
+                                println!("Failed to send note on: {}", e);
+                            }
+                            // Schedule note off
+                            if let Err(e) = self.send_midi_note_off(0, *note, 0.0) {
+                                println!("Failed to send note off: {}", e);
+                            }
+                        }
+                    }
+                });
+                
+                ui.horizontal(|ui| {
+                    // Black keys  
+                    let black_keys = [(61, "C#"), (63, "D#"), (66, "F#"), (68, "G#"), (70, "A#")];
+                    ui.add_space(30.0); // Offset for first black key
+                    for (note, label) in &black_keys {
+                        if ui.button(format!("{}\n{}", label, note)).clicked() {
+                            if let Err(e) = self.send_midi_note_on(0, *note, 0.8) {
+                                println!("Failed to send note on: {}", e);
+                            }
+                            if let Err(e) = self.send_midi_note_off(0, *note, 0.0) {
+                                println!("Failed to send note off: {}", e);
+                            }
+                        }
+                        if *note == 63 {
+                            ui.add_space(40.0); // Gap between E and F
+                        }
+                    }
+                });
+            });
+            
+            ui.add_space(8.0);
+            
+            // MIDI monitor
+            ui.horizontal(|ui| {
+                if ui.button("Test MIDI Output").clicked() {
+                    if let Err(e) = self.monitor_midi_output() {
+                        println!("MIDI monitoring error: {}", e);
+                    }
+                }
+                
+                if ui.button("Process Audio Block").clicked() {
+                    if let Err(e) = self.process_audio_block() {
+                        println!("Audio processing error: {}", e);
+                    }
+                }
+            });
+            
+            ui.separator();
+            ui.add_space(8.0);
+            
+            // Bus information
+            if let Some(info) = &self.plugin_info {
+                if let Some(comp_info) = &info.component_info {
+                    ui.heading("Audio Buses");
+                    
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label("Input Buses:");
+                            for (i, bus) in comp_info.audio_inputs.iter().enumerate() {
+                                ui.label(format!("  {} [{}]: {} channels", 
+                                    i, bus.name, bus.channel_count));
+                            }
+                            if comp_info.audio_inputs.is_empty() {
+                                ui.label("  None");
+                            }
+                        });
+                        
+                        ui.separator();
+                        
+                        ui.vertical(|ui| {
+                            ui.label("Output Buses:");
+                            for (i, bus) in comp_info.audio_outputs.iter().enumerate() {
+                                ui.label(format!("  {} [{}]: {} channels", 
+                                    i, bus.name, bus.channel_count));
+                            }
+                            if comp_info.audio_outputs.is_empty() {
+                                ui.label("  None");
+                            }
+                        });
+                    });
+                    
+                    ui.add_space(8.0);
+                    
+                    ui.heading("Event Buses");
+                    
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label("Event Input Buses:");
+                            for (i, bus) in comp_info.event_inputs.iter().enumerate() {
+                                ui.label(format!("  {} [{}]: {} channels", 
+                                    i, bus.name, bus.channel_count));
+                            }
+                            if comp_info.event_inputs.is_empty() {
+                                ui.label("  None");
+                            }
+                        });
+                        
+                        ui.separator();
+                        
+                        ui.vertical(|ui| {
+                            ui.label("Event Output Buses:");
+                            for (i, bus) in comp_info.event_outputs.iter().enumerate() {
+                                ui.label(format!("  {} [{}]: {} channels", 
+                                    i, bus.name, bus.channel_count));
+                            }
+                            if comp_info.event_outputs.is_empty() {
+                                ui.label("  None");
+                            }
+                        });
+                    });
+                }
+            }
+        });
+    }
 
     fn create_plugin_gui(&mut self) -> Result<(), String> {
         println!("🎨 Creating plugin GUI...");
@@ -1892,7 +2132,7 @@ impl VST3Inspector {
             let _: () = msg_send![window, makeKeyAndOrderFront: nil];
 
             // Keep library alive
-            std::mem::forget(lib);
+            self.plugin_library = Some(lib);
 
             Ok(())
         } else {
@@ -2032,7 +2272,7 @@ impl VST3Inspector {
             UpdateWindow(window);
 
             // Keep library alive
-            std::mem::forget(lib);
+            self.plugin_library = Some(lib);
 
             Ok(())
         } else {
@@ -2158,6 +2398,7 @@ impl VST3Inspector {
             self.controller = None;
             self.component = None;
             self.native_window = None;
+            self.plugin_library = None; // Drop the library last!
 
             println!("✅ Plugin GUI closed");
         }
@@ -2252,7 +2493,8 @@ impl VST3Inspector {
     fn load_plugin(&mut self, plugin_path: String) {
         println!("Loading plugin: {}", plugin_path);
 
-        // Close any existing GUI
+        // Close any existing GUI and stop processing
+        self.stop_processing();
         if self.gui_attached {
             self.close_plugin_gui();
         }
@@ -2264,6 +2506,10 @@ impl VST3Inspector {
         self.plugin_info = None;
         self.selected_parameter = None;
         self.current_page = 0;
+        self.processor = None;
+        self.component = None;
+        self.controller = None;
+        self.host_process_data = None;
 
         // Try to load the new plugin
         let binary_path = match get_vst3_binary_path(&self.plugin_path) {
@@ -2274,7 +2520,7 @@ impl VST3Inspector {
             }
         };
 
-        match unsafe { inspect_vst3_plugin(&binary_path) } {
+        match unsafe { self.load_and_init_plugin(&binary_path) } {
             Ok(plugin_info) => {
                 println!("✅ Plugin loaded successfully!");
                 self.plugin_info = Some(plugin_info);
@@ -2283,6 +2529,401 @@ impl VST3Inspector {
                 println!("❌ Failed to load plugin: {}", e);
             }
         }
+    }
+    
+    unsafe fn load_and_init_plugin(&mut self, binary_path: &str) -> Result<PluginInfo, String> {
+        // Load the library
+        let library = match Library::new(binary_path) {
+            Ok(lib) => lib,
+            Err(e) => return Err(format!("Failed to load library: {}", e)),
+        };
+        
+        // Get factory
+        let get_factory: Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> =
+            match library.get(b"GetPluginFactory") {
+                Ok(symbol) => symbol,
+                Err(e) => return Err(format!("Failed to get GetPluginFactory: {}", e)),
+            };
+        
+        let factory_ptr = get_factory();
+        if factory_ptr.is_null() {
+            return Err("GetPluginFactory returned null".to_string());
+        }
+        
+        let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr)
+            .ok_or("Failed to wrap factory")?;
+        
+        // Get factory info
+        let mut factory_info = std::mem::zeroed();
+        factory.getFactoryInfo(&mut factory_info);
+        
+        // Find audio module class
+        let class_count = factory.countClasses();
+        let mut audio_class_id = None;
+        let mut classes = Vec::new();
+        
+        for i in 0..class_count {
+            let mut class_info = std::mem::zeroed();
+            if factory.getClassInfo(i, &mut class_info) == vst3::Steinberg::kResultOk {
+                let category = c_str_to_string(&class_info.category);
+                if category.contains("Audio Module") {
+                    audio_class_id = Some(class_info.cid);
+                }
+                classes.push(ClassInfo {
+                    class_id: format!("{:?}", class_info.cid),
+                    cardinality: class_info.cardinality,
+                    category: category.clone(),
+                    name: c_str_to_string(&class_info.name),
+                });
+            }
+        }
+        
+        let audio_class_id = audio_class_id.ok_or("No Audio Module class found")?;
+        
+        // Create component
+        let mut component_ptr: *mut IComponent = ptr::null_mut();
+        let result = factory.createInstance(
+            audio_class_id.as_ptr() as *const i8,
+            IComponent::IID.as_ptr() as *const i8,
+            &mut component_ptr as *mut _ as *mut _,
+        );
+        
+        if result != vst3::Steinberg::kResultOk || component_ptr.is_null() {
+            return Err("Failed to create component".to_string());
+        }
+        
+        let component = ComPtr::<IComponent>::from_raw(component_ptr)
+            .ok_or("Failed to wrap component")?;
+        
+        // Initialize component
+        let init_result = component.initialize(ptr::null_mut());
+        if init_result != vst3::Steinberg::kResultOk {
+            return Err("Failed to initialize component".to_string());
+        }
+        
+        // Get processor
+        let processor = component.cast::<IAudioProcessor>()
+            .ok_or("Component does not implement IAudioProcessor")?;
+        
+        // Get or create controller
+        let controller = match get_or_create_controller(&component, &factory, &audio_class_id)? {
+            Some(ctrl) => ctrl,
+            None => {
+                component.terminate();
+                return Err("No controller available".to_string());
+            }
+        };
+        
+        // Connect if separate
+        let _ = connect_component_and_controller(&component, &controller);
+        
+        // Setup processing
+        let mut setup = ProcessSetup {
+            processMode: vst3::Steinberg::Vst::ProcessModes_::kRealtime as i32,
+            symbolicSampleSize: vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32 as i32,
+            maxSamplesPerBlock: self.block_size,
+            sampleRate: self.sample_rate,
+        };
+        
+        let setup_result = processor.setupProcessing(&mut setup);
+        if setup_result != vst3::Steinberg::kResultOk {
+            component.terminate();
+            controller.terminate();
+            return Err(format!("Failed to setup processing: {:#x}", setup_result));
+        }
+        
+        // Activate buses
+        self.activate_all_buses(&component)?;
+        
+        // Create process data
+        let mut process_data = Box::new(HostProcessData::new(self.block_size, self.sample_rate));
+        process_data.prepare_buffers(&component, self.block_size)?;
+        
+        // Get component info
+        let component_info = get_component_info(&component)?;
+        
+        // Activate component
+        let activate_result = component.setActive(1);
+        if activate_result != vst3::Steinberg::kResultOk {
+            println!("⚠️ Component activation failed: {:#x}", activate_result);
+        }
+        
+        // Get controller info
+        let controller_info = get_controller_info(&controller)?;
+        
+        // Check for GUI
+        let (has_gui, gui_size) = check_for_gui(&controller)?;
+        
+        // Store everything (we're keeping them alive now!)
+        self.component = Some(component);
+        self.controller = Some(controller);
+        self.processor = Some(processor);
+        self.host_process_data = Some(process_data);
+        self.plugin_library = Some(library);
+        
+        Ok(PluginInfo {
+            factory_info: FactoryInfo {
+                vendor: c_str_to_string(&factory_info.vendor),
+                url: c_str_to_string(&factory_info.url),
+                email: c_str_to_string(&factory_info.email),
+                flags: factory_info.flags,
+            },
+            classes,
+            component_info: Some(component_info),
+            controller_info: Some(controller_info),
+            has_gui,
+            gui_size,
+        })
+    }
+    
+    unsafe fn activate_all_buses(&self, component: &ComPtr<IComponent>) -> Result<(), String> {
+        // Activate audio buses
+        let audio_input_count = component.getBusCount(kAudio as i32, kInput as i32);
+        let audio_output_count = component.getBusCount(kAudio as i32, kOutput as i32);
+        
+        for i in 0..audio_input_count {
+            component.activateBus(kAudio as i32, kInput as i32, i, 1);
+        }
+        
+        for i in 0..audio_output_count {
+            component.activateBus(kAudio as i32, kOutput as i32, i, 1);
+        }
+        
+        // Activate event buses
+        let event_input_count = component.getBusCount(kEvent as i32, kInput as i32);
+        let event_output_count = component.getBusCount(kEvent as i32, kOutput as i32);
+        
+        for i in 0..event_input_count {
+            component.activateBus(kEvent as i32, kInput as i32, i, 1);
+        }
+        
+        for i in 0..event_output_count {
+            component.activateBus(kEvent as i32, kOutput as i32, i, 1);
+        }
+        
+        Ok(())
+    }
+    
+    fn stop_processing(&mut self) {
+        if self.is_processing {
+            unsafe {
+                if let Some(processor) = &self.processor {
+                    processor.setProcessing(0);
+                }
+                if let Some(component) = &self.component {
+                    component.setActive(0);
+                }
+            }
+            self.is_processing = false;
+        }
+    }
+    
+    fn start_processing(&mut self) -> Result<(), String> {
+        unsafe {
+            if let Some(processor) = &self.processor {
+                let result = processor.setProcessing(1);
+                if result == vst3::Steinberg::kResultOk {
+                    self.is_processing = true;
+                    Ok(())
+                } else {
+                    Err(format!("Failed to start processing: {:#x}", result))
+                }
+            } else {
+                Err("No processor available".to_string())
+            }
+        }
+    }
+
+    fn monitor_midi_output(&mut self) -> Result<(), String> {
+        if !self.is_processing {
+            self.start_processing()?;
+        }
+        
+        let processor = match &self.processor {
+            Some(p) => p,
+            None => return Err("No processor available".to_string()),
+        };
+        
+        let process_data = match &mut self.host_process_data {
+            Some(data) => data,
+            None => return Err("No process data available".to_string()),
+        };
+
+        unsafe {
+            // Clear buffers and events
+            process_data.clear_buffers();
+            
+            // Update time in process context
+            process_data.process_context.continousTimeSamples += self.block_size as i64;
+            
+            // Process audio (even with empty buffers, this allows MIDI generation)
+            let result = processor.process(&mut process_data.process_data);
+            println!("[MIDI Monitor] Called process, result = {:#x}", result);
+            
+            // Check output events
+            let num_events = process_data.output_events.events.borrow().len();
+            if num_events > 0 {
+                println!("[MIDI Monitor] Output event count: {}", num_events);
+                print_midi_events(&process_data.output_events);
+            }
+        }
+        Ok(())
+    }
+
+    /// Send a MIDI Note On event to the plugin for testing input event integration
+    fn send_midi_note_on(&mut self, channel: i16, pitch: i16, velocity: f32) -> Result<(), String> {
+        if !self.is_processing {
+            self.start_processing()?;
+        }
+        
+        let processor = match &self.processor {
+            Some(p) => p,
+            None => return Err("No processor available".to_string()),
+        };
+        
+        let process_data = match &mut self.host_process_data {
+            Some(data) => data,
+            None => return Err("No process data available".to_string()),
+        };
+
+        unsafe {
+            // Clear buffers and events
+            process_data.clear_buffers();
+            
+            // Add Note On event
+            let mut event = std::mem::zeroed::<Event>();
+            event.r#type = Event_::EventTypes_::kNoteOnEvent as u16;
+            event.sampleOffset = 0;
+            event.ppqPosition = 0.0;
+            event.__field0.noteOn.channel = channel;
+            event.__field0.noteOn.pitch = pitch;
+            event.__field0.noteOn.velocity = velocity;
+            event.__field0.noteOn.noteId = -1;
+            event.__field0.noteOn.length = -1;
+            event.__field0.noteOn.tuning = 0.0;
+
+            process_data.input_events.events.borrow_mut().push(event);
+            
+            // Update time
+            process_data.process_context.continousTimeSamples += self.block_size as i64;
+
+            // Process
+            let result = processor.process(&mut process_data.process_data);
+            println!("[MIDI Input] Sent Note On - channel={}, pitch={}, velocity={}, result={:#x}", 
+                     channel, pitch, velocity, result);
+
+            // Check output events
+            let num_events = process_data.output_events.events.borrow().len();
+            if num_events > 0 {
+                println!("[MIDI Input] Output events generated: {}", num_events);
+                print_midi_events(&process_data.output_events);
+            }
+        }
+        Ok(())
+    }
+    
+    /// Send a MIDI Note Off event
+    fn send_midi_note_off(&mut self, channel: i16, pitch: i16, velocity: f32) -> Result<(), String> {
+        if !self.is_processing {
+            self.start_processing()?;
+        }
+        
+        let processor = match &self.processor {
+            Some(p) => p,
+            None => return Err("No processor available".to_string()),
+        };
+        
+        let process_data = match &mut self.host_process_data {
+            Some(data) => data,
+            None => return Err("No process data available".to_string()),
+        };
+
+        unsafe {
+            // Clear buffers and events
+            process_data.clear_buffers();
+            
+            // Add Note Off event
+            let mut event = std::mem::zeroed::<Event>();
+            event.r#type = Event_::EventTypes_::kNoteOffEvent as u16;
+            event.sampleOffset = 0;
+            event.ppqPosition = 0.0;
+            event.__field0.noteOff.channel = channel;
+            event.__field0.noteOff.pitch = pitch;
+            event.__field0.noteOff.velocity = velocity;
+            event.__field0.noteOff.noteId = -1;
+            event.__field0.noteOff.tuning = 0.0;
+
+            process_data.input_events.events.borrow_mut().push(event);
+            
+            // Update time
+            process_data.process_context.continousTimeSamples += self.block_size as i64;
+
+            // Process
+            let result = processor.process(&mut process_data.process_data);
+            println!("[MIDI Input] Sent Note Off - channel={}, pitch={}, velocity={}, result={:#x}", 
+                     channel, pitch, velocity, result);
+
+            // Check output events
+            let num_events = process_data.output_events.events.borrow().len();
+            if num_events > 0 {
+                println!("[MIDI Input] Output events generated: {}", num_events);
+                print_midi_events(&process_data.output_events);
+            }
+        }
+        Ok(())
+    }
+    
+    /// Process one audio block with optional input
+    fn process_audio_block(&mut self) -> Result<(), String> {
+        if !self.is_processing {
+            self.start_processing()?;
+        }
+        
+        let processor = match &self.processor {
+            Some(p) => p,
+            None => return Err("No processor available".to_string()),
+        };
+        
+        let process_data = match &mut self.host_process_data {
+            Some(data) => data,
+            None => return Err("No process data available".to_string()),
+        };
+
+        unsafe {
+            // Clear buffers (silence input)
+            process_data.clear_buffers();
+            
+            // Update time
+            process_data.process_context.continousTimeSamples += self.block_size as i64;
+            
+            // Process audio
+            let result = processor.process(&mut process_data.process_data);
+            
+            if result != vst3::Steinberg::kResultOk {
+                return Err(format!("Process failed: {:#x}", result));
+            }
+            
+            // Check if plugin generated any audio
+            let mut has_output = false;
+            for buffer in &process_data.output_buffers {
+                if buffer.iter().any(|&sample| sample != 0.0) {
+                    has_output = true;
+                    break;
+                }
+            }
+            
+            if has_output {
+                println!("🎵 Plugin generated audio output!");
+            }
+            
+            // Check output events
+            let num_events = process_data.output_events.events.borrow().len();
+            if num_events > 0 {
+                print_midi_events(&process_data.output_events);
+            }
+        }
+        
+        Ok(())
     }
 }
 
@@ -2307,6 +2948,12 @@ impl VST3Inspector {
             items_per_page: 50,
             current_tab: Tab::Plugins,
             parameter_being_edited: None,
+            plugin_library: None,
+            processor: None,
+            host_process_data: None,
+            is_processing: false,
+            block_size: 512,
+            sample_rate: 44100.0,
         }
     }
 }
@@ -2366,4 +3013,356 @@ fn get_plugin_name_from_path(path: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(path)
         .to_string()
+}
+
+struct MyEventList {
+    events: std::cell::RefCell<Vec<Event>>,
+}
+
+impl MyEventList {
+    fn new() -> Self {
+        Self {
+            events: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Class for MyEventList {
+    type Interfaces = (IEventList,);
+}
+
+impl IEventListTrait for MyEventList {
+    unsafe fn getEventCount(&self) -> i32 {
+        self.events.borrow().len() as i32
+    }
+    unsafe fn getEvent(&self, index: i32, event: *mut Event) -> i32 {
+        if let Some(e) = self.events.borrow().get(index as usize) {
+            *event = *e;
+            vst3::Steinberg::kResultOk
+        } else {
+            vst3::Steinberg::kResultFalse
+        }
+    }
+    unsafe fn addEvent(&self, event: *mut Event) -> i32 {
+        if !event.is_null() {
+            self.events.borrow_mut().push(*event);
+            vst3::Steinberg::kResultOk
+        } else {
+            vst3::Steinberg::kResultFalse
+        }
+    }
+}
+
+fn create_event_list() -> ComWrapper<MyEventList> {
+    ComWrapper::new(MyEventList::new())
+}
+
+fn create_event_list_ptr() -> *mut IEventList {
+    let event_list = ComWrapper::new(MyEventList::new());
+    event_list.to_com_ptr::<IEventList>()
+        .expect("Failed to get IEventList pointer")
+        .into_raw()
+}
+
+fn print_midi_events(event_list: &MyEventList) {
+    for event in event_list.events.borrow().iter() {
+        match event.r#type as u32 {
+            Event_::EventTypes_::kNoteOnEvent => {
+                let note_on = unsafe { event.__field0.noteOn };
+                println!(
+                    "[MIDI OUT] Note On: channel={}, pitch={}, velocity={}",
+                    note_on.channel, note_on.pitch, note_on.velocity
+                );
+            }
+            Event_::EventTypes_::kNoteOffEvent => {
+                let note_off = unsafe { event.__field0.noteOff };
+                println!(
+                    "[MIDI OUT] Note Off: channel={}, pitch={}, velocity={}",
+                    note_off.channel, note_off.pitch, note_off.velocity
+                );
+            }
+            Event_::EventTypes_::kLegacyMIDICCOutEvent => {
+                let cc = unsafe { event.__field0.midiCCOut };
+                println!(
+                    "[MIDI OUT] CC: channel={}, control={}, value={}, value2={}",
+                    cc.channel, cc.controlNumber, cc.value, cc.value2
+                );
+            }
+            _ => {
+                println!("[MIDI OUT] Other event type: {}", event.r#type);
+            }
+        }
+    }
+}
+
+// Audio processing infrastructure
+struct HostProcessData {
+    process_data: ProcessData,
+    input_buffers: Vec<Vec<f32>>,
+    output_buffers: Vec<Vec<f32>>,
+    input_bus_buffers: Vec<AudioBusBuffers>,
+    output_bus_buffers: Vec<AudioBusBuffers>,
+    input_channel_pointers: Vec<Vec<*mut f32>>,
+    output_channel_pointers: Vec<Vec<*mut f32>>,
+    process_context: ProcessContext,
+    input_events: ComWrapper<MyEventList>,
+    output_events: ComWrapper<MyEventList>,
+    input_events_ptr: *mut IEventList,
+    output_events_ptr: *mut IEventList,
+    input_param_changes: Box<ParameterChanges>,
+    output_param_changes: Box<ParameterChanges>,
+}
+
+impl HostProcessData {
+    unsafe fn new(block_size: i32, sample_rate: f64) -> Self {
+        let mut data = Self {
+            process_data: std::mem::zeroed(),
+            input_buffers: Vec::new(),
+            output_buffers: Vec::new(),
+            input_bus_buffers: Vec::new(),
+            output_bus_buffers: Vec::new(),
+            input_channel_pointers: Vec::new(),
+            output_channel_pointers: Vec::new(),
+            process_context: std::mem::zeroed(),
+            input_events: Box::new(MyEventList::default()),
+            output_events: Box::new(MyEventList::default()),
+            input_param_changes: Box::new(ParameterChanges::default()),
+            output_param_changes: Box::new(ParameterChanges::default()),
+        };
+        
+        // Initialize process context
+        data.process_context.sampleRate = sample_rate;
+        data.process_context.tempo = 120.0;
+        data.process_context.timeSigNumerator = 4;
+        data.process_context.timeSigDenominator = 4;
+        
+        // Set up process data
+        data.process_data.numSamples = block_size;
+        data.process_data.symbolicSampleSize = vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32 as i32;
+        data.process_data.processContext = &mut data.process_context;
+        data.process_data.inputEvents = &*data.input_events as *const MyEventList as *mut IEventList;
+        data.process_data.outputEvents = &*data.output_events as *const MyEventList as *mut IEventList;
+        data.process_data.inputParameterChanges = &*data.input_param_changes as *const ParameterChanges as *mut IParameterChanges;
+        data.process_data.outputParameterChanges = &*data.output_param_changes as *const ParameterChanges as *mut IParameterChanges;
+        
+        data
+    }
+    
+    unsafe fn prepare_buffers(&mut self, component: &ComPtr<IComponent>, block_size: i32) -> Result<(), String> {
+        // Get bus counts
+        let input_bus_count = component.getBusCount(kAudio as i32, kInput as i32);
+        let output_bus_count = component.getBusCount(kAudio as i32, kOutput as i32);
+        
+        println!("🎵 Preparing buffers: {} input buses, {} output buses", input_bus_count, output_bus_count);
+        
+        // Prepare input buffers
+        self.input_bus_buffers.clear();
+        self.input_buffers.clear();
+        self.input_channel_pointers.clear();
+        
+        for bus_idx in 0..input_bus_count {
+            let mut bus_info: vst3::Steinberg::Vst::BusInfo = std::mem::zeroed();
+            if component.getBusInfo(kAudio as i32, kInput as i32, bus_idx, &mut bus_info) == vst3::Steinberg::kResultOk {
+                let channel_count = bus_info.channelCount;
+                
+                // Create buffers for this bus
+                let mut bus_buffers = Vec::new();
+                let mut channel_ptrs = Vec::new();
+                
+                for _ in 0..channel_count {
+                    let mut buffer = vec![0.0f32; block_size as usize];
+                    let ptr = buffer.as_mut_ptr();
+                    bus_buffers.push(buffer);
+                    channel_ptrs.push(ptr);
+                }
+                
+                self.input_buffers.extend(bus_buffers);
+                self.input_channel_pointers.push(channel_ptrs);
+                
+                // Create AudioBusBuffers
+                let mut audio_bus_buffer: AudioBusBuffers = std::mem::zeroed();
+                audio_bus_buffer.numChannels = channel_count;
+                audio_bus_buffer.__field0.channelBuffers32 = if self.input_channel_pointers.last().unwrap().is_empty() { 
+                    std::ptr::null_mut() 
+                } else { 
+                    self.input_channel_pointers.last_mut().unwrap().as_mut_ptr() 
+                };
+                
+                self.input_bus_buffers.push(audio_bus_buffer);
+            }
+        }
+        
+        // Prepare output buffers
+        self.output_bus_buffers.clear();
+        self.output_buffers.clear();
+        self.output_channel_pointers.clear();
+        
+        for bus_idx in 0..output_bus_count {
+            let mut bus_info: vst3::Steinberg::Vst::BusInfo = std::mem::zeroed();
+            if component.getBusInfo(kAudio as i32, kOutput as i32, bus_idx, &mut bus_info) == vst3::Steinberg::kResultOk {
+                let channel_count = bus_info.channelCount;
+                
+                // Create buffers for this bus
+                let mut bus_buffers = Vec::new();
+                let mut channel_ptrs = Vec::new();
+                
+                for _ in 0..channel_count {
+                    let mut buffer = vec![0.0f32; block_size as usize];
+                    let ptr = buffer.as_mut_ptr();
+                    bus_buffers.push(buffer);
+                    channel_ptrs.push(ptr);
+                }
+                
+                self.output_buffers.extend(bus_buffers);
+                self.output_channel_pointers.push(channel_ptrs);
+                
+                // Create AudioBusBuffers
+                let mut audio_bus_buffer: AudioBusBuffers = std::mem::zeroed();
+                audio_bus_buffer.numChannels = channel_count;
+                audio_bus_buffer.__field0.channelBuffers32 = if self.output_channel_pointers.last().unwrap().is_empty() { 
+                    std::ptr::null_mut() 
+                } else { 
+                    self.output_channel_pointers.last_mut().unwrap().as_mut_ptr() 
+                };
+                
+                self.output_bus_buffers.push(audio_bus_buffer);
+            }
+        }
+        
+        // Update ProcessData pointers
+        self.process_data.numInputs = self.input_bus_buffers.len() as i32;
+        self.process_data.numOutputs = self.output_bus_buffers.len() as i32;
+        self.process_data.inputs = if self.input_bus_buffers.is_empty() { 
+            std::ptr::null_mut() 
+        } else { 
+            self.input_bus_buffers.as_mut_ptr() 
+        };
+        self.process_data.outputs = if self.output_bus_buffers.is_empty() { 
+            std::ptr::null_mut() 
+        } else { 
+            self.output_bus_buffers.as_mut_ptr() 
+        };
+        
+        Ok(())
+    }
+    
+    unsafe fn clear_buffers(&mut self) {
+        // Clear input buffers
+        for buffer in &mut self.input_buffers {
+            buffer.fill(0.0);
+        }
+        
+        // Clear output buffers  
+        for buffer in &mut self.output_buffers {
+            buffer.fill(0.0);
+        }
+        
+        // Clear events
+        self.input_events.events.borrow_mut().clear();
+        self.output_events.events.borrow_mut().clear();
+    }
+}
+
+// Parameter changes implementation
+#[derive(Default)]
+struct ParameterChanges {
+    queues: std::cell::RefCell<Vec<Box<ParameterValueQueue>>>,
+}
+
+impl IParameterChangesTrait for ParameterChanges {
+    unsafe fn getParameterCount(&self) -> i32 {
+        self.queues.borrow().len() as i32
+    }
+    
+    unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
+        if let Some(queue) = self.queues.borrow_mut().get_mut(index as usize) {
+            &mut **queue as *mut ParameterValueQueue as *mut IParamValueQueue
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+    
+    unsafe fn addParameterData(&self, id: *const u32, index: *mut i32) -> *mut IParamValueQueue {
+        if id.is_null() {
+            return std::ptr::null_mut();
+        }
+        
+        let param_id = *id;
+        let mut queues = self.queues.borrow_mut();
+        
+        // Check if queue for this parameter already exists
+        for (i, queue) in queues.iter().enumerate() {
+            if queue.getParameterId() == param_id {
+                if !index.is_null() {
+                    *index = i as i32;
+                }
+                return &**queue as *const ParameterValueQueue as *mut IParamValueQueue;
+            }
+        }
+        
+        // Create new queue
+        let mut new_queue = Box::new(ParameterValueQueue::new(param_id));
+        let queue_ptr = &mut *new_queue as *mut ParameterValueQueue as *mut IParamValueQueue;
+        
+        if !index.is_null() {
+            *index = queues.len() as i32;
+        }
+        
+        queues.push(new_queue);
+        queue_ptr
+    }
+}
+
+struct ParameterValueQueue {
+    param_id: u32,
+    points: std::cell::RefCell<Vec<(i32, f64)>>, // sample offset, value
+}
+
+impl ParameterValueQueue {
+    fn new(param_id: u32) -> Self {
+        Self {
+            param_id,
+            points: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl IParamValueQueueTrait for ParameterValueQueue {
+    unsafe fn getParameterId(&self) -> u32 {
+        self.param_id
+    }
+    
+    unsafe fn getPointCount(&self) -> i32 {
+        self.points.borrow().len() as i32
+    }
+    
+    unsafe fn getPoint(&self, index: i32, sample_offset: *mut i32, value: *mut f64) -> i32 {
+        if let Some((offset, val)) = self.points.borrow().get(index as usize) {
+            if !sample_offset.is_null() {
+                *sample_offset = *offset;
+            }
+            if !value.is_null() {
+                *value = *val;
+            }
+            vst3::Steinberg::kResultOk
+        } else {
+            vst3::Steinberg::kResultFalse
+        }
+    }
+    
+    unsafe fn addPoint(&self, sample_offset: i32, value: f64, index: *mut i32) -> i32 {
+        let mut points = self.points.borrow_mut();
+        
+        // Find insertion point
+        let insert_pos = points.iter().position(|(offset, _)| *offset > sample_offset)
+            .unwrap_or(points.len());
+        
+        points.insert(insert_pos, (sample_offset, value));
+        
+        if !index.is_null() {
+            *index = insert_pos as i32;
+        }
+        
+        vst3::Steinberg::kResultOk
+    }
 }
