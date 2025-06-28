@@ -3186,7 +3186,9 @@ impl HostProcessData {
         data.process_context.timeSigDenominator = 4;
         data.process_context.state = vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kPlaying as u32 |
                                      vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kTempoValid as u32 |
-                                     vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kTimeSigValid as u32;
+                                     vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kTimeSigValid as u32 |
+                                     vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kContTimeValid as u32 |
+                                     vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kSystemTimeValid as u32;
         
         // Set up process data
         data.process_data.processMode = vst3::Steinberg::Vst::ProcessModes_::kRealtime as i32;
