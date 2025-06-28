@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+#![allow(non_snake_case)]
 
 use eframe::egui;
 use std::ptr;
