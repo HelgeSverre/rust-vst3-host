@@ -3126,8 +3126,10 @@ struct HostProcessData {
     output_events: ComWrapper<MyEventList>,
     input_events_ptr: *mut IEventList,
     output_events_ptr: *mut IEventList,
-    input_param_changes: Box<ParameterChanges>,
-    output_param_changes: Box<ParameterChanges>,
+    input_param_changes: ComWrapper<ParameterChanges>,
+    output_param_changes: ComWrapper<ParameterChanges>,
+    input_param_changes_ptr: *mut IParameterChanges,
+    output_param_changes_ptr: *mut IParameterChanges,
 }
 
 impl HostProcessData {
@@ -3145,6 +3147,19 @@ impl HostProcessData {
         let input_events_ptr = input_com_ptr.clone().into_raw();
         let output_events_ptr = output_com_ptr.clone().into_raw();
         
+        // Create parameter changes
+        let input_param_changes = ComWrapper::new(ParameterChanges::default());
+        let output_param_changes = ComWrapper::new(ParameterChanges::default());
+        
+        // Get COM pointers for parameter changes
+        let input_param_com_ptr = input_param_changes.to_com_ptr::<IParameterChanges>()
+            .expect("Failed to get input param changes pointer");
+        let output_param_com_ptr = output_param_changes.to_com_ptr::<IParameterChanges>()
+            .expect("Failed to get output param changes pointer");
+            
+        let input_param_changes_ptr = input_param_com_ptr.clone().into_raw();
+        let output_param_changes_ptr = output_param_com_ptr.clone().into_raw();
+        
         let mut data = Self {
             process_data: std::mem::zeroed(),
             input_buffers: Vec::new(),
@@ -3158,8 +3173,10 @@ impl HostProcessData {
             output_events,
             input_events_ptr,
             output_events_ptr,
-            input_param_changes: Box::new(ParameterChanges::default()),
-            output_param_changes: Box::new(ParameterChanges::default()),
+            input_param_changes,
+            output_param_changes,
+            input_param_changes_ptr,
+            output_param_changes_ptr,
         };
         
         // Initialize process context
@@ -3172,13 +3189,14 @@ impl HostProcessData {
                                      vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kTimeSigValid as u32;
         
         // Set up process data
+        data.process_data.processMode = vst3::Steinberg::Vst::ProcessModes_::kRealtime as i32;
         data.process_data.numSamples = block_size;
         data.process_data.symbolicSampleSize = vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32 as i32;
         data.process_data.processContext = &mut data.process_context;
         data.process_data.inputEvents = data.input_events_ptr;
         data.process_data.outputEvents = data.output_events_ptr;
-        data.process_data.inputParameterChanges = &*data.input_param_changes as *const ParameterChanges as *mut IParameterChanges;
-        data.process_data.outputParameterChanges = &*data.output_param_changes as *const ParameterChanges as *mut IParameterChanges;
+        data.process_data.inputParameterChanges = data.input_param_changes_ptr;
+        data.process_data.outputParameterChanges = data.output_param_changes_ptr;
         
         data
     }
@@ -3322,16 +3340,30 @@ impl Drop for HostProcessData {
                 // ComPtr will release when dropped
                 drop(ptr);
             }
+            if !self.input_param_changes_ptr.is_null() {
+                let ptr = ComPtr::<IParameterChanges>::from_raw(self.input_param_changes_ptr);
+                drop(ptr);
+            }
+            if !self.output_param_changes_ptr.is_null() {
+                let ptr = ComPtr::<IParameterChanges>::from_raw(self.output_param_changes_ptr);
+                drop(ptr);
+            }
         }
         self.input_events_ptr = std::ptr::null_mut();
         self.output_events_ptr = std::ptr::null_mut();
+        self.input_param_changes_ptr = std::ptr::null_mut();
+        self.output_param_changes_ptr = std::ptr::null_mut();
     }
 }
 
 // Parameter changes implementation
 #[derive(Default)]
 struct ParameterChanges {
-    queues: std::cell::RefCell<Vec<Box<ParameterValueQueue>>>,
+    queues: std::cell::RefCell<Vec<ComWrapper<ParameterValueQueue>>>,
+}
+
+impl Class for ParameterChanges {
+    type Interfaces = (IParameterChanges,);
 }
 
 impl IParameterChangesTrait for ParameterChanges {
@@ -3340,8 +3372,10 @@ impl IParameterChangesTrait for ParameterChanges {
     }
     
     unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
-        if let Some(queue) = self.queues.borrow_mut().get_mut(index as usize) {
-            &mut **queue as *mut ParameterValueQueue as *mut IParamValueQueue
+        if let Some(queue) = self.queues.borrow().get(index as usize) {
+            queue.to_com_ptr::<IParamValueQueue>()
+                .map(|ptr| ptr.into_raw())
+                .unwrap_or(std::ptr::null_mut())
         } else {
             std::ptr::null_mut()
         }
@@ -3357,17 +3391,21 @@ impl IParameterChangesTrait for ParameterChanges {
         
         // Check if queue for this parameter already exists
         for (i, queue) in queues.iter().enumerate() {
-            if queue.getParameterId() == param_id {
+            if queue.param_id == param_id {
                 if !index.is_null() {
                     *index = i as i32;
                 }
-                return &**queue as *const ParameterValueQueue as *mut IParamValueQueue;
+                return queue.to_com_ptr::<IParamValueQueue>()
+                    .map(|ptr| ptr.into_raw())
+                    .unwrap_or(std::ptr::null_mut());
             }
         }
         
         // Create new queue
-        let mut new_queue = Box::new(ParameterValueQueue::new(param_id));
-        let queue_ptr = &mut *new_queue as *mut ParameterValueQueue as *mut IParamValueQueue;
+        let new_queue = ComWrapper::new(ParameterValueQueue::new(param_id));
+        let queue_ptr = new_queue.to_com_ptr::<IParamValueQueue>()
+            .map(|ptr| ptr.into_raw())
+            .unwrap_or(std::ptr::null_mut());
         
         if !index.is_null() {
             *index = queues.len() as i32;
@@ -3390,6 +3428,10 @@ impl ParameterValueQueue {
             points: std::cell::RefCell::new(Vec::new()),
         }
     }
+}
+
+impl Class for ParameterValueQueue {
+    type Interfaces = (IParamValueQueue,);
 }
 
 impl IParamValueQueueTrait for ParameterValueQueue {
