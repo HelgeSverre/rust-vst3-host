@@ -1906,6 +1906,17 @@ impl VST3Inspector {
                         println!("Audio processing error: {}", e);
                     }
                 }
+                
+                if ui.button("Process 10 Blocks").clicked() {
+                    // Process multiple blocks to give plugins time to update
+                    for i in 0..10 {
+                        if let Err(e) = self.process_audio_block() {
+                            println!("Audio processing error on block {}: {}", i, e);
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
             });
             
             ui.separator();
