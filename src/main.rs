@@ -2787,6 +2787,9 @@ impl VST3Inspector {
         };
 
         unsafe {
+            println!("[MIDI Input] Preparing to send Note On - channel={}, pitch={}, velocity={}", 
+                     channel, pitch, velocity);
+            
             // Clear buffers and events
             process_data.clear_buffers();
             
@@ -2795,22 +2798,33 @@ impl VST3Inspector {
             event.r#type = Event_::EventTypes_::kNoteOnEvent as u16;
             event.sampleOffset = 0;
             event.ppqPosition = 0.0;
+            event.flags = 0;
+            event.busIndex = 0;
             event.__field0.noteOn.channel = channel;
             event.__field0.noteOn.pitch = pitch;
             event.__field0.noteOn.velocity = velocity;
             event.__field0.noteOn.noteId = -1;
-            event.__field0.noteOn.length = -1;
+            event.__field0.noteOn.length = 0;
             event.__field0.noteOn.tuning = 0.0;
 
-            process_data.input_events.events.borrow_mut().push(event);
+            println!("[MIDI Input] Adding event to input list");
+            {
+                let mut events = process_data.input_events.events.borrow_mut();
+                events.push(event);
+                println!("[MIDI Input] Event added, total events: {}", events.len());
+            }
             
             // Update time
             process_data.process_context.continousTimeSamples += self.block_size as i64;
 
+            println!("[MIDI Input] Calling process()...");
             // Process
             let result = processor.process(&mut process_data.process_data);
-            println!("[MIDI Input] Sent Note On - channel={}, pitch={}, velocity={}, result={:#x}", 
-                     channel, pitch, velocity, result);
+            println!("[MIDI Input] Process returned: {:#x}", result);
+            
+            if result != vst3::Steinberg::kResultOk {
+                return Err(format!("Process failed with result: {:#x}", result));
+            }
 
             // Check output events
             let num_events = process_data.output_events.events.borrow().len();
@@ -2847,6 +2861,8 @@ impl VST3Inspector {
             event.r#type = Event_::EventTypes_::kNoteOffEvent as u16;
             event.sampleOffset = 0;
             event.ppqPosition = 0.0;
+            event.flags = 0;
+            event.busIndex = 0;
             event.__field0.noteOff.channel = channel;
             event.__field0.noteOff.pitch = pitch;
             event.__field0.noteOff.velocity = velocity;
@@ -3118,13 +3134,15 @@ impl HostProcessData {
         let input_events = create_event_list();
         let output_events = create_event_list();
         
-        // Get raw pointers for VST3 API
-        let input_events_ptr = input_events.to_com_ptr::<IEventList>()
-            .expect("Failed to get input events pointer")
-            .into_raw();
-        let output_events_ptr = output_events.to_com_ptr::<IEventList>()
-            .expect("Failed to get output events pointer")
-            .into_raw();
+        // Get COM pointers but don't release ownership yet
+        let input_com_ptr = input_events.to_com_ptr::<IEventList>()
+            .expect("Failed to get input events pointer");
+        let output_com_ptr = output_events.to_com_ptr::<IEventList>()
+            .expect("Failed to get output events pointer");
+            
+        // Clone the pointers (increases ref count) before getting raw
+        let input_events_ptr = input_com_ptr.clone().into_raw();
+        let output_events_ptr = output_com_ptr.clone().into_raw();
         
         let mut data = Self {
             process_data: std::mem::zeroed(),
@@ -3148,6 +3166,9 @@ impl HostProcessData {
         data.process_context.tempo = 120.0;
         data.process_context.timeSigNumerator = 4;
         data.process_context.timeSigDenominator = 4;
+        data.process_context.state = vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kPlaying as u32 |
+                                     vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kTempoValid as u32 |
+                                     vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kTimeSigValid as u32;
         
         // Set up process data
         data.process_data.numSamples = block_size;
@@ -3273,13 +3294,34 @@ impl HostProcessData {
         // Clear events
         self.input_events.events.borrow_mut().clear();
         self.output_events.events.borrow_mut().clear();
+        
+        // Make sure pointers are still valid
+        if self.process_data.inputEvents.is_null() {
+            println!("WARNING: inputEvents pointer is null!");
+            self.process_data.inputEvents = self.input_events_ptr;
+        }
+        if self.process_data.outputEvents.is_null() {
+            println!("WARNING: outputEvents pointer is null!");
+            self.process_data.outputEvents = self.output_events_ptr;
+        }
     }
 }
 
 impl Drop for HostProcessData {
     fn drop(&mut self) {
-        // Clean up COM pointers - they're already released by ComWrapper
-        // but we need to ensure we don't use them after drop
+        unsafe {
+            // Release the COM pointers we cloned
+            if !self.input_events_ptr.is_null() {
+                let ptr = ComPtr::<IEventList>::from_raw(self.input_events_ptr);
+                // ComPtr will release when dropped
+                drop(ptr);
+            }
+            if !self.output_events_ptr.is_null() {
+                let ptr = ComPtr::<IEventList>::from_raw(self.output_events_ptr);
+                // ComPtr will release when dropped
+                drop(ptr);
+            }
+        }
         self.input_events_ptr = std::ptr::null_mut();
         self.output_events_ptr = std::ptr::null_mut();
     }
