@@ -4,6 +4,7 @@
 use eframe::egui;
 use std::ptr;
 use vst3::Steinberg::Vst::{BusDirections_::*, IAudioProcessorTrait, MediaTypes_::*};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 // Import the constants
 use vst3::Steinberg::Vst::{
     Event, Event_, IAudioProcessor, IComponent, IComponentTrait, IConnectionPoint,
@@ -889,6 +890,10 @@ struct VST3Inspector {
     is_processing: bool,
     block_size: i32,
     sample_rate: f64,
+    // Audio output
+    audio_stream: Option<cpal::Stream>,
+    audio_device: Option<cpal::Device>,
+    audio_config: Option<cpal::StreamConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -986,6 +991,77 @@ impl eframe::App for VST3Inspector {
 }
 
 impl VST3Inspector {
+    fn initialize_audio_device(&mut self) -> Result<(), String> {
+        // Get the default audio host
+        let host = cpal::default_host();
+        
+        // Get the default output device
+        let device = host.default_output_device()
+            .ok_or("No default audio output device found")?;
+        
+        println!("Using audio device: {}", device.name().unwrap_or("Unknown".to_string()));
+        
+        // Get the default output config
+        let config = device.default_output_config()
+            .map_err(|e| format!("Failed to get default output config: {}", e))?;
+        
+        println!("Audio config: {} channels, {} Hz, format: {:?}", 
+                 config.channels(), config.sample_rate().0, config.sample_format());
+        
+        // Update our sample rate to match the audio device
+        self.sample_rate = config.sample_rate().0 as f64;
+        
+        // Convert to StreamConfig
+        let stream_config = cpal::StreamConfig {
+            channels: config.channels(),
+            sample_rate: config.sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        
+        self.audio_device = Some(device);
+        self.audio_config = Some(stream_config);
+        
+        Ok(())
+    }
+    
+    fn start_audio_stream(&mut self) -> Result<(), String> {
+        if self.audio_device.is_none() {
+            return Err("Audio device not initialized".to_string());
+        }
+        
+        if self.processor.is_none() {
+            return Err("No plugin processor available".to_string());
+        }
+        
+        // Stop any existing stream
+        self.audio_stream = None;
+        
+        let device = self.audio_device.as_ref().unwrap();
+        let config = self.audio_config.as_ref().unwrap();
+        
+        // For now, let's create a simple test stream that plays silence
+        let stream = device.build_output_stream(
+            config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                // Fill with silence for now
+                for sample in data.iter_mut() {
+                    *sample = 0.0;
+                }
+            },
+            move |err| {
+                eprintln!("Audio stream error: {}", err);
+            },
+            None,
+        ).map_err(|e| format!("Failed to build output stream: {}", e))?;
+        
+        stream.play().map_err(|e| format!("Failed to start audio stream: {}", e))?;
+        
+        self.audio_stream = Some(stream);
+        println!("Audio stream started");
+        
+        Ok(())
+    }
+    
     fn show_plugins_tab(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
@@ -1834,6 +1910,36 @@ impl VST3Inspector {
             });
             
             ui.separator();
+            
+            // Audio Device
+            ui.horizontal(|ui| {
+                ui.label("Audio Output:");
+                if self.audio_device.is_some() {
+                    ui.colored_label(egui::Color32::GREEN, "Initialized");
+                    
+                    if self.audio_stream.is_some() {
+                        ui.colored_label(egui::Color32::GREEN, "Stream Active");
+                        if ui.button("Stop Audio").clicked() {
+                            self.audio_stream = None;
+                            println!("Audio stream stopped");
+                        }
+                    } else {
+                        ui.colored_label(egui::Color32::YELLOW, "Stream Inactive");
+                        if ui.button("Start Audio").clicked() {
+                            if let Err(e) = self.start_audio_stream() {
+                                println!("Failed to start audio stream: {}", e);
+                            }
+                        }
+                    }
+                } else {
+                    ui.colored_label(egui::Color32::RED, "Not initialized");
+                    if ui.button("Initialize Audio").clicked() {
+                        if let Err(e) = self.initialize_audio_device() {
+                            println!("Failed to initialize audio: {}", e);
+                        }
+                    }
+                }
+            });
             
             // Audio settings
             ui.horizontal(|ui| {
@@ -2982,6 +3088,9 @@ impl VST3Inspector {
             is_processing: false,
             block_size: 512,
             sample_rate: 44100.0,
+            audio_stream: None,
+            audio_device: None,
+            audio_config: None,
         }
     }
 }
