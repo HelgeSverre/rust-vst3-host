@@ -3064,7 +3064,7 @@ fn create_event_list_ptr() -> *mut IEventList {
         .into_raw()
 }
 
-fn print_midi_events(event_list: &MyEventList) {
+fn print_midi_events(event_list: &ComWrapper<MyEventList>) {
     for event in event_list.events.borrow().iter() {
         match event.r#type as u32 {
             Event_::EventTypes_::kNoteOnEvent => {
@@ -3115,6 +3115,17 @@ struct HostProcessData {
 
 impl HostProcessData {
     unsafe fn new(block_size: i32, sample_rate: f64) -> Self {
+        let input_events = create_event_list();
+        let output_events = create_event_list();
+        
+        // Get raw pointers for VST3 API
+        let input_events_ptr = input_events.to_com_ptr::<IEventList>()
+            .expect("Failed to get input events pointer")
+            .into_raw();
+        let output_events_ptr = output_events.to_com_ptr::<IEventList>()
+            .expect("Failed to get output events pointer")
+            .into_raw();
+        
         let mut data = Self {
             process_data: std::mem::zeroed(),
             input_buffers: Vec::new(),
@@ -3124,8 +3135,10 @@ impl HostProcessData {
             input_channel_pointers: Vec::new(),
             output_channel_pointers: Vec::new(),
             process_context: std::mem::zeroed(),
-            input_events: Box::new(MyEventList::default()),
-            output_events: Box::new(MyEventList::default()),
+            input_events,
+            output_events,
+            input_events_ptr,
+            output_events_ptr,
             input_param_changes: Box::new(ParameterChanges::default()),
             output_param_changes: Box::new(ParameterChanges::default()),
         };
@@ -3140,8 +3153,8 @@ impl HostProcessData {
         data.process_data.numSamples = block_size;
         data.process_data.symbolicSampleSize = vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32 as i32;
         data.process_data.processContext = &mut data.process_context;
-        data.process_data.inputEvents = &*data.input_events as *const MyEventList as *mut IEventList;
-        data.process_data.outputEvents = &*data.output_events as *const MyEventList as *mut IEventList;
+        data.process_data.inputEvents = data.input_events_ptr;
+        data.process_data.outputEvents = data.output_events_ptr;
         data.process_data.inputParameterChanges = &*data.input_param_changes as *const ParameterChanges as *mut IParameterChanges;
         data.process_data.outputParameterChanges = &*data.output_param_changes as *const ParameterChanges as *mut IParameterChanges;
         
@@ -3260,6 +3273,15 @@ impl HostProcessData {
         // Clear events
         self.input_events.events.borrow_mut().clear();
         self.output_events.events.borrow_mut().clear();
+    }
+}
+
+impl Drop for HostProcessData {
+    fn drop(&mut self) {
+        // Clean up COM pointers - they're already released by ComWrapper
+        // but we need to ensure we don't use them after drop
+        self.input_events_ptr = std::ptr::null_mut();
+        self.output_events_ptr = std::ptr::null_mut();
     }
 }
 
