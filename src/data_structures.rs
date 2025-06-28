@@ -1,6 +1,5 @@
 use cpal::{Device, Stream, StreamConfig};
 use libloading::Library;
-use vst3::{ComPtr, Steinberg::Vst::*, Steinberg::*};
 
 #[derive(Debug, Clone)]
 pub struct PluginInfo {

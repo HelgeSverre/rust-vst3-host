@@ -1,5 +1,5 @@
 use std::ffi::CStr;
-use vst3::{Class, ComWrapper, Steinberg::Vst::*};
+use vst3::{ComWrapper, Steinberg::Vst::*};
 
 // String conversion utilities
 pub fn c_str_to_string(c_str: &[i8]) -> String {

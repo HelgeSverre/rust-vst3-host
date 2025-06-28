@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::ptr;
-use vst3::{Class, ComWrapper, Steinberg::{self, *}, Steinberg::Vst::*};
+use vst3::{Class, ComWrapper, Steinberg::*, Steinberg::Vst::*};
 
 // Component Handler implementation
 pub struct ComponentHandler {
@@ -63,8 +63,10 @@ impl IEventListTrait for MyEventList {
     }
     
     unsafe fn getEvent(&self, index: i32, event: *mut Event) -> i32 {
+        println!("[DEBUG] Plugin calling getEvent for index: {}", index);
         if let Some(e) = self.events.borrow().get(index as usize) {
             *event = *e;
+            println!("[DEBUG] Returned event type: {}", e.r#type);
             kResultOk
         } else {
             kResultFalse
@@ -73,7 +75,26 @@ impl IEventListTrait for MyEventList {
     
     unsafe fn addEvent(&self, event: *mut Event) -> i32 {
         if !event.is_null() {
-            println!("[DEBUG] Plugin calling addEvent!");
+            let event_type = (*event).r#type;
+            println!("[DEBUG] Plugin calling addEvent! Event type: {}", event_type);
+            
+            // Print event details based on type
+            match event_type as u32 {
+                Event_::EventTypes_::kNoteOnEvent => {
+                    let note_on = (*event).__field0.noteOn;
+                    println!("[DEBUG] Note On: ch={}, pitch={}, vel={}", 
+                             note_on.channel, note_on.pitch, note_on.velocity);
+                }
+                Event_::EventTypes_::kNoteOffEvent => {
+                    let note_off = (*event).__field0.noteOff;
+                    println!("[DEBUG] Note Off: ch={}, pitch={}, vel={}", 
+                             note_off.channel, note_off.pitch, note_off.velocity);
+                }
+                _ => {
+                    println!("[DEBUG] Other event type: {}", event_type);
+                }
+            }
+            
             self.events.borrow_mut().push(*event);
             kResultOk
         } else {

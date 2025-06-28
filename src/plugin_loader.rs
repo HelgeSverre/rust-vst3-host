@@ -1,6 +1,5 @@
-use std::ptr;
 use libloading::Library;
-use vst3::{ComPtr, Steinberg::*, Steinberg::Vst::*};
+use vst3::{ComPtr, Steinberg::*};
 use crate::data_structures::*;
 use crate::utils::*;
 
@@ -28,7 +27,7 @@ pub fn load_vst3_library(path: &str) -> Result<Library, String> {
         let result = Library::new(path).map_err(|e| format!("Failed to load VST3 DLL: {}", e));
         
         // Reset DLL directory
-        SetDllDirectoryW(ptr::null());
+        SetDllDirectoryW(std::ptr::null());
         
         result
     }
@@ -74,7 +73,7 @@ pub fn get_factory_info(factory: &ComPtr<IPluginFactory>) -> Option<FactoryInfo>
                 vendor: c_str_to_string(&info.vendor),
                 url: c_str_to_string(&info.url),
                 email: c_str_to_string(&info.email),
-                flags: info.flags,
+                flags: info.flags as u32,
             })
         } else {
             None
@@ -103,7 +102,7 @@ pub fn get_all_classes(factory: &ComPtr<IPluginFactory>) -> Vec<ClassInfo> {
             }
             
             // Try to get extended info if available
-            if let Ok(factory2) = factory.cast::<IPluginFactory2>() {
+            if let Some(factory2) = factory.cast::<IPluginFactory2>() {
                 let mut info2 = std::mem::zeroed();
                 if factory2.getClassInfo2(i, &mut info2) == kResultOk {
                     if let Some(class) = classes.last_mut() {
