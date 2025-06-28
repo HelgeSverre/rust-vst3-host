@@ -2939,6 +2939,10 @@ impl VST3Inspector {
             // Update time
             process_data.process_context.continousTimeSamples += self.block_size as i64;
 
+            // Debug: Check our event pointers
+            println!("[DEBUG] inputEvents pointer: {:p}", process_data.process_data.inputEvents);
+            println!("[DEBUG] outputEvents pointer: {:p}", process_data.process_data.outputEvents);
+            
             println!("[MIDI Input] Calling process()...");
             // Process
             let result = processor.process(&mut process_data.process_data);
