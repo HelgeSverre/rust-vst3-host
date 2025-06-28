@@ -205,8 +205,8 @@ impl HostProcessData {
         }
         
         // Clear events
-        self.input_events.events.borrow_mut().clear();
-        self.output_events.events.borrow_mut().clear();
+        self.input_events.events.lock().unwrap().clear();
+        self.output_events.events.lock().unwrap().clear();
         
         // Make sure pointers are still valid
         if self.process_data.inputEvents.is_null() {

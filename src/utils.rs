@@ -100,7 +100,7 @@ pub fn get_vst3_binary_path(bundle_path: &str) -> Result<String, String> {
 
 // MIDI event printing utility
 pub fn print_midi_events(event_list: &ComWrapper<crate::com_implementations::MyEventList>) {
-    for event in event_list.events.borrow().iter() {
+    for event in event_list.events.lock().unwrap().iter() {
         match event.r#type as u32 {
             Event_::EventTypes_::kNoteOnEvent => {
                 let note_on = unsafe { event.__field0.noteOn };

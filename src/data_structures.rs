@@ -1,5 +1,8 @@
 use cpal::{Device, Stream, StreamConfig};
 use libloading::Library;
+use std::sync::{Arc, Mutex};
+use vst3::{ComPtr, Steinberg::Vst::IAudioProcessor};
+use crate::audio_processing::HostProcessData;
 
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
@@ -98,6 +101,16 @@ pub type NativeWindow = cocoa::base::id;
 
 #[cfg(target_os = "windows")]
 pub type NativeWindow = winapi::shared::windef::HWND;
+
+// Audio processing state for sharing between threads
+pub struct SharedAudioState {
+    pub processor: ComPtr<IAudioProcessor>,
+    pub process_data: Box<HostProcessData>,
+    pub block_size: usize,
+    pub channels: usize,
+}
+
+pub type SharedAudioStateRef = Arc<Mutex<SharedAudioState>>;
 
 // Re-export types that are used across modules
 pub type PluginLibrary = Library;

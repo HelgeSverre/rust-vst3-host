@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::sync::Mutex;
 use std::ptr;
 use vst3::{Class, ComWrapper, Steinberg::*, Steinberg::Vst::*};
 
@@ -40,13 +40,13 @@ impl IComponentHandlerTrait for ComponentHandler {
 
 // Event List implementation
 pub struct MyEventList {
-    pub events: RefCell<Vec<Event>>,
+    pub events: Mutex<Vec<Event>>,
 }
 
 impl MyEventList {
     pub fn new() -> Self {
         Self {
-            events: RefCell::new(Vec::new()),
+            events: Mutex::new(Vec::new()),
         }
     }
 }
@@ -57,14 +57,14 @@ impl Class for MyEventList {
 
 impl IEventListTrait for MyEventList {
     unsafe fn getEventCount(&self) -> i32 {
-        let count = self.events.borrow().len() as i32;
+        let count = self.events.lock().unwrap().len() as i32;
         println!("[DEBUG] Plugin calling getEventCount, returning: {}", count);
         count
     }
     
     unsafe fn getEvent(&self, index: i32, event: *mut Event) -> i32 {
         println!("[DEBUG] Plugin calling getEvent for index: {}", index);
-        if let Some(e) = self.events.borrow().get(index as usize) {
+        if let Some(e) = self.events.lock().unwrap().get(index as usize) {
             *event = *e;
             println!("[DEBUG] Returned event type: {}", e.r#type);
             kResultOk
@@ -95,7 +95,7 @@ impl IEventListTrait for MyEventList {
                 }
             }
             
-            self.events.borrow_mut().push(*event);
+            self.events.lock().unwrap().push(*event);
             kResultOk
         } else {
             kResultFalse
@@ -108,9 +108,16 @@ pub fn create_event_list() -> ComWrapper<MyEventList> {
 }
 
 // Parameter Changes implementation
-#[derive(Default)]
 pub struct ParameterChanges {
-    pub queues: RefCell<Vec<ComWrapper<ParameterValueQueue>>>,
+    pub queues: Mutex<Vec<ComWrapper<ParameterValueQueue>>>,
+}
+
+impl Default for ParameterChanges {
+    fn default() -> Self {
+        Self {
+            queues: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl Class for ParameterChanges {
@@ -119,11 +126,11 @@ impl Class for ParameterChanges {
 
 impl IParameterChangesTrait for ParameterChanges {
     unsafe fn getParameterCount(&self) -> i32 {
-        self.queues.borrow().len() as i32
+        self.queues.lock().unwrap().len() as i32
     }
     
     unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
-        if let Some(queue) = self.queues.borrow().get(index as usize) {
+        if let Some(queue) = self.queues.lock().unwrap().get(index as usize) {
             queue.to_com_ptr::<IParamValueQueue>()
                 .map(|ptr| ptr.into_raw())
                 .unwrap_or(ptr::null_mut())
@@ -138,7 +145,7 @@ impl IParameterChangesTrait for ParameterChanges {
         }
         
         let param_id = *id;
-        let mut queues = self.queues.borrow_mut();
+        let mut queues = self.queues.lock().unwrap();
         
         // Check if queue for this parameter already exists
         for (i, queue) in queues.iter().enumerate() {
@@ -170,14 +177,14 @@ impl IParameterChangesTrait for ParameterChanges {
 // Parameter Value Queue implementation
 pub struct ParameterValueQueue {
     pub param_id: u32,
-    pub points: RefCell<Vec<(i32, f64)>>, // sample offset, value
+    pub points: Mutex<Vec<(i32, f64)>>, // sample offset, value
 }
 
 impl ParameterValueQueue {
     pub fn new(param_id: u32) -> Self {
         Self {
             param_id,
-            points: RefCell::new(Vec::new()),
+            points: Mutex::new(Vec::new()),
         }
     }
 }
@@ -192,11 +199,11 @@ impl IParamValueQueueTrait for ParameterValueQueue {
     }
     
     unsafe fn getPointCount(&self) -> i32 {
-        self.points.borrow().len() as i32
+        self.points.lock().unwrap().len() as i32
     }
     
     unsafe fn getPoint(&self, index: i32, sample_offset: *mut i32, value: *mut f64) -> i32 {
-        if let Some((offset, val)) = self.points.borrow().get(index as usize) {
+        if let Some((offset, val)) = self.points.lock().unwrap().get(index as usize) {
             if !sample_offset.is_null() {
                 *sample_offset = *offset;
             }
@@ -210,7 +217,7 @@ impl IParamValueQueueTrait for ParameterValueQueue {
     }
     
     unsafe fn addPoint(&self, sample_offset: i32, value: f64, index: *mut i32) -> i32 {
-        let mut points = self.points.borrow_mut();
+        let mut points = self.points.lock().unwrap();
         
         // Find insertion point
         let insert_pos = points.iter().position(|(offset, _)| *offset > sample_offset)

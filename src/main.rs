@@ -18,6 +18,18 @@ use vst3::{ComPtr, Interface, Class, ComWrapper};
 
 use libloading::os::unix::{Library, Symbol};
 
+// Import modules
+mod data_structures;
+mod utils;
+mod com_implementations;
+mod plugin_discovery;
+mod plugin_loader;
+mod audio_processing;
+
+use utils::*;
+use com_implementations::*;
+use audio_processing::*;
+
 // macOS native window support
 #[cfg(target_os = "macos")]
 use cocoa::appkit::{NSBackingStoreType, NSWindow, NSWindowStyleMask};
@@ -894,6 +906,109 @@ struct VST3Inspector {
     audio_stream: Option<cpal::Stream>,
     audio_device: Option<cpal::Device>,
     audio_config: Option<cpal::StreamConfig>,
+    // Shared processing state for audio thread
+    shared_audio_state: Option<std::sync::Arc<std::sync::Mutex<AudioProcessingState>>>,
+}
+
+// Audio processing state that can be shared between UI and audio threads
+struct AudioProcessingState {
+    processor: Option<ComPtr<IAudioProcessor>>,
+    component: Option<ComPtr<IComponent>>,
+    is_active: bool,
+    pending_midi_events: Vec<Event>,
+    sample_rate: f64,
+    block_size: i32,
+}
+
+impl AudioProcessingState {
+    fn new(sample_rate: f64, block_size: i32) -> Self {
+        Self {
+            processor: None,
+            component: None,
+            is_active: false,
+            pending_midi_events: Vec::new(),
+            sample_rate,
+            block_size,
+        }
+    }
+    
+    fn set_processor(&mut self, processor: ComPtr<IAudioProcessor>, component: ComPtr<IComponent>) {
+        self.processor = Some(processor);
+        self.component = Some(component);
+        self.is_active = true;
+    }
+    
+    fn add_midi_event(&mut self, event: Event) {
+        self.pending_midi_events.push(event);
+    }
+    
+    fn process_audio(&mut self, output: &mut [f32]) -> bool {
+        if !self.is_active {
+            return false;
+        }
+        
+        let processor = match &self.processor {
+            Some(p) => p,
+            None => return false,
+        };
+        
+        let component = match &self.component {
+            Some(c) => c,
+            None => return false,
+        };
+        
+        unsafe {
+            // Create fresh process data for this audio callback
+            let mut process_data = HostProcessData::new(self.block_size, self.sample_rate);
+            
+            // Prepare buffers for the current component
+            if let Err(_) = process_data.prepare_buffers(component, self.block_size) {
+                return false;
+            }
+            
+            // Clear buffers
+            process_data.clear_buffers();
+            
+            // Add any pending MIDI events
+            for event in self.pending_midi_events.drain(..) {
+                process_data.input_events.events.lock().unwrap().push(event);
+            }
+            
+            // Update time - use a simple counter for now
+            static mut SAMPLE_COUNTER: i64 = 0;
+            process_data.process_context.continousTimeSamples = SAMPLE_COUNTER;
+            SAMPLE_COUNTER += self.block_size as i64;
+            
+            // Process audio
+            let result = processor.process(&mut process_data.process_data);
+            
+            if result == vst3::Steinberg::kResultOk {
+                // Copy output to buffer
+                let channels = output.len() / self.block_size as usize;
+                let mut out_idx = 0;
+                
+                for frame in 0..self.block_size as usize {
+                    for ch in 0..channels {
+                        let sample = if ch < process_data.output_buffers.len() &&
+                                       frame < process_data.output_buffers[ch].len() {
+                            process_data.output_buffers[ch][frame]
+                        } else {
+                            0.0
+                        };
+                        
+                        if out_idx < output.len() {
+                            output[out_idx] = sample;
+                            out_idx += 1;
+                        }
+                    }
+                }
+                
+                true
+            } else {
+                false
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1029,8 +1144,20 @@ impl VST3Inspector {
             return Err("Audio device not initialized".to_string());
         }
         
-        if self.processor.is_none() {
-            return Err("No plugin processor available".to_string());
+        // Initialize shared audio state if not already done
+        if self.shared_audio_state.is_none() {
+            let audio_state = AudioProcessingState::new(self.sample_rate, self.block_size);
+            self.shared_audio_state = Some(std::sync::Arc::new(std::sync::Mutex::new(audio_state)));
+            
+            // If we have a processor, set it up in the shared state
+            if let (Some(processor), Some(component)) = (&self.processor, &self.component) {
+                let mut state = self.shared_audio_state.as_ref().unwrap().lock().unwrap();
+                // Clone the processor and component for the audio thread
+                let processor_clone = processor.clone();
+                let component_clone = component.clone();
+                
+                state.set_processor(processor_clone, component_clone);
+            }
         }
         
         // Stop any existing stream
@@ -1039,13 +1166,30 @@ impl VST3Inspector {
         let device = self.audio_device.as_ref().unwrap();
         let config = self.audio_config.as_ref().unwrap();
         
-        // For now, let's create a simple test stream that plays silence
+        // Clone the shared state for the audio callback
+        let shared_state = self.shared_audio_state.as_ref().unwrap().clone();
+        let channels = config.channels as usize;
+        
+        println!("Starting real-time audio stream with {} channels", channels);
+        
         let stream = device.build_output_stream(
             config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // Fill with silence for now
-                for sample in data.iter_mut() {
-                    *sample = 0.0;
+                // Try to lock the shared state
+                if let Ok(mut state) = shared_state.try_lock() {
+                    if state.process_audio(data) {
+                        // Audio was processed successfully
+                    } else {
+                        // No processing available, fill with silence
+                        for sample in data.iter_mut() {
+                            *sample = 0.0;
+                        }
+                    }
+                } else {
+                    // Could not lock state, fill with silence to avoid audio glitches
+                    for sample in data.iter_mut() {
+                        *sample = 0.0;
+                    }
                 }
             },
             move |err| {
@@ -1057,8 +1201,66 @@ impl VST3Inspector {
         stream.play().map_err(|e| format!("Failed to start audio stream: {}", e))?;
         
         self.audio_stream = Some(stream);
-        println!("Audio stream started");
+        println!("Real-time audio stream started");
         
+        Ok(())
+    }
+    
+    /// Process audio with the current plugin and check for output
+    fn process_audio_with_output_check(&mut self) -> Result<(), String> {
+        if !self.is_processing {
+            self.start_processing()?;
+        }
+        
+        let processor = match &self.processor {
+            Some(p) => p,
+            None => return Err("No processor available".to_string()),
+        };
+        
+        let process_data = match &mut self.host_process_data {
+            Some(data) => data,
+            None => return Err("No process data available".to_string()),
+        };
+
+        unsafe {
+            // Clear buffers (silence input)
+            process_data.clear_buffers();
+            
+            // Update time
+            process_data.process_context.continousTimeSamples += self.block_size as i64;
+            
+            // Process audio
+            let result = processor.process(&mut process_data.process_data);
+            
+            if result != vst3::Steinberg::kResultOk {
+                return Err(format!("Process failed: {:#x}", result));
+            }
+            
+            // Check if plugin generated any audio
+            let mut has_output = false;
+            let mut max_amplitude = 0.0f32;
+            for buffer in &process_data.output_buffers {
+                for &sample in buffer.iter() {
+                    if sample != 0.0 {
+                        has_output = true;
+                        max_amplitude = max_amplitude.max(sample.abs());
+                    }
+                }
+            }
+            
+            if has_output {
+                println!("🎵 Plugin generated audio output! Max amplitude: {:.6}", max_amplitude);
+            } else {
+                println!("🔇 No audio output detected");
+            }
+            
+            // Check output events
+            let num_events = process_data.output_events.events.lock().unwrap().len();
+            if num_events > 0 {
+                println!("🎹 Plugin generated {} MIDI events", num_events);
+                utils::print_midi_events(&process_data.output_events);
+            }
+        }
         Ok(())
     }
     
@@ -2756,7 +2958,7 @@ impl VST3Inspector {
             println!("[MIDI Monitor] Called process, result = {:#x}", result);
             
             // Check output events
-            let num_events = process_data.output_events.events.borrow().len();
+            let num_events = process_data.output_events.events.lock().unwrap().len();
             if num_events > 0 {
                 println!("[MIDI Monitor] Output event count: {}", num_events);
                 print_midi_events(&process_data.output_events);
@@ -2767,6 +2969,32 @@ impl VST3Inspector {
 
     /// Send a MIDI Note On event to the plugin for testing input event integration
     fn send_midi_note_on(&mut self, channel: i16, pitch: i16, velocity: f32) -> Result<(), String> {
+        // Try to send to shared audio state first (for real-time processing)
+        if let Some(shared_state) = &self.shared_audio_state {
+            if let Ok(mut state) = shared_state.try_lock() {
+                unsafe {
+                    let mut event: Event = std::mem::zeroed();
+                    event.busIndex = 0;
+                    event.sampleOffset = 0;
+                    event.ppqPosition = 0.0;
+                    event.flags = 1; // kIsLive
+                    event.r#type = Event_::EventTypes_::kNoteOnEvent as u16;
+
+                    event.__field0.noteOn.channel = channel;
+                    event.__field0.noteOn.pitch = pitch;
+                    event.__field0.noteOn.tuning = 0.0;
+                    event.__field0.noteOn.velocity = velocity;
+                    event.__field0.noteOn.length = 0;
+                    event.__field0.noteOn.noteId = -1;
+
+                    state.add_midi_event(event);
+                    println!("🎹 Note ON sent to audio thread: ch={}, pitch={}, vel={}", channel, pitch, velocity);
+                    return Ok(());
+                }
+            }
+        }
+        
+        // Fall back to old method if shared state not available
         if !self.is_processing {
             self.start_processing()?;
         }
@@ -2804,7 +3032,7 @@ impl VST3Inspector {
 
             println!("[MIDI Input] Adding event to input list");
             {
-                let mut events = process_data.input_events.events.borrow_mut();
+                let mut events = process_data.input_events.events.lock().unwrap();
                 events.push(event);
                 println!("[MIDI Input] Event added, total events: {}", events.len());
             }
@@ -2826,7 +3054,7 @@ impl VST3Inspector {
             }
 
             // Check output events
-            let num_events = process_data.output_events.events.borrow().len();
+            let num_events = process_data.output_events.events.lock().unwrap().len();
             if num_events > 0 {
                 println!("[MIDI Input] Output events generated: {}", num_events);
                 print_midi_events(&process_data.output_events);
@@ -2837,6 +3065,31 @@ impl VST3Inspector {
     
     /// Send a MIDI Note Off event
     fn send_midi_note_off(&mut self, channel: i16, pitch: i16, velocity: f32) -> Result<(), String> {
+        // Try to send to shared audio state first (for real-time processing)
+        if let Some(shared_state) = &self.shared_audio_state {
+            if let Ok(mut state) = shared_state.try_lock() {
+                unsafe {
+                    let mut event: Event = std::mem::zeroed();
+                    event.busIndex = 0;
+                    event.sampleOffset = 0;
+                    event.ppqPosition = 0.0;
+                    event.flags = 1; // kIsLive
+                    event.r#type = Event_::EventTypes_::kNoteOffEvent as u16;
+
+                    event.__field0.noteOff.channel = channel;
+                    event.__field0.noteOff.pitch = pitch;
+                    event.__field0.noteOff.tuning = 0.0;
+                    event.__field0.noteOff.velocity = velocity;
+                    event.__field0.noteOff.noteId = -1;
+
+                    state.add_midi_event(event);
+                    println!("🎹 Note OFF sent to audio thread: ch={}, pitch={}, vel={}", channel, pitch, velocity);
+                    return Ok(());
+                }
+            }
+        }
+        
+        // Fall back to old method if shared state not available
         if !self.is_processing {
             self.start_processing()?;
         }
@@ -2868,7 +3121,7 @@ impl VST3Inspector {
             event.__field0.noteOff.noteId = -1;
             event.__field0.noteOff.tuning = 0.0;
 
-            process_data.input_events.events.borrow_mut().push(event);
+            process_data.input_events.events.lock().unwrap().push(event);
             
             // Update time
             process_data.process_context.continousTimeSamples += self.block_size as i64;
@@ -2879,7 +3132,7 @@ impl VST3Inspector {
                      channel, pitch, velocity, result);
 
             // Check output events
-            let num_events = process_data.output_events.events.borrow().len();
+            let num_events = process_data.output_events.events.lock().unwrap().len();
             if num_events > 0 {
                 println!("[MIDI Input] Output events generated: {}", num_events);
                 print_midi_events(&process_data.output_events);
@@ -2932,7 +3185,7 @@ impl VST3Inspector {
             }
             
             // Check output events
-            let num_events = process_data.output_events.events.borrow().len();
+            let num_events = process_data.output_events.events.lock().unwrap().len();
             if num_events > 0 {
                 print_midi_events(&process_data.output_events);
             }
@@ -2972,6 +3225,7 @@ impl VST3Inspector {
             audio_stream: None,
             audio_device: None,
             audio_config: None,
+            shared_audio_state: None,
         }
     }
 }
@@ -3033,452 +3287,3 @@ fn get_plugin_name_from_path(path: &str) -> String {
         .to_string()
 }
 
-struct MyEventList {
-    events: std::cell::RefCell<Vec<Event>>,
-}
-
-impl MyEventList {
-    fn new() -> Self {
-        Self {
-            events: std::cell::RefCell::new(Vec::new()),
-        }
-    }
-}
-
-impl Class for MyEventList {
-    type Interfaces = (IEventList,);
-}
-
-impl IEventListTrait for MyEventList {
-    unsafe fn getEventCount(&self) -> i32 {
-        let count = self.events.borrow().len() as i32;
-        println!("[DEBUG] Plugin calling getEventCount, returning: {}", count);
-        count
-    }
-    unsafe fn getEvent(&self, index: i32, event: *mut Event) -> i32 {
-        if let Some(e) = self.events.borrow().get(index as usize) {
-            *event = *e;
-            vst3::Steinberg::kResultOk
-        } else {
-            vst3::Steinberg::kResultFalse
-        }
-    }
-    unsafe fn addEvent(&self, event: *mut Event) -> i32 {
-        if !event.is_null() {
-            let event_data = *event;
-            println!("[DEBUG] Plugin calling addEvent! Type: {}, sampleOffset: {}", 
-                     event_data.r#type, event_data.sampleOffset);
-            self.events.borrow_mut().push(event_data);
-            vst3::Steinberg::kResultOk
-        } else {
-            println!("[DEBUG] Plugin called addEvent with null pointer!");
-            vst3::Steinberg::kResultFalse
-        }
-    }
-}
-
-fn create_event_list() -> ComWrapper<MyEventList> {
-    ComWrapper::new(MyEventList::new())
-}
-
-fn create_event_list_ptr() -> *mut IEventList {
-    let event_list = ComWrapper::new(MyEventList::new());
-    event_list.to_com_ptr::<IEventList>()
-        .expect("Failed to get IEventList pointer")
-        .into_raw()
-}
-
-fn print_midi_events(event_list: &ComWrapper<MyEventList>) {
-    for event in event_list.events.borrow().iter() {
-        match event.r#type as u32 {
-            Event_::EventTypes_::kNoteOnEvent => {
-                let note_on = unsafe { event.__field0.noteOn };
-                println!(
-                    "[MIDI OUT] Note On: channel={}, pitch={}, velocity={}",
-                    note_on.channel, note_on.pitch, note_on.velocity
-                );
-            }
-            Event_::EventTypes_::kNoteOffEvent => {
-                let note_off = unsafe { event.__field0.noteOff };
-                println!(
-                    "[MIDI OUT] Note Off: channel={}, pitch={}, velocity={}",
-                    note_off.channel, note_off.pitch, note_off.velocity
-                );
-            }
-            Event_::EventTypes_::kLegacyMIDICCOutEvent => {
-                let cc = unsafe { event.__field0.midiCCOut };
-                println!(
-                    "[MIDI OUT] CC: channel={}, control={}, value={}, value2={}",
-                    cc.channel, cc.controlNumber, cc.value, cc.value2
-                );
-            }
-            _ => {
-                println!("[MIDI OUT] Other event type: {}", event.r#type);
-            }
-        }
-    }
-}
-
-// Audio processing infrastructure
-struct HostProcessData {
-    process_data: ProcessData,
-    input_buffers: Vec<Vec<f32>>,
-    output_buffers: Vec<Vec<f32>>,
-    input_bus_buffers: Vec<AudioBusBuffers>,
-    output_bus_buffers: Vec<AudioBusBuffers>,
-    input_channel_pointers: Vec<Vec<*mut f32>>,
-    output_channel_pointers: Vec<Vec<*mut f32>>,
-    process_context: ProcessContext,
-    input_events: ComWrapper<MyEventList>,
-    output_events: ComWrapper<MyEventList>,
-    input_events_ptr: *mut IEventList,
-    output_events_ptr: *mut IEventList,
-    input_param_changes: ComWrapper<ParameterChanges>,
-    output_param_changes: ComWrapper<ParameterChanges>,
-    input_param_changes_ptr: *mut IParameterChanges,
-    output_param_changes_ptr: *mut IParameterChanges,
-}
-
-impl HostProcessData {
-    unsafe fn new(block_size: i32, sample_rate: f64) -> Self {
-        let input_events = create_event_list();
-        let output_events = create_event_list();
-        
-        // Get COM pointers but don't release ownership yet
-        let input_com_ptr = input_events.to_com_ptr::<IEventList>()
-            .expect("Failed to get input events pointer");
-        let output_com_ptr = output_events.to_com_ptr::<IEventList>()
-            .expect("Failed to get output events pointer");
-            
-        // Clone the pointers (increases ref count) before getting raw
-        let input_events_ptr = input_com_ptr.clone().into_raw();
-        let output_events_ptr = output_com_ptr.clone().into_raw();
-        
-        // Create parameter changes
-        let input_param_changes = ComWrapper::new(ParameterChanges::default());
-        let output_param_changes = ComWrapper::new(ParameterChanges::default());
-        
-        // Get COM pointers for parameter changes
-        let input_param_com_ptr = input_param_changes.to_com_ptr::<IParameterChanges>()
-            .expect("Failed to get input param changes pointer");
-        let output_param_com_ptr = output_param_changes.to_com_ptr::<IParameterChanges>()
-            .expect("Failed to get output param changes pointer");
-            
-        let input_param_changes_ptr = input_param_com_ptr.clone().into_raw();
-        let output_param_changes_ptr = output_param_com_ptr.clone().into_raw();
-        
-        let mut data = Self {
-            process_data: std::mem::zeroed(),
-            input_buffers: Vec::new(),
-            output_buffers: Vec::new(),
-            input_bus_buffers: Vec::new(),
-            output_bus_buffers: Vec::new(),
-            input_channel_pointers: Vec::new(),
-            output_channel_pointers: Vec::new(),
-            process_context: std::mem::zeroed(),
-            input_events,
-            output_events,
-            input_events_ptr,
-            output_events_ptr,
-            input_param_changes,
-            output_param_changes,
-            input_param_changes_ptr,
-            output_param_changes_ptr,
-        };
-        
-        // Initialize process context
-        data.process_context.sampleRate = sample_rate;
-        data.process_context.tempo = 120.0;
-        data.process_context.timeSigNumerator = 4;
-        data.process_context.timeSigDenominator = 4;
-        data.process_context.state = vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kPlaying as u32 |
-                                     vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kTempoValid as u32 |
-                                     vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kTimeSigValid as u32 |
-                                     vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kContTimeValid as u32 |
-                                     vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::kSystemTimeValid as u32;
-        
-        // Set up process data
-        data.process_data.processMode = vst3::Steinberg::Vst::ProcessModes_::kRealtime as i32;
-        data.process_data.numSamples = block_size;
-        data.process_data.symbolicSampleSize = vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32 as i32;
-        data.process_data.processContext = &mut data.process_context;
-        data.process_data.inputEvents = data.input_events_ptr;
-        data.process_data.outputEvents = data.output_events_ptr;
-        data.process_data.inputParameterChanges = data.input_param_changes_ptr;
-        data.process_data.outputParameterChanges = data.output_param_changes_ptr;
-        
-        data
-    }
-    
-    unsafe fn prepare_buffers(&mut self, component: &ComPtr<IComponent>, block_size: i32) -> Result<(), String> {
-        // Get bus counts
-        let input_bus_count = component.getBusCount(kAudio as i32, kInput as i32);
-        let output_bus_count = component.getBusCount(kAudio as i32, kOutput as i32);
-        
-        println!("🎵 Preparing buffers: {} input buses, {} output buses", input_bus_count, output_bus_count);
-        
-        // Prepare input buffers
-        self.input_bus_buffers.clear();
-        self.input_buffers.clear();
-        self.input_channel_pointers.clear();
-        
-        for bus_idx in 0..input_bus_count {
-            let mut bus_info: vst3::Steinberg::Vst::BusInfo = std::mem::zeroed();
-            if component.getBusInfo(kAudio as i32, kInput as i32, bus_idx, &mut bus_info) == vst3::Steinberg::kResultOk {
-                let channel_count = bus_info.channelCount;
-                
-                // Create buffers for this bus
-                let mut bus_buffers = Vec::new();
-                let mut channel_ptrs = Vec::new();
-                
-                for _ in 0..channel_count {
-                    let mut buffer = vec![0.0f32; block_size as usize];
-                    let ptr = buffer.as_mut_ptr();
-                    bus_buffers.push(buffer);
-                    channel_ptrs.push(ptr);
-                }
-                
-                self.input_buffers.extend(bus_buffers);
-                self.input_channel_pointers.push(channel_ptrs);
-                
-                // Create AudioBusBuffers
-                let mut audio_bus_buffer: AudioBusBuffers = std::mem::zeroed();
-                audio_bus_buffer.numChannels = channel_count;
-                audio_bus_buffer.__field0.channelBuffers32 = if self.input_channel_pointers.last().unwrap().is_empty() { 
-                    std::ptr::null_mut() 
-                } else { 
-                    self.input_channel_pointers.last_mut().unwrap().as_mut_ptr() 
-                };
-                
-                self.input_bus_buffers.push(audio_bus_buffer);
-            }
-        }
-        
-        // Prepare output buffers
-        self.output_bus_buffers.clear();
-        self.output_buffers.clear();
-        self.output_channel_pointers.clear();
-        
-        for bus_idx in 0..output_bus_count {
-            let mut bus_info: vst3::Steinberg::Vst::BusInfo = std::mem::zeroed();
-            if component.getBusInfo(kAudio as i32, kOutput as i32, bus_idx, &mut bus_info) == vst3::Steinberg::kResultOk {
-                let channel_count = bus_info.channelCount;
-                
-                // Create buffers for this bus
-                let mut bus_buffers = Vec::new();
-                let mut channel_ptrs = Vec::new();
-                
-                for _ in 0..channel_count {
-                    let mut buffer = vec![0.0f32; block_size as usize];
-                    let ptr = buffer.as_mut_ptr();
-                    bus_buffers.push(buffer);
-                    channel_ptrs.push(ptr);
-                }
-                
-                self.output_buffers.extend(bus_buffers);
-                self.output_channel_pointers.push(channel_ptrs);
-                
-                // Create AudioBusBuffers
-                let mut audio_bus_buffer: AudioBusBuffers = std::mem::zeroed();
-                audio_bus_buffer.numChannels = channel_count;
-                audio_bus_buffer.__field0.channelBuffers32 = if self.output_channel_pointers.last().unwrap().is_empty() { 
-                    std::ptr::null_mut() 
-                } else { 
-                    self.output_channel_pointers.last_mut().unwrap().as_mut_ptr() 
-                };
-                
-                self.output_bus_buffers.push(audio_bus_buffer);
-            }
-        }
-        
-        // Update ProcessData pointers
-        self.process_data.numInputs = self.input_bus_buffers.len() as i32;
-        self.process_data.numOutputs = self.output_bus_buffers.len() as i32;
-        self.process_data.inputs = if self.input_bus_buffers.is_empty() { 
-            std::ptr::null_mut() 
-        } else { 
-            self.input_bus_buffers.as_mut_ptr() 
-        };
-        self.process_data.outputs = if self.output_bus_buffers.is_empty() { 
-            std::ptr::null_mut() 
-        } else { 
-            self.output_bus_buffers.as_mut_ptr() 
-        };
-        
-        Ok(())
-    }
-    
-    unsafe fn clear_buffers(&mut self) {
-        // Clear input buffers
-        for buffer in &mut self.input_buffers {
-            buffer.fill(0.0);
-        }
-        
-        // Clear output buffers  
-        for buffer in &mut self.output_buffers {
-            buffer.fill(0.0);
-        }
-        
-        // Clear events
-        self.input_events.events.borrow_mut().clear();
-        self.output_events.events.borrow_mut().clear();
-        
-        // Make sure pointers are still valid
-        if self.process_data.inputEvents.is_null() {
-            println!("WARNING: inputEvents pointer is null!");
-            self.process_data.inputEvents = self.input_events_ptr;
-        }
-        if self.process_data.outputEvents.is_null() {
-            println!("WARNING: outputEvents pointer is null!");
-            self.process_data.outputEvents = self.output_events_ptr;
-        }
-    }
-}
-
-impl Drop for HostProcessData {
-    fn drop(&mut self) {
-        unsafe {
-            // Release the COM pointers we cloned
-            if !self.input_events_ptr.is_null() {
-                let ptr = ComPtr::<IEventList>::from_raw(self.input_events_ptr);
-                // ComPtr will release when dropped
-                drop(ptr);
-            }
-            if !self.output_events_ptr.is_null() {
-                let ptr = ComPtr::<IEventList>::from_raw(self.output_events_ptr);
-                // ComPtr will release when dropped
-                drop(ptr);
-            }
-            if !self.input_param_changes_ptr.is_null() {
-                let ptr = ComPtr::<IParameterChanges>::from_raw(self.input_param_changes_ptr);
-                drop(ptr);
-            }
-            if !self.output_param_changes_ptr.is_null() {
-                let ptr = ComPtr::<IParameterChanges>::from_raw(self.output_param_changes_ptr);
-                drop(ptr);
-            }
-        }
-        self.input_events_ptr = std::ptr::null_mut();
-        self.output_events_ptr = std::ptr::null_mut();
-        self.input_param_changes_ptr = std::ptr::null_mut();
-        self.output_param_changes_ptr = std::ptr::null_mut();
-    }
-}
-
-// Parameter changes implementation
-#[derive(Default)]
-struct ParameterChanges {
-    queues: std::cell::RefCell<Vec<ComWrapper<ParameterValueQueue>>>,
-}
-
-impl Class for ParameterChanges {
-    type Interfaces = (IParameterChanges,);
-}
-
-impl IParameterChangesTrait for ParameterChanges {
-    unsafe fn getParameterCount(&self) -> i32 {
-        self.queues.borrow().len() as i32
-    }
-    
-    unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
-        if let Some(queue) = self.queues.borrow().get(index as usize) {
-            queue.to_com_ptr::<IParamValueQueue>()
-                .map(|ptr| ptr.into_raw())
-                .unwrap_or(std::ptr::null_mut())
-        } else {
-            std::ptr::null_mut()
-        }
-    }
-    
-    unsafe fn addParameterData(&self, id: *const u32, index: *mut i32) -> *mut IParamValueQueue {
-        if id.is_null() {
-            return std::ptr::null_mut();
-        }
-        
-        let param_id = *id;
-        let mut queues = self.queues.borrow_mut();
-        
-        // Check if queue for this parameter already exists
-        for (i, queue) in queues.iter().enumerate() {
-            if queue.param_id == param_id {
-                if !index.is_null() {
-                    *index = i as i32;
-                }
-                return queue.to_com_ptr::<IParamValueQueue>()
-                    .map(|ptr| ptr.into_raw())
-                    .unwrap_or(std::ptr::null_mut());
-            }
-        }
-        
-        // Create new queue
-        let new_queue = ComWrapper::new(ParameterValueQueue::new(param_id));
-        let queue_ptr = new_queue.to_com_ptr::<IParamValueQueue>()
-            .map(|ptr| ptr.into_raw())
-            .unwrap_or(std::ptr::null_mut());
-        
-        if !index.is_null() {
-            *index = queues.len() as i32;
-        }
-        
-        queues.push(new_queue);
-        queue_ptr
-    }
-}
-
-struct ParameterValueQueue {
-    param_id: u32,
-    points: std::cell::RefCell<Vec<(i32, f64)>>, // sample offset, value
-}
-
-impl ParameterValueQueue {
-    fn new(param_id: u32) -> Self {
-        Self {
-            param_id,
-            points: std::cell::RefCell::new(Vec::new()),
-        }
-    }
-}
-
-impl Class for ParameterValueQueue {
-    type Interfaces = (IParamValueQueue,);
-}
-
-impl IParamValueQueueTrait for ParameterValueQueue {
-    unsafe fn getParameterId(&self) -> u32 {
-        self.param_id
-    }
-    
-    unsafe fn getPointCount(&self) -> i32 {
-        self.points.borrow().len() as i32
-    }
-    
-    unsafe fn getPoint(&self, index: i32, sample_offset: *mut i32, value: *mut f64) -> i32 {
-        if let Some((offset, val)) = self.points.borrow().get(index as usize) {
-            if !sample_offset.is_null() {
-                *sample_offset = *offset;
-            }
-            if !value.is_null() {
-                *value = *val;
-            }
-            vst3::Steinberg::kResultOk
-        } else {
-            vst3::Steinberg::kResultFalse
-        }
-    }
-    
-    unsafe fn addPoint(&self, sample_offset: i32, value: f64, index: *mut i32) -> i32 {
-        let mut points = self.points.borrow_mut();
-        
-        // Find insertion point
-        let insert_pos = points.iter().position(|(offset, _)| *offset > sample_offset)
-            .unwrap_or(points.len());
-        
-        points.insert(insert_pos, (sample_offset, value));
-        
-        if !index.is_null() {
-            *index = insert_pos as i32;
-        }
-        
-        vst3::Steinberg::kResultOk
-    }
-}
