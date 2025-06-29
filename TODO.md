@@ -37,13 +37,13 @@
 - [ ] Implement per-plugin MIDI filters (channel filter, note range, velocity curve)
 
 ### Stability & Error Handling
-- [ ] Add "plugin crashed" handling so the entire application doesn't crash if a plugin dies
-  - Run each plugin in separate thread with panic catching
-  - Implement watchdog timer to monitor processing time
-  - Add COM interface validation and null checks
-- [ ] Implement plugin sandboxing/isolation
-  - Process isolation with IPC for audio/MIDI data
-  - Memory protection boundaries
+- [x] Add "plugin crashed" handling so the entire application doesn't crash if a plugin dies
+  - [x] Run each plugin in separate thread with panic catching
+  - [ ] Implement watchdog timer to monitor processing time
+  - [x] Add COM interface validation and null checks
+- [x] Implement plugin sandboxing/isolation
+  - [x] Process isolation with IPC for audio/MIDI data
+  - [x] Memory protection boundaries
 - [ ] Add crash recovery mechanism
   - Serialize plugin state before risky operations
   - Attempt to reload from last good state after crash
@@ -67,7 +67,7 @@
   - RMS and peak level calculation
   - Stereo or multi-channel display
   - Configurable ballistics
-- [ ] Add peak level indicators with hold time
+- [x] Add peak level indicators with hold time
 - [ ] Add clipping indicators (red when signal > 0dB)
 
 ## Developer Experience
