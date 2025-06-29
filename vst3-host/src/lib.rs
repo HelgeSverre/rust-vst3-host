@@ -33,23 +33,29 @@ pub mod midi;
 pub mod parameters;
 pub mod plugin;
 
+pub(crate) mod discovery;
+
 #[cfg(feature = "cpal-backend")]
 pub mod backends;
 
 mod internal;
 
-pub use audio::{AudioBuffers, AudioLevels, ChannelLevel};
+pub use audio::{AudioBuffers, AudioConfig, AudioLevels, ChannelLevel};
 pub use error::{Error, Result};
-pub use host::Vst3Host;
-pub use midi::{MidiChannel, MidiEvent};
-pub use parameters::Parameter;
-pub use plugin::{Plugin, PluginInfo};
+pub use host::{DiscoveryProgress, Vst3Host, Vst3HostBuilder};
+pub use midi::{cc, MidiChannel, MidiEvent};
+pub use parameters::{Parameter, ParameterAutomation, ParameterChange};
+pub use plugin::{Plugin, PluginInfo, WindowHandle};
 
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::{
-        AudioBuffers, AudioLevels, ChannelLevel, Error, MidiChannel, MidiEvent, Parameter,
-        Plugin, PluginInfo, Result, Vst3Host,
+        audio::{AudioBuffers, AudioConfig, AudioLevels, ChannelLevel},
+        error::{Error, Result},
+        host::{DiscoveryProgress, Vst3Host, Vst3HostBuilder},
+        midi::{cc, MidiChannel, MidiEvent},
+        parameters::{Parameter, ParameterAutomation},
+        plugin::{Plugin, PluginInfo, WindowHandle},
     };
     
     #[cfg(feature = "cpal-backend")]
