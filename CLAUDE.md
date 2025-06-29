@@ -40,7 +40,7 @@ cargo test -- --nocapture
 
 ## Architecture Overview
 
-The application is structured as a monolithic single-file application (`src/main.rs`, ~2600 lines) with the following key components:
+The application is structured with a main file (`src/main.rs`, ~4500 lines) and several supporting modules:
 
 ### Core Components
 
@@ -62,8 +62,10 @@ The application is structured as a monolithic single-file application (`src/main
 
 4. **Event Handling**:
    - Custom `IEventList` implementation for MIDI events
+   - `MonitoredEventList` wrapper for immediate MIDI event capture
    - `ComponentHandler` for parameter change notifications
    - Real-time MIDI monitoring with event display
+   - MIDI channel selection (1-16) for multi-timbral plugins
 
 ### VST3 Plugin Paths
 
@@ -84,6 +86,8 @@ The application scans these standard directories:
 - Extensive use of unsafe Rust for VST3 COM interface interactions
 - Supports both single-component and separate controller VST3 architectures
 - Platform-specific binary path resolution within VST3 bundles
+- MIDI note convention: C3 = MIDI note 60
+- Virtual keyboard spans C1 to C6 (5 octaves) with MIDI note numbers displayed
 
 ### Environment Configuration
 
@@ -105,7 +109,10 @@ This points to the VST3 SDK submodule included in the repository.
    - **MIDI Monitor**: Real-time MIDI event display
 
 3. When modifying the code:
-   - All application logic is in `src/main.rs`
+   - Main application logic is in `src/main.rs`
+   - COM implementations are in `src/com_implementations.rs`
+   - Audio processing structures in `src/audio_processing.rs`
+   - Data structures in `src/data_structures.rs`
    - Follow existing patterns for VST3 COM interface handling
    - Use extensive logging with emoji prefixes for debugging
    - Ensure proper cleanup of VST3 interfaces to prevent memory leaks
