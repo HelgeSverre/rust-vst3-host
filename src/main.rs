@@ -1492,15 +1492,18 @@ impl VST3Inspector {
                 self.peak_hold_right.clone(),
             );
             self.shared_audio_state = Some(Arc::new(Mutex::new(audio_state)));
-
-            // If we have a processor, set it up in the shared state
-            if let (Some(processor), Some(component)) = (&self.processor, &self.component) {
-                let mut state = self.shared_audio_state.as_ref().unwrap().lock().unwrap();
+        }
+        
+        // Always update the processor in the shared state (important after audio panic)
+        if let (Some(processor), Some(component)) = (&self.processor, &self.component) {
+            if let Some(shared_state) = &self.shared_audio_state {
+                let mut state = shared_state.lock().unwrap();
                 // Clone the processor and component for the audio thread
                 let processor_clone = processor.clone();
                 let component_clone = component.clone();
-
+                
                 state.set_processor(processor_clone, component_clone);
+                state.is_active = self.is_processing; // Sync the processing state
             }
         }
 
@@ -3763,10 +3766,40 @@ impl VST3Inspector {
 
     fn start_processing(&mut self) -> Result<(), String> {
         unsafe {
+            // First, reactivate the component if it exists
+            if let Some(component) = &self.component {
+                let activate_result = component.setActive(1);
+                if activate_result != vst3::Steinberg::kResultOk {
+                    return Err(format!("Failed to activate component: {:#x}", activate_result));
+                }
+            }
+            
+            // Setup processing again after reactivation
             if let Some(processor) = &self.processor {
+                let mut setup = ProcessSetup {
+                    processMode: vst3::Steinberg::Vst::ProcessModes_::kRealtime as i32,
+                    symbolicSampleSize: vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32 as i32,
+                    maxSamplesPerBlock: self.block_size,
+                    sampleRate: self.sample_rate,
+                };
+                
+                let setup_result = processor.setupProcessing(&mut setup);
+                if setup_result != vst3::Steinberg::kResultOk {
+                    return Err(format!("Failed to setup processing: {:#x}", setup_result));
+                }
+                
+                // Now start processing
                 let result = processor.setProcessing(1);
                 if result == vst3::Steinberg::kResultOk {
                     self.is_processing = true;
+                    
+                    // Also reactivate the shared audio state
+                    if let Some(state) = &self.shared_audio_state {
+                        if let Ok(mut state) = state.lock() {
+                            state.is_active = true;
+                        }
+                    }
+                    
                     Ok(())
                 } else {
                     Err(format!("Failed to start processing: {:#x}", result))
