@@ -114,7 +114,6 @@ This points to the VST3 SDK submodule included in the repository.
    - Audio processing structures in `src/audio_processing.rs`
    - Data structures in `src/data_structures.rs`
    - Follow existing patterns for VST3 COM interface handling
-   - Use extensive logging with emoji prefixes for debugging
    - Ensure proper cleanup of VST3 interfaces to prevent memory leaks
 
 ## Important Notes
