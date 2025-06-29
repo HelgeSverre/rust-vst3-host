@@ -1,34 +1,32 @@
 #![allow(deprecated)]
 #![allow(non_snake_case)]
 
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
 use std::ptr;
 use vst3::Steinberg::Vst::{BusDirections_::*, IAudioProcessorTrait, MediaTypes_::*};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 // Import the constants
 use vst3::Steinberg::Vst::{
     Event, Event_, IAudioProcessor, IComponent, IComponentTrait, IConnectionPoint,
-    IConnectionPointTrait, IEditController, IEditControllerTrait, IEventList, IEventListTrait,
-    ProcessData, AudioBusBuffers, ProcessContext, ProcessSetup, IParameterChanges,
-    IParameterChangesTrait, IParamValueQueue, IParamValueQueueTrait,
+    IConnectionPointTrait, IEditController, IEditControllerTrait, IEventListTrait,
+    IParamValueQueueTrait, IParameterChangesTrait, ProcessSetup,
 };
 use vst3::Steinberg::{IPlugView, IPlugViewTrait, IPluginFactoryTrait};
 use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory};
-use vst3::{ComPtr, Interface, Class, ComWrapper};
+use vst3::{Class, ComPtr, Interface};
 
 use libloading::os::unix::{Library, Symbol};
 
 // Import modules
-mod data_structures;
-mod utils;
+mod audio_processing;
 mod com_implementations;
+mod data_structures;
 mod plugin_discovery;
 mod plugin_loader;
-mod audio_processing;
+mod utils;
 
-use utils::*;
-use com_implementations::*;
 use audio_processing::*;
+use utils::*;
 
 // macOS native window support
 #[cfg(target_os = "macos")]
@@ -931,78 +929,79 @@ impl AudioProcessingState {
             block_size,
         }
     }
-    
+
     fn set_processor(&mut self, processor: ComPtr<IAudioProcessor>, component: ComPtr<IComponent>) {
         self.processor = Some(processor);
         self.component = Some(component);
         self.is_active = true;
     }
-    
+
     fn add_midi_event(&mut self, event: Event) {
         self.pending_midi_events.push(event);
     }
-    
+
     fn process_audio(&mut self, output: &mut [f32]) -> bool {
         if !self.is_active {
             return false;
         }
-        
+
         let processor = match &self.processor {
             Some(p) => p,
             None => return false,
         };
-        
+
         let component = match &self.component {
             Some(c) => c,
             None => return false,
         };
-        
+
         unsafe {
             // Create fresh process data for this audio callback
             let mut process_data = HostProcessData::new(self.block_size, self.sample_rate);
-            
+
             // Prepare buffers for the current component
             if let Err(_) = process_data.prepare_buffers(component, self.block_size) {
                 return false;
             }
-            
+
             // Clear buffers
             process_data.clear_buffers();
-            
+
             // Add any pending MIDI events
             for event in self.pending_midi_events.drain(..) {
                 process_data.input_events.events.lock().unwrap().push(event);
             }
-            
+
             // Update time - use a simple counter for now
             static mut SAMPLE_COUNTER: i64 = 0;
             process_data.process_context.continousTimeSamples = SAMPLE_COUNTER;
             SAMPLE_COUNTER += self.block_size as i64;
-            
+
             // Process audio
             let result = processor.process(&mut process_data.process_data);
-            
+
             if result == vst3::Steinberg::kResultOk {
                 // Copy output to buffer
                 let channels = output.len() / self.block_size as usize;
                 let mut out_idx = 0;
-                
+
                 for frame in 0..self.block_size as usize {
                     for ch in 0..channels {
-                        let sample = if ch < process_data.output_buffers.len() &&
-                                       frame < process_data.output_buffers[ch].len() {
+                        let sample = if ch < process_data.output_buffers.len()
+                            && frame < process_data.output_buffers[ch].len()
+                        {
                             process_data.output_buffers[ch][frame]
                         } else {
                             0.0
                         };
-                        
+
                         if out_idx < output.len() {
                             output[out_idx] = sample;
                             out_idx += 1;
                         }
                     }
                 }
-                
+
                 true
             } else {
                 false
@@ -1053,7 +1052,7 @@ impl eframe::App for VST3Inspector {
                 });
 
                 // Push GUI button to the right - only show on Plugin tab
-                if self.current_tab == Tab::Plugin {
+                if self.current_tab != Tab::Plugins {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Large GUI button
                         if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
@@ -1109,114 +1108,127 @@ impl VST3Inspector {
     fn initialize_audio_device(&mut self) -> Result<(), String> {
         // Get the default audio host
         let host = cpal::default_host();
-        
+
         // Get the default output device
-        let device = host.default_output_device()
+        let device = host
+            .default_output_device()
             .ok_or("No default audio output device found")?;
-        
-        println!("Using audio device: {}", device.name().unwrap_or("Unknown".to_string()));
-        
+
+        println!(
+            "Using audio device: {}",
+            device.name().unwrap_or("Unknown".to_string())
+        );
+
         // Get the default output config
-        let config = device.default_output_config()
+        let config = device
+            .default_output_config()
             .map_err(|e| format!("Failed to get default output config: {}", e))?;
-        
-        println!("Audio config: {} channels, {} Hz, format: {:?}", 
-                 config.channels(), config.sample_rate().0, config.sample_format());
-        
+
+        println!(
+            "Audio config: {} channels, {} Hz, format: {:?}",
+            config.channels(),
+            config.sample_rate().0,
+            config.sample_format()
+        );
+
         // Update our sample rate to match the audio device
         self.sample_rate = config.sample_rate().0 as f64;
-        
+
         // Convert to StreamConfig
         let stream_config = cpal::StreamConfig {
             channels: config.channels(),
             sample_rate: config.sample_rate(),
             buffer_size: cpal::BufferSize::Default,
         };
-        
+
         self.audio_device = Some(device);
         self.audio_config = Some(stream_config);
-        
+
         Ok(())
     }
-    
+
     fn start_audio_stream(&mut self) -> Result<(), String> {
         if self.audio_device.is_none() {
             return Err("Audio device not initialized".to_string());
         }
-        
+
         // Initialize shared audio state if not already done
         if self.shared_audio_state.is_none() {
             let audio_state = AudioProcessingState::new(self.sample_rate, self.block_size);
             self.shared_audio_state = Some(std::sync::Arc::new(std::sync::Mutex::new(audio_state)));
-            
+
             // If we have a processor, set it up in the shared state
             if let (Some(processor), Some(component)) = (&self.processor, &self.component) {
                 let mut state = self.shared_audio_state.as_ref().unwrap().lock().unwrap();
                 // Clone the processor and component for the audio thread
                 let processor_clone = processor.clone();
                 let component_clone = component.clone();
-                
+
                 state.set_processor(processor_clone, component_clone);
             }
         }
-        
+
         // Stop any existing stream
         self.audio_stream = None;
-        
+
         let device = self.audio_device.as_ref().unwrap();
         let config = self.audio_config.as_ref().unwrap();
-        
+
         // Clone the shared state for the audio callback
         let shared_state = self.shared_audio_state.as_ref().unwrap().clone();
         let channels = config.channels as usize;
-        
+
         println!("Starting real-time audio stream with {} channels", channels);
-        
-        let stream = device.build_output_stream(
-            config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // Try to lock the shared state
-                if let Ok(mut state) = shared_state.try_lock() {
-                    if state.process_audio(data) {
-                        // Audio was processed successfully
+
+        let stream = device
+            .build_output_stream(
+                config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    // Try to lock the shared state
+                    if let Ok(mut state) = shared_state.try_lock() {
+                        if state.process_audio(data) {
+                            // Audio was processed successfully
+                        } else {
+                            // No processing available, fill with silence
+                            for sample in data.iter_mut() {
+                                *sample = 0.0;
+                            }
+                        }
                     } else {
-                        // No processing available, fill with silence
+                        // Could not lock state, fill with silence to avoid audio glitches
                         for sample in data.iter_mut() {
                             *sample = 0.0;
                         }
                     }
-                } else {
-                    // Could not lock state, fill with silence to avoid audio glitches
-                    for sample in data.iter_mut() {
-                        *sample = 0.0;
-                    }
-                }
-            },
-            move |err| {
-                eprintln!("Audio stream error: {}", err);
-            },
-            None,
-        ).map_err(|e| format!("Failed to build output stream: {}", e))?;
-        
-        stream.play().map_err(|e| format!("Failed to start audio stream: {}", e))?;
-        
+                },
+                move |err| {
+                    eprintln!("Audio stream error: {}", err);
+                },
+                None,
+            )
+            .map_err(|e| format!("Failed to build output stream: {}", e))?;
+
+        stream
+            .play()
+            .map_err(|e| format!("Failed to start audio stream: {}", e))?;
+
         self.audio_stream = Some(stream);
         println!("Real-time audio stream started");
-        
+
         Ok(())
     }
-    
+
     /// Process audio with the current plugin and check for output
     fn process_audio_with_output_check(&mut self) -> Result<(), String> {
         if !self.is_processing {
             self.start_processing()?;
         }
-        
+
         let processor = match &self.processor {
             Some(p) => p,
             None => return Err("No processor available".to_string()),
         };
-        
+
         let process_data = match &mut self.host_process_data {
             Some(data) => data,
             None => return Err("No process data available".to_string()),
@@ -1225,17 +1237,17 @@ impl VST3Inspector {
         unsafe {
             // Clear buffers (silence input)
             process_data.clear_buffers();
-            
+
             // Update time
             process_data.process_context.continousTimeSamples += self.block_size as i64;
-            
+
             // Process audio
             let result = processor.process(&mut process_data.process_data);
-            
+
             if result != vst3::Steinberg::kResultOk {
                 return Err(format!("Process failed: {:#x}", result));
             }
-            
+
             // Check if plugin generated any audio
             let mut has_output = false;
             let mut max_amplitude = 0.0f32;
@@ -1247,13 +1259,16 @@ impl VST3Inspector {
                     }
                 }
             }
-            
+
             if has_output {
-                println!("🎵 Plugin generated audio output! Max amplitude: {:.6}", max_amplitude);
+                println!(
+                    "🎵 Plugin generated audio output! Max amplitude: {:.6}",
+                    max_amplitude
+                );
             } else {
                 println!("🔇 No audio output detected");
             }
-            
+
             // Check output events
             let num_events = process_data.output_events.events.lock().unwrap().len();
             if num_events > 0 {
@@ -1263,7 +1278,7 @@ impl VST3Inspector {
         }
         Ok(())
     }
-    
+
     fn show_plugins_tab(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
@@ -1526,22 +1541,6 @@ impl VST3Inspector {
             ui.add_space(8.0);
             ui.heading("Parameter Control");
             ui.add_space(8.0);
-
-            // Add MIDI monitor button
-            if ui.button("Monitor Outgoing MIDI Events").clicked() {
-                if let Err(e) = self.monitor_midi_output() {
-                    println!("❌ Failed to monitor MIDI output: {}", e);
-                }
-            }
-            // Add MIDI Note On test button
-            if ui
-                .button("Send MIDI Note On (Channel 0, Middle C, Velocity 1.0)")
-                .clicked()
-            {
-                if let Err(e) = self.send_midi_note_on(0, 60, 1.0) {
-                    println!("❌ Failed to send MIDI Note On: {}", e);
-                }
-            }
 
             // Clone the plugin info to avoid borrowing issues
             let plugin_info_clone = self.plugin_info.clone();
@@ -1885,7 +1884,8 @@ impl VST3Inspector {
                                 let is_being_edited = self.parameter_being_edited == Some(param.id);
 
                                 ui.horizontal(|ui| {
-                                    let _response = if param.step_count > 0 && param.step_count <= 10
+                                    let _response = if param.step_count > 0
+                                        && param.step_count <= 10
                                     {
                                         // For parameters with few steps, use a combo box
                                         let current_step =
@@ -2081,18 +2081,18 @@ impl VST3Inspector {
             });
         });
     }
-    
+
     fn show_processing_tab(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
             ui.heading("Audio & MIDI Processing");
             ui.add_space(8.0);
-            
+
             if self.plugin_info.is_none() {
                 ui.label("No plugin loaded. Please load a plugin first.");
                 return;
             }
-            
+
             // Processing controls
             ui.horizontal(|ui| {
                 ui.label("Processing State:");
@@ -2110,15 +2110,15 @@ impl VST3Inspector {
                     }
                 }
             });
-            
+
             ui.separator();
-            
+
             // Audio Device
             ui.horizontal(|ui| {
                 ui.label("Audio Output:");
                 if self.audio_device.is_some() {
                     ui.colored_label(egui::Color32::GREEN, "Initialized");
-                    
+
                     if self.audio_stream.is_some() {
                         ui.colored_label(egui::Color32::GREEN, "Stream Active");
                         if ui.button("Stop Audio").clicked() {
@@ -2142,7 +2142,7 @@ impl VST3Inspector {
                     }
                 }
             });
-            
+
             // Audio settings
             ui.horizontal(|ui| {
                 ui.label("Sample Rate:");
@@ -2151,20 +2151,29 @@ impl VST3Inspector {
                 ui.label("Block Size:");
                 ui.label(format!("{} samples", self.block_size));
             });
-            
+
             ui.separator();
             ui.add_space(8.0);
-            
+
             // MIDI Testing
             ui.heading("MIDI Testing");
             ui.add_space(8.0);
-            
+
             // Virtual keyboard
             ui.group(|ui| {
                 ui.label("Virtual MIDI Keyboard:");
                 ui.horizontal(|ui| {
                     // White keys
-                    let white_keys = [(60, "C"), (62, "D"), (64, "E"), (65, "F"), (67, "G"), (69, "A"), (71, "B"), (72, "C")];
+                    let white_keys = [
+                        (60, "C"),
+                        (62, "D"),
+                        (64, "E"),
+                        (65, "F"),
+                        (67, "G"),
+                        (69, "A"),
+                        (71, "B"),
+                        (72, "C"),
+                    ];
                     for (note, label) in &white_keys {
                         if ui.button(format!("{}\n{}", label, note)).clicked() {
                             // Send note on
@@ -2178,9 +2187,9 @@ impl VST3Inspector {
                         }
                     }
                 });
-                
+
                 ui.horizontal(|ui| {
-                    // Black keys  
+                    // Black keys
                     let black_keys = [(61, "C#"), (63, "D#"), (66, "F#"), (68, "G#"), (70, "A#")];
                     ui.add_space(30.0); // Offset for first black key
                     for (note, label) in &black_keys {
@@ -2198,9 +2207,9 @@ impl VST3Inspector {
                     }
                 });
             });
-            
+
             ui.add_space(8.0);
-            
+
             // MIDI monitor
             ui.horizontal(|ui| {
                 if ui.button("Test MIDI Output").clicked() {
@@ -2208,13 +2217,13 @@ impl VST3Inspector {
                         println!("MIDI monitoring error: {}", e);
                     }
                 }
-                
+
                 if ui.button("Process Audio Block").clicked() {
                     if let Err(e) = self.process_audio_block() {
                         println!("Audio processing error: {}", e);
                     }
                 }
-                
+
                 if ui.button("Process 10 Blocks").clicked() {
                     // Process multiple blocks to give plugins time to update
                     for i in 0..10 {
@@ -2226,64 +2235,72 @@ impl VST3Inspector {
                     }
                 }
             });
-            
+
             ui.separator();
             ui.add_space(8.0);
-            
+
             // Bus information
             if let Some(info) = &self.plugin_info {
                 if let Some(comp_info) = &info.component_info {
                     ui.heading("Audio Buses");
-                    
+
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label("Input Buses:");
                             for (i, bus) in comp_info.audio_inputs.iter().enumerate() {
-                                ui.label(format!("  {} [{}]: {} channels", 
-                                    i, bus.name, bus.channel_count));
+                                ui.label(format!(
+                                    "  {} [{}]: {} channels",
+                                    i, bus.name, bus.channel_count
+                                ));
                             }
                             if comp_info.audio_inputs.is_empty() {
                                 ui.label("  None");
                             }
                         });
-                        
+
                         ui.separator();
-                        
+
                         ui.vertical(|ui| {
                             ui.label("Output Buses:");
                             for (i, bus) in comp_info.audio_outputs.iter().enumerate() {
-                                ui.label(format!("  {} [{}]: {} channels", 
-                                    i, bus.name, bus.channel_count));
+                                ui.label(format!(
+                                    "  {} [{}]: {} channels",
+                                    i, bus.name, bus.channel_count
+                                ));
                             }
                             if comp_info.audio_outputs.is_empty() {
                                 ui.label("  None");
                             }
                         });
                     });
-                    
+
                     ui.add_space(8.0);
-                    
+
                     ui.heading("Event Buses");
-                    
+
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label("Event Input Buses:");
                             for (i, bus) in comp_info.event_inputs.iter().enumerate() {
-                                ui.label(format!("  {} [{}]: {} channels", 
-                                    i, bus.name, bus.channel_count));
+                                ui.label(format!(
+                                    "  {} [{}]: {} channels",
+                                    i, bus.name, bus.channel_count
+                                ));
                             }
                             if comp_info.event_inputs.is_empty() {
                                 ui.label("  None");
                             }
                         });
-                        
+
                         ui.separator();
-                        
+
                         ui.vertical(|ui| {
                             ui.label("Event Output Buses:");
                             for (i, bus) in comp_info.event_outputs.iter().enumerate() {
-                                ui.label(format!("  {} [{}]: {} channels", 
-                                    i, bus.name, bus.channel_count));
+                                ui.label(format!(
+                                    "  {} [{}]: {} channels",
+                                    i, bus.name, bus.channel_count
+                                ));
                             }
                             if comp_info.event_outputs.is_empty() {
                                 ui.label("  None");
@@ -2328,7 +2345,9 @@ impl VST3Inspector {
     #[cfg(target_os = "macos")]
     unsafe fn create_macos_gui(&mut self, binary_path: String) -> Result<(), String> {
         // Use existing component and controller - don't create new ones!
-        let controller = self.controller.as_ref()
+        let controller = self
+            .controller
+            .as_ref()
             .ok_or("No controller instance available - plugin must be loaded first")?;
 
         // Create view using ViewType::kEditor (which is "editor")
@@ -2400,7 +2419,9 @@ impl VST3Inspector {
     #[cfg(target_os = "windows")]
     unsafe fn create_windows_gui(&mut self, binary_path: String) -> Result<(), String> {
         // Use existing component and controller - don't create new ones!
-        let controller = self.controller.as_ref()
+        let controller = self
+            .controller
+            .as_ref()
             .ok_or("No controller instance available - plugin must be loaded first")?;
 
         // Create view using ViewType::kEditor (which is "editor")
@@ -2723,38 +2744,38 @@ impl VST3Inspector {
             }
         }
     }
-    
+
     unsafe fn load_and_init_plugin(&mut self, binary_path: &str) -> Result<PluginInfo, String> {
         // Load the library
         let library = match Library::new(binary_path) {
             Ok(lib) => lib,
             Err(e) => return Err(format!("Failed to load library: {}", e)),
         };
-        
+
         // Get factory
         let get_factory: Symbol<unsafe extern "C" fn() -> *mut IPluginFactory> =
             match library.get(b"GetPluginFactory") {
                 Ok(symbol) => symbol,
                 Err(e) => return Err(format!("Failed to get GetPluginFactory: {}", e)),
             };
-        
+
         let factory_ptr = get_factory();
         if factory_ptr.is_null() {
             return Err("GetPluginFactory returned null".to_string());
         }
-        
-        let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr)
-            .ok_or("Failed to wrap factory")?;
-        
+
+        let factory =
+            ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or("Failed to wrap factory")?;
+
         // Get factory info
         let mut factory_info = std::mem::zeroed();
         factory.getFactoryInfo(&mut factory_info);
-        
+
         // Find audio module class
         let class_count = factory.countClasses();
         let mut audio_class_id = None;
         let mut classes = Vec::new();
-        
+
         for i in 0..class_count {
             let mut class_info = std::mem::zeroed();
             if factory.getClassInfo(i, &mut class_info) == vst3::Steinberg::kResultOk {
@@ -2770,9 +2791,9 @@ impl VST3Inspector {
                 });
             }
         }
-        
+
         let audio_class_id = audio_class_id.ok_or("No Audio Module class found")?;
-        
+
         // Create component
         let mut component_ptr: *mut IComponent = ptr::null_mut();
         let result = factory.createInstance(
@@ -2780,24 +2801,25 @@ impl VST3Inspector {
             IComponent::IID.as_ptr() as *const i8,
             &mut component_ptr as *mut _ as *mut _,
         );
-        
+
         if result != vst3::Steinberg::kResultOk || component_ptr.is_null() {
             return Err("Failed to create component".to_string());
         }
-        
-        let component = ComPtr::<IComponent>::from_raw(component_ptr)
-            .ok_or("Failed to wrap component")?;
-        
+
+        let component =
+            ComPtr::<IComponent>::from_raw(component_ptr).ok_or("Failed to wrap component")?;
+
         // Initialize component
         let init_result = component.initialize(ptr::null_mut());
         if init_result != vst3::Steinberg::kResultOk {
             return Err("Failed to initialize component".to_string());
         }
-        
+
         // Get processor
-        let processor = component.cast::<IAudioProcessor>()
+        let processor = component
+            .cast::<IAudioProcessor>()
             .ok_or("Component does not implement IAudioProcessor")?;
-        
+
         // Get or create controller
         let controller = match get_or_create_controller(&component, &factory, &audio_class_id)? {
             Some(ctrl) => ctrl,
@@ -2806,10 +2828,10 @@ impl VST3Inspector {
                 return Err("No controller available".to_string());
             }
         };
-        
+
         // Connect if separate
         let _ = connect_component_and_controller(&component, &controller);
-        
+
         // Setup processing
         let mut setup = ProcessSetup {
             processMode: vst3::Steinberg::Vst::ProcessModes_::kRealtime as i32,
@@ -2817,43 +2839,43 @@ impl VST3Inspector {
             maxSamplesPerBlock: self.block_size,
             sampleRate: self.sample_rate,
         };
-        
+
         let setup_result = processor.setupProcessing(&mut setup);
         if setup_result != vst3::Steinberg::kResultOk {
             component.terminate();
             controller.terminate();
             return Err(format!("Failed to setup processing: {:#x}", setup_result));
         }
-        
+
         // Activate buses
         self.activate_all_buses(&component)?;
-        
+
         // Create process data
         let mut process_data = Box::new(HostProcessData::new(self.block_size, self.sample_rate));
         process_data.prepare_buffers(&component, self.block_size)?;
-        
+
         // Get component info
         let component_info = get_component_info(&component)?;
-        
+
         // Activate component
         let activate_result = component.setActive(1);
         if activate_result != vst3::Steinberg::kResultOk {
             println!("⚠️ Component activation failed: {:#x}", activate_result);
         }
-        
+
         // Get controller info
         let controller_info = get_controller_info(&controller)?;
-        
+
         // Check for GUI
         let (has_gui, gui_size) = check_for_gui(&controller)?;
-        
+
         // Store everything (we're keeping them alive now!)
         self.component = Some(component);
         self.controller = Some(controller);
         self.processor = Some(processor);
         self.host_process_data = Some(process_data);
         self.plugin_library = Some(library);
-        
+
         Ok(PluginInfo {
             factory_info: FactoryInfo {
                 vendor: c_str_to_string(&factory_info.vendor),
@@ -2868,35 +2890,35 @@ impl VST3Inspector {
             gui_size,
         })
     }
-    
+
     unsafe fn activate_all_buses(&self, component: &ComPtr<IComponent>) -> Result<(), String> {
         // Activate audio buses
         let audio_input_count = component.getBusCount(kAudio as i32, kInput as i32);
         let audio_output_count = component.getBusCount(kAudio as i32, kOutput as i32);
-        
+
         for i in 0..audio_input_count {
             component.activateBus(kAudio as i32, kInput as i32, i, 1);
         }
-        
+
         for i in 0..audio_output_count {
             component.activateBus(kAudio as i32, kOutput as i32, i, 1);
         }
-        
+
         // Activate event buses
         let event_input_count = component.getBusCount(kEvent as i32, kInput as i32);
         let event_output_count = component.getBusCount(kEvent as i32, kOutput as i32);
-        
+
         for i in 0..event_input_count {
             component.activateBus(kEvent as i32, kInput as i32, i, 1);
         }
-        
+
         for i in 0..event_output_count {
             component.activateBus(kEvent as i32, kOutput as i32, i, 1);
         }
-        
+
         Ok(())
     }
-    
+
     fn stop_processing(&mut self) {
         if self.is_processing {
             unsafe {
@@ -2910,7 +2932,7 @@ impl VST3Inspector {
             self.is_processing = false;
         }
     }
-    
+
     fn start_processing(&mut self) -> Result<(), String> {
         unsafe {
             if let Some(processor) = &self.processor {
@@ -2931,12 +2953,12 @@ impl VST3Inspector {
         if !self.is_processing {
             self.start_processing()?;
         }
-        
+
         let processor = match &self.processor {
             Some(p) => p,
             None => return Err("No processor available".to_string()),
         };
-        
+
         let process_data = match &mut self.host_process_data {
             Some(data) => data,
             None => return Err("No process data available".to_string()),
@@ -2945,18 +2967,24 @@ impl VST3Inspector {
         unsafe {
             // Clear buffers and events
             process_data.clear_buffers();
-            
+
             // Update time in process context
             process_data.process_context.continousTimeSamples += self.block_size as i64;
-            
+
             // Debug: Verify output events pointer
-            println!("[DEBUG] outputEvents pointer: {:?}", process_data.process_data.outputEvents);
-            println!("[DEBUG] inputEvents pointer: {:?}", process_data.process_data.inputEvents);
-            
+            println!(
+                "[DEBUG] outputEvents pointer: {:?}",
+                process_data.process_data.outputEvents
+            );
+            println!(
+                "[DEBUG] inputEvents pointer: {:?}",
+                process_data.process_data.inputEvents
+            );
+
             // Process audio (even with empty buffers, this allows MIDI generation)
             let result = processor.process(&mut process_data.process_data);
             println!("[MIDI Monitor] Called process, result = {:#x}", result);
-            
+
             // Check output events
             let num_events = process_data.output_events.events.lock().unwrap().len();
             if num_events > 0 {
@@ -2988,34 +3016,39 @@ impl VST3Inspector {
                     event.__field0.noteOn.noteId = -1;
 
                     state.add_midi_event(event);
-                    println!("🎹 Note ON sent to audio thread: ch={}, pitch={}, vel={}", channel, pitch, velocity);
+                    println!(
+                        "🎹 Note ON sent to audio thread: ch={}, pitch={}, vel={}",
+                        channel, pitch, velocity
+                    );
                     return Ok(());
                 }
             }
         }
-        
+
         // Fall back to old method if shared state not available
         if !self.is_processing {
             self.start_processing()?;
         }
-        
+
         let processor = match &self.processor {
             Some(p) => p,
             None => return Err("No processor available".to_string()),
         };
-        
+
         let process_data = match &mut self.host_process_data {
             Some(data) => data,
             None => return Err("No process data available".to_string()),
         };
 
         unsafe {
-            println!("[MIDI Input] Preparing to send Note On - channel={}, pitch={}, velocity={}", 
-                     channel, pitch, velocity);
-            
+            println!(
+                "[MIDI Input] Preparing to send Note On - channel={}, pitch={}, velocity={}",
+                channel, pitch, velocity
+            );
+
             // Clear buffers and events
             process_data.clear_buffers();
-            
+
             // Add Note On event
             let mut event = std::mem::zeroed::<Event>();
             event.r#type = Event_::EventTypes_::kNoteOnEvent as u16;
@@ -3036,19 +3069,25 @@ impl VST3Inspector {
                 events.push(event);
                 println!("[MIDI Input] Event added, total events: {}", events.len());
             }
-            
+
             // Update time
             process_data.process_context.continousTimeSamples += self.block_size as i64;
 
             // Debug: Check our event pointers
-            println!("[DEBUG] inputEvents pointer: {:p}", process_data.process_data.inputEvents);
-            println!("[DEBUG] outputEvents pointer: {:p}", process_data.process_data.outputEvents);
-            
+            println!(
+                "[DEBUG] inputEvents pointer: {:p}",
+                process_data.process_data.inputEvents
+            );
+            println!(
+                "[DEBUG] outputEvents pointer: {:p}",
+                process_data.process_data.outputEvents
+            );
+
             println!("[MIDI Input] Calling process()...");
             // Process
             let result = processor.process(&mut process_data.process_data);
             println!("[MIDI Input] Process returned: {:#x}", result);
-            
+
             if result != vst3::Steinberg::kResultOk {
                 return Err(format!("Process failed with result: {:#x}", result));
             }
@@ -3062,9 +3101,14 @@ impl VST3Inspector {
         }
         Ok(())
     }
-    
+
     /// Send a MIDI Note Off event
-    fn send_midi_note_off(&mut self, channel: i16, pitch: i16, velocity: f32) -> Result<(), String> {
+    fn send_midi_note_off(
+        &mut self,
+        channel: i16,
+        pitch: i16,
+        velocity: f32,
+    ) -> Result<(), String> {
         // Try to send to shared audio state first (for real-time processing)
         if let Some(shared_state) = &self.shared_audio_state {
             if let Ok(mut state) = shared_state.try_lock() {
@@ -3083,22 +3127,25 @@ impl VST3Inspector {
                     event.__field0.noteOff.noteId = -1;
 
                     state.add_midi_event(event);
-                    println!("🎹 Note OFF sent to audio thread: ch={}, pitch={}, vel={}", channel, pitch, velocity);
+                    println!(
+                        "🎹 Note OFF sent to audio thread: ch={}, pitch={}, vel={}",
+                        channel, pitch, velocity
+                    );
                     return Ok(());
                 }
             }
         }
-        
+
         // Fall back to old method if shared state not available
         if !self.is_processing {
             self.start_processing()?;
         }
-        
+
         let processor = match &self.processor {
             Some(p) => p,
             None => return Err("No processor available".to_string()),
         };
-        
+
         let process_data = match &mut self.host_process_data {
             Some(data) => data,
             None => return Err("No process data available".to_string()),
@@ -3107,7 +3154,7 @@ impl VST3Inspector {
         unsafe {
             // Clear buffers and events
             process_data.clear_buffers();
-            
+
             // Add Note Off event
             let mut event = std::mem::zeroed::<Event>();
             event.r#type = Event_::EventTypes_::kNoteOffEvent as u16;
@@ -3122,14 +3169,16 @@ impl VST3Inspector {
             event.__field0.noteOff.tuning = 0.0;
 
             process_data.input_events.events.lock().unwrap().push(event);
-            
+
             // Update time
             process_data.process_context.continousTimeSamples += self.block_size as i64;
 
             // Process
             let result = processor.process(&mut process_data.process_data);
-            println!("[MIDI Input] Sent Note Off - channel={}, pitch={}, velocity={}, result={:#x}", 
-                     channel, pitch, velocity, result);
+            println!(
+                "[MIDI Input] Sent Note Off - channel={}, pitch={}, velocity={}, result={:#x}",
+                channel, pitch, velocity, result
+            );
 
             // Check output events
             let num_events = process_data.output_events.events.lock().unwrap().len();
@@ -3140,18 +3189,18 @@ impl VST3Inspector {
         }
         Ok(())
     }
-    
+
     /// Process one audio block with optional input
     fn process_audio_block(&mut self) -> Result<(), String> {
         if !self.is_processing {
             self.start_processing()?;
         }
-        
+
         let processor = match &self.processor {
             Some(p) => p,
             None => return Err("No processor available".to_string()),
         };
-        
+
         let process_data = match &mut self.host_process_data {
             Some(data) => data,
             None => return Err("No process data available".to_string()),
@@ -3160,17 +3209,17 @@ impl VST3Inspector {
         unsafe {
             // Clear buffers (silence input)
             process_data.clear_buffers();
-            
+
             // Update time
             process_data.process_context.continousTimeSamples += self.block_size as i64;
-            
+
             // Process audio
             let result = processor.process(&mut process_data.process_data);
-            
+
             if result != vst3::Steinberg::kResultOk {
                 return Err(format!("Process failed: {:#x}", result));
             }
-            
+
             // Check if plugin generated any audio
             let mut has_output = false;
             for buffer in &process_data.output_buffers {
@@ -3179,18 +3228,18 @@ impl VST3Inspector {
                     break;
                 }
             }
-            
+
             if has_output {
                 println!("🎵 Plugin generated audio output!");
             }
-            
+
             // Check output events
             let num_events = process_data.output_events.events.lock().unwrap().len();
             if num_events > 0 {
                 print_midi_events(&process_data.output_events);
             }
         }
-        
+
         Ok(())
     }
 }
@@ -3286,4 +3335,3 @@ fn get_plugin_name_from_path(path: &str) -> String {
         .unwrap_or(path)
         .to_string()
 }
-
