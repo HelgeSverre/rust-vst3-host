@@ -50,34 +50,39 @@ impl IComponentHandlerTrait for ComponentHandler {
 }
 
 // Event List implementation
-pub struct MyEventList {
+pub struct HostEventList {
     pub events: Mutex<Vec<Event>>,
 }
 
-impl MyEventList {
+impl HostEventList {
     pub fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
         }
     }
+    
+    pub fn get_events(&self) -> Vec<Event> {
+        self.events.lock().unwrap().clone()
+    }
+    
+    pub fn clear(&self) {
+        self.events.lock().unwrap().clear();
+    }
 }
 
-impl Class for MyEventList {
+impl Class for HostEventList {
     type Interfaces = (IEventList,);
 }
 
-impl IEventListTrait for MyEventList {
+impl IEventListTrait for HostEventList {
     unsafe fn getEventCount(&self) -> i32 {
         let count = self.events.lock().unwrap().len() as i32;
-        println!("[DEBUG] Plugin calling getEventCount, returning: {}", count);
         count
     }
     
     unsafe fn getEvent(&self, index: i32, event: *mut Event) -> i32 {
-        println!("[DEBUG] Plugin calling getEvent for index: {}", index);
         if let Some(e) = self.events.lock().unwrap().get(index as usize) {
             *event = *e;
-            println!("[DEBUG] Returned event type: {}", e.r#type);
             kResultOk
         } else {
             kResultFalse
@@ -86,26 +91,6 @@ impl IEventListTrait for MyEventList {
     
     unsafe fn addEvent(&self, event: *mut Event) -> i32 {
         if !event.is_null() {
-            let event_type = (*event).r#type;
-            println!("[DEBUG] Plugin calling addEvent! Event type: {}", event_type);
-            
-            // Print event details based on type
-            match event_type as u32 {
-                Event_::EventTypes_::kNoteOnEvent => {
-                    let note_on = (*event).__field0.noteOn;
-                    println!("[DEBUG] Note On: ch={}, pitch={}, vel={}", 
-                             note_on.channel, note_on.pitch, note_on.velocity);
-                }
-                Event_::EventTypes_::kNoteOffEvent => {
-                    let note_off = (*event).__field0.noteOff;
-                    println!("[DEBUG] Note Off: ch={}, pitch={}, vel={}", 
-                             note_off.channel, note_off.pitch, note_off.velocity);
-                }
-                _ => {
-                    println!("[DEBUG] Other event type: {}", event_type);
-                }
-            }
-            
             self.events.lock().unwrap().push(*event);
             kResultOk
         } else {
@@ -114,9 +99,10 @@ impl IEventListTrait for MyEventList {
     }
 }
 
-pub fn create_event_list() -> ComWrapper<MyEventList> {
-    ComWrapper::new(MyEventList::new())
+pub fn create_event_list() -> ComWrapper<HostEventList> {
+    ComWrapper::new(HostEventList::new())
 }
+
 
 // Parameter Changes implementation
 pub struct ParameterChanges {

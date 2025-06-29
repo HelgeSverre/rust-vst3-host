@@ -1,6 +1,6 @@
 use std::ptr;
 use vst3::{ComPtr, ComWrapper, Steinberg::*, Steinberg::Vst::*};
-use crate::com_implementations::{MyEventList, ParameterChanges, create_event_list};
+use crate::com_implementations::{HostEventList, ParameterChanges, create_event_list};
 
 pub struct HostProcessData {
     pub process_data: ProcessData,
@@ -11,8 +11,8 @@ pub struct HostProcessData {
     pub input_channel_pointers: Vec<Vec<*mut f32>>,
     pub output_channel_pointers: Vec<Vec<*mut f32>>,
     pub process_context: ProcessContext,
-    pub input_events: ComWrapper<MyEventList>,
-    pub output_events: ComWrapper<MyEventList>,
+    pub input_events: ComWrapper<HostEventList>,
+    pub output_events: ComWrapper<HostEventList>,
     pub input_events_ptr: *mut IEventList,
     pub output_events_ptr: *mut IEventList,
     pub input_param_changes: ComWrapper<ParameterChanges>,

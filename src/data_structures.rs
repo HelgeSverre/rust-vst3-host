@@ -4,6 +4,12 @@ use std::sync::{Arc, Mutex};
 use vst3::{ComPtr, Steinberg::Vst::IAudioProcessor};
 use crate::audio_processing::HostProcessData;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MidiDirection {
+    Input,
+    Output,
+}
+
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
     pub name: String,
