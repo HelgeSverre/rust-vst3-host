@@ -1,0 +1,47 @@
+[package]
+name = "vst3-inspector"
+version = "0.1.0"
+edition = "2021"
+authors = ["Helge Sverre <helge.sverre@gmail.com>"]
+description = "A VST3 plugin inspector and testing application"
+license = "MIT"
+repository = "https://github.com/HelgeSverre/rust-vst3-host/"
+
+[[bin]]
+name = "vst3-inspector"
+path = "src/main.rs"
+
+[[bin]]
+name = "vst3-inspector-helper"
+path = "src/bin/vst3-inspector-helper.rs"
+
+[dependencies]
+vst3-host = { path = "../vst3-host", features = ["cpal-backend"] }
+vst3 = { workspace = true }
+libloading = "0.8"
+cpal = "0.16.0"
+catppuccin-egui = { version = "5.5.0", default-features = false, features = ["egui31"] }
+eframe = "0.31.1"
+egui_extras = "0.31.1"
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+directories = "6.0.0"
+rfd = "0.15"
+
+# Platform-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10.0"
+cocoa = "0.26.0"
+objc = "0.2.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3.9", features = [
+    "winuser",
+    "windef",
+    "libloaderapi",
+    "processenv",
+    "winbase",
+    "handleapi",
+    "errhandlingapi"
+] }

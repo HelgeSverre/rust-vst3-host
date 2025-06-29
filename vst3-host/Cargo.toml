@@ -1,0 +1,67 @@
+[package]
+name = "vst3-host"
+version = "0.1.0"
+authors = ["Helge Sverre <helge.sverre@gmail.com>"]
+edition = "2021"
+description = "A safe, simple, and lightweight Rust library for hosting VST3 plugins"
+documentation = "https://docs.rs/vst3-host"
+readme = "README.md"
+homepage = "https://github.com/HelgeSverre/rust-vst3-host/"
+repository = "https://github.com/HelgeSverre/rust-vst3-host/"
+license = "MIT OR Apache-2.0"
+keywords = ["vst3", "audio", "plugin", "host", "midi"]
+categories = ["multimedia::audio", "api-bindings"]
+exclude = [
+    "tests/*",
+    "examples/*",
+    ".github/*",
+    ".gitignore",
+    ".cargo/*",
+]
+
+[dependencies]
+vst3 = { workspace = true }
+libloading = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+# Optional dependencies
+cpal = { version = "0.16.0", optional = true }
+egui = { version = "0.31.1", optional = true }
+
+# Platform-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+core-foundation = "0.10"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi"] }
+
+[features]
+default = ["cpal-backend"]
+cpal-backend = ["cpal"]
+process-isolation = []
+egui-widgets = ["egui"]
+
+[dev-dependencies]
+env_logger = "0.11"
+rfd = "0.15"
+eframe = "0.31"
+
+[[example]]
+name = "plugin_scanner"
+
+[[example]]
+name = "plugin_gui"
+required-features = ["cpal-backend"]
+
+[[bin]]
+name = "vst3-host-helper"
+required-features = ["process-isolation"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

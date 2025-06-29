@@ -1,3 +1,41 @@
-/target
-tmp/
+# Rust build artifacts
+/target/
+**/target/
+Cargo.lock
+
+# IDE
 .idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+*.tmp
+*.bak
+
+# Debug artifacts
+*.pdb
+
+# VST3 specific
+*.vst3
+
+# Library specific - for when publishing to crates.io
+vst3-host/Cargo.lock
+
+# Application specific
+vst3-inspector/Cargo.lock
+
+# Test outputs
+test-results/
+*.log
+
+# Coverage
+*.profraw
+*.profdata
+coverage/
