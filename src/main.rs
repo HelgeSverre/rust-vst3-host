@@ -2168,33 +2168,6 @@ impl VST3Inspector {
                 self.draw_piano_keyboard(ui);
             });
 
-            ui.add_space(8.0);
-
-            // MIDI monitor
-            ui.horizontal(|ui| {
-                if ui.button("Test MIDI Output").clicked() {
-                    if let Err(e) = self.monitor_midi_output() {
-                        println!("MIDI monitoring error: {}", e);
-                    }
-                }
-
-                if ui.button("Process Audio Block").clicked() {
-                    if let Err(e) = self.process_audio_block() {
-                        println!("Audio processing error: {}", e);
-                    }
-                }
-
-                if ui.button("Process 10 Blocks").clicked() {
-                    // Process multiple blocks to give plugins time to update
-                    for i in 0..10 {
-                        if let Err(e) = self.process_audio_block() {
-                            println!("Audio processing error on block {}: {}", i, e);
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                }
-            });
 
             ui.separator();
             ui.add_space(8.0);
