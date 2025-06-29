@@ -5,6 +5,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
 use std::collections::HashSet;
 use std::ptr;
+use std::sync::Mutex;
 use vst3::Steinberg::Vst::{BusDirections_::*, IAudioProcessorTrait, MediaTypes_::*};
 // Import the constants
 use vst3::Steinberg::Vst::{
@@ -13,7 +14,7 @@ use vst3::Steinberg::Vst::{
 };
 use vst3::Steinberg::{IPlugView, IPlugViewTrait, IPluginFactoryTrait};
 use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory};
-use vst3::{ComPtr, Interface};
+use vst3::{ComPtr, ComWrapper, Interface};
 
 use libloading::os::unix::{Library, Symbol};
 
@@ -27,6 +28,8 @@ mod utils;
 
 use audio_processing::*;
 use utils::*;
+use com_implementations::ComponentHandler;
+use std::sync::Arc;
 
 // macOS native window support
 #[cfg(target_os = "macos")]
@@ -238,39 +241,7 @@ impl PlugFrame {
     }
 }
 
-// ComponentHandler implementation for parameter change notifications
-struct ComponentHandler;
-
-impl ComponentHandler {
-    #[allow(dead_code)]
-    fn new() -> Self {
-        Self
-    }
-}
-
-// We need to implement the VST3 interface manually since the vst3 crate doesn't provide a trait impl
-#[allow(dead_code)]
-impl ComponentHandler {
-    unsafe fn begin_edit(&self, id: u32) -> i32 {
-        println!("🎛️ Parameter edit started: ID {}", id);
-        vst3::Steinberg::kResultOk
-    }
-
-    unsafe fn perform_edit(&self, id: u32, value_normalized: f64) -> i32 {
-        println!("🎛️ Parameter changed: ID {} = {:.3}", id, value_normalized);
-        vst3::Steinberg::kResultOk
-    }
-
-    unsafe fn end_edit(&self, id: u32) -> i32 {
-        println!("🎛️ Parameter edit ended: ID {}", id);
-        vst3::Steinberg::kResultOk
-    }
-
-    unsafe fn restart_component(&self, flags: i32) -> i32 {
-        println!("🔄 Component restart requested: flags {:#x}", flags);
-        vst3::Steinberg::kResultOk
-    }
-}
+// Removed local ComponentHandler - now using from com_implementations
 
 fn main() {
     println!("🚀 Starting VST3 Host...");
@@ -888,7 +859,8 @@ struct VST3Inspector {
     #[cfg(target_os = "windows")]
     native_window: Option<HWND>,
     // Parameter editing
-    component_handler: Option<ComponentHandler>,
+    component_handler: Option<ComWrapper<ComponentHandler>>,
+    parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>,
     selected_parameter: Option<usize>,
     // Parameter table UI
     parameter_search: String,
@@ -1039,6 +1011,23 @@ enum ParameterFilter {
 
 impl eframe::App for VST3Inspector {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Check for parameter changes from plugin GUI
+        if let Ok(mut changes) = self.parameter_changes.try_lock() {
+            if !changes.is_empty() {
+                // Process parameter changes
+                for (param_id, value) in changes.drain(..) {
+                    // Update our cached parameter values
+                    if let Some(ref mut plugin_info) = self.plugin_info {
+                        if let Some(ref mut controller_info) = plugin_info.controller_info {
+                            if let Some(param) = controller_info.parameters.iter_mut().find(|p| p.id == param_id) {
+                                param.current_value = value;
+                                println!("🔄 Parameter {} updated from plugin GUI: {:.3}", param_id, value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Top header panel
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
@@ -2000,7 +1989,7 @@ impl VST3Inspector {
                             ui.horizontal(|ui| {
                                 if is_modified
                                     && ui
-                                        .small_button("↺")
+                                        .small_button("Reset")
                                         .on_hover_text("Reset to default")
                                         .clicked()
                                 {
@@ -2013,7 +2002,7 @@ impl VST3Inspector {
                                 }
 
                                 if ui
-                                    .small_button("ⓘ")
+                                    .small_button("Edit")
                                     .on_hover_text("Show detailed editor")
                                     .clicked()
                                 {
@@ -2772,6 +2761,18 @@ impl VST3Inspector {
 
         // Connect if separate
         let _ = connect_component_and_controller(&component, &controller);
+        
+        // Set up our component handler to receive parameter change notifications
+        let component_handler = ComWrapper::new(ComponentHandler::new(self.parameter_changes.clone()));
+        if let Some(handler_ptr) = component_handler.to_com_ptr::<vst3::Steinberg::Vst::IComponentHandler>() {
+            let handler_result = controller.setComponentHandler(handler_ptr.into_raw());
+            if handler_result == vst3::Steinberg::kResultOk {
+                println!("✅ Component handler set successfully");
+                self.component_handler = Some(component_handler);
+            } else {
+                println!("⚠️ Failed to set component handler: {:#x}", handler_result);
+            }
+        }
 
         // Setup processing
         let mut setup = ProcessSetup {
@@ -3363,6 +3364,7 @@ impl VST3Inspector {
             gui_attached: false,
             native_window: None,
             component_handler: None,
+            parameter_changes: Arc::new(Mutex::new(Vec::new())),
             selected_parameter: None,
             parameter_search: String::new(),
             parameter_filter: ParameterFilter::All,

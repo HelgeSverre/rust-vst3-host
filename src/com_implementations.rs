@@ -1,16 +1,23 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::ptr;
 use vst3::{Class, ComWrapper, Steinberg::*, Steinberg::Vst::*};
 
 // Component Handler implementation
 pub struct ComponentHandler {
-    // Empty for now, but can be extended
+    // Track parameter changes from the plugin
+    pub parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>,
 }
 
 impl ComponentHandler {
-    pub fn new() -> Self {
-        ComponentHandler {}
+    pub fn new(parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>) -> Self {
+        ComponentHandler {
+            parameter_changes,
+        }
     }
+}
+
+impl Class for ComponentHandler {
+    type Interfaces = (IComponentHandler,);
 }
 
 impl IComponentHandlerTrait for ComponentHandler {
@@ -24,6 +31,10 @@ impl IComponentHandlerTrait for ComponentHandler {
             "🎛️ Host: Perform edit for parameter {} = {}",
             id, value_normalized
         );
+        // Store the parameter change
+        if let Ok(mut changes) = self.parameter_changes.lock() {
+            changes.push((id, value_normalized));
+        }
         kResultOk
     }
 
