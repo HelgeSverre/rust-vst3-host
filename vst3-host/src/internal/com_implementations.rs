@@ -1,8 +1,8 @@
 //! Internal COM interface implementations for VST3
 
-use std::sync::{Arc, Mutex};
 use std::ptr;
-use vst3::{Class, ComWrapper, Steinberg::*, Steinberg::Vst::*};
+use std::sync::{Arc, Mutex};
+use vst3::{Class, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 
 // Component Handler implementation
 pub struct ComponentHandler {
@@ -12,9 +12,7 @@ pub struct ComponentHandler {
 
 impl ComponentHandler {
     pub fn new(parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>) -> Self {
-        ComponentHandler {
-            parameter_changes,
-        }
+        ComponentHandler { parameter_changes }
     }
 }
 
@@ -29,7 +27,11 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 
     unsafe fn performEdit(&self, id: u32, value_normalized: f64) -> i32 {
-        log::debug!("Host: Perform edit for parameter {} = {}", id, value_normalized);
+        log::debug!(
+            "Host: Perform edit for parameter {} = {}",
+            id,
+            value_normalized
+        );
         // Store the parameter change
         if let Ok(mut changes) = self.parameter_changes.lock() {
             changes.push((id, value_normalized));
@@ -59,11 +61,11 @@ impl HostEventList {
             events: Mutex::new(Vec::new()),
         }
     }
-    
+
     pub fn clear(&self) {
         self.events.lock().unwrap().clear();
     }
-    
+
     pub fn add_event(&self, event: Event) {
         self.events.lock().unwrap().push(event);
     }
@@ -83,7 +85,7 @@ impl IEventListTrait for HostEventList {
     unsafe fn getEventCount(&self) -> i32 {
         self.events.lock().unwrap().len() as i32
     }
-    
+
     unsafe fn getEvent(&self, index: i32, event: *mut Event) -> i32 {
         if let Some(e) = self.events.lock().unwrap().get(index as usize) {
             *event = *e;
@@ -92,7 +94,7 @@ impl IEventListTrait for HostEventList {
             kResultFalse
         }
     }
-    
+
     unsafe fn addEvent(&self, event: *mut Event) -> i32 {
         if !event.is_null() {
             self.events.lock().unwrap().push(*event);
@@ -128,47 +130,50 @@ impl IParameterChangesTrait for ParameterChanges {
     unsafe fn getParameterCount(&self) -> i32 {
         self.queues.lock().unwrap().len() as i32
     }
-    
+
     unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
         if let Some(queue) = self.queues.lock().unwrap().get(index as usize) {
-            queue.to_com_ptr::<IParamValueQueue>()
+            queue
+                .to_com_ptr::<IParamValueQueue>()
                 .map(|ptr| ptr.into_raw())
                 .unwrap_or(ptr::null_mut())
         } else {
             ptr::null_mut()
         }
     }
-    
+
     unsafe fn addParameterData(&self, id: *const u32, index: *mut i32) -> *mut IParamValueQueue {
         if id.is_null() {
             return ptr::null_mut();
         }
-        
+
         let param_id = *id;
         let mut queues = self.queues.lock().unwrap();
-        
+
         // Check if queue for this parameter already exists
         for (i, queue) in queues.iter().enumerate() {
             if queue.param_id == param_id {
                 if !index.is_null() {
                     *index = i as i32;
                 }
-                return queue.to_com_ptr::<IParamValueQueue>()
+                return queue
+                    .to_com_ptr::<IParamValueQueue>()
                     .map(|ptr| ptr.into_raw())
                     .unwrap_or(ptr::null_mut());
             }
         }
-        
+
         // Create new queue
         let new_queue = ComWrapper::new(ParameterValueQueue::new(param_id));
-        let queue_ptr = new_queue.to_com_ptr::<IParamValueQueue>()
+        let queue_ptr = new_queue
+            .to_com_ptr::<IParamValueQueue>()
             .map(|ptr| ptr.into_raw())
             .unwrap_or(ptr::null_mut());
-        
+
         if !index.is_null() {
             *index = queues.len() as i32;
         }
-        
+
         queues.push(new_queue);
         queue_ptr
     }
@@ -197,11 +202,11 @@ impl IParamValueQueueTrait for ParameterValueQueue {
     unsafe fn getParameterId(&self) -> u32 {
         self.param_id
     }
-    
+
     unsafe fn getPointCount(&self) -> i32 {
         self.points.lock().unwrap().len() as i32
     }
-    
+
     unsafe fn getPoint(&self, index: i32, sample_offset: *mut i32, value: *mut f64) -> i32 {
         if let Some((offset, val)) = self.points.lock().unwrap().get(index as usize) {
             if !sample_offset.is_null() {
@@ -215,20 +220,22 @@ impl IParamValueQueueTrait for ParameterValueQueue {
             kResultFalse
         }
     }
-    
+
     unsafe fn addPoint(&self, sample_offset: i32, value: f64, index: *mut i32) -> i32 {
         let mut points = self.points.lock().unwrap();
-        
+
         // Find insertion point
-        let insert_pos = points.iter().position(|(offset, _)| *offset > sample_offset)
+        let insert_pos = points
+            .iter()
+            .position(|(offset, _)| *offset > sample_offset)
             .unwrap_or(points.len());
-        
+
         points.insert(insert_pos, (sample_offset, value));
-        
+
         if !index.is_null() {
             *index = insert_pos as i32;
         }
-        
+
         kResultOk
     }
 }

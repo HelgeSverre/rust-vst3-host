@@ -26,27 +26,27 @@ impl CrashProtection {
             last_crash_time: None,
         }
     }
-    
+
     pub fn set_max_processing_time(&mut self, duration: Duration) {
         self.max_processing_time = duration;
     }
-    
+
     pub fn is_healthy(&self) -> bool {
         matches!(self.status, PluginStatus::Ok)
     }
-    
+
     pub fn mark_crashed(&mut self, reason: String) {
         self.status = PluginStatus::Crashed(reason);
         self.crash_count += 1;
         self.last_crash_time = Some(Instant::now());
     }
-    
+
     pub fn mark_timeout(&mut self, duration: Duration) {
         self.status = PluginStatus::Timeout(duration);
         self.crash_count += 1;
         self.last_crash_time = Some(Instant::now());
     }
-    
+
     pub fn reset(&mut self) {
         self.status = PluginStatus::Ok;
         // Keep crash count and last crash time for history
@@ -70,15 +70,12 @@ where
 }
 
 /// Wraps a potentially crashing function with timeout protection
-pub fn protected_call_with_timeout<F, R>(
-    f: F,
-    max_duration: Duration,
-) -> Result<R, PluginStatus>
+pub fn protected_call_with_timeout<F, R>(f: F, max_duration: Duration) -> Result<R, PluginStatus>
 where
     F: FnOnce() -> R + std::panic::UnwindSafe,
 {
     let start = Instant::now();
-    
+
     match catch_unwind(f) {
         Ok(result) => {
             let elapsed = start.elapsed();

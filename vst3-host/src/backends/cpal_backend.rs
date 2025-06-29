@@ -1,207 +1,245 @@
 //! CPAL audio backend implementation
 
 use crate::{
-    audio::{AudioBuffers, AudioConfig},
-    backends::AudioBackend,
+    audio::{AudioBackend, AudioConfig, AudioStream},
     error::{Error, Result},
 };
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    BufferSize, SampleRate, StreamConfig,
+    BufferSize, Device, SampleRate, Stream, StreamConfig,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-type ProcessCallback = Box<dyn FnMut(&mut AudioBuffers) -> Result<()> + Send>;
+/// CPAL stream wrapper
+pub struct CpalStream {
+    // We use Option to allow moving the stream in drop
+    stream: Option<Stream>,
+}
+
+// Manually implement Send for CpalStream
+// This is safe because we only use the stream for play/pause operations
+unsafe impl Send for CpalStream {}
+
+impl AudioStream for CpalStream {
+    fn play(&self) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        if let Some(ref stream) = self.stream {
+            stream
+                .play()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+        } else {
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Stream has been dropped",
+            )))
+        }
+    }
+
+    fn pause(&self) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        if let Some(ref stream) = self.stream {
+            stream
+                .pause()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+        } else {
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Stream has been dropped",
+            )))
+        }
+    }
+}
+
+impl Drop for CpalStream {
+    fn drop(&mut self) {
+        // Drop the stream
+        self.stream.take();
+    }
+}
 
 /// CPAL-based audio backend
 pub struct CpalBackend {
-    device: cpal::Device,
-    config: StreamConfig,
-    stream: Option<cpal::Stream>,
-    audio_config: AudioConfig,
-    process_callback: Arc<Mutex<Option<ProcessCallback>>>,
-    is_running: bool,
+    host: cpal::Host,
 }
 
 impl CpalBackend {
-    /// Create a new CPAL backend with default device
+    /// Create a new CPAL backend
     pub fn new() -> Result<Self> {
-        let host = cpal::default_host();
-        let device = host.default_output_device()
-            .ok_or_else(|| Error::AudioBackendError("No output device available".to_string()))?;
-        
-        let config = device.default_output_config()
-            .map_err(|e| Error::AudioBackendError(format!("Failed to get default config: {}", e)))?;
-        
-        let sample_rate = config.sample_rate().0 as f64;
-        let channels = config.channels() as usize;
-        
-        // Create stream config with fixed buffer size
-        let stream_config = StreamConfig {
-            channels: config.channels(),
-            sample_rate: config.sample_rate(),
-            buffer_size: BufferSize::Fixed(512),
-        };
-        
-        let audio_config = AudioConfig {
-            sample_rate,
-            block_size: 512,
-            input_channels: 0,
-            output_channels: channels,
-        };
-        
         Ok(Self {
-            device,
-            config: stream_config,
-            stream: None,
-            audio_config,
-            process_callback: Arc::new(Mutex::new(None)),
-            is_running: false,
+            host: cpal::default_host(),
         })
     }
-    
-    /// Create with specific device
-    pub fn with_device(device: cpal::Device) -> Result<Self> {
-        let config = device.default_output_config()
-            .map_err(|e| Error::AudioBackendError(format!("Failed to get default config: {}", e)))?;
-        
-        let sample_rate = config.sample_rate().0 as f64;
-        let channels = config.channels() as usize;
-        
-        let stream_config = StreamConfig {
-            channels: config.channels(),
-            sample_rate: config.sample_rate(),
-            buffer_size: BufferSize::Fixed(512),
-        };
-        
-        let audio_config = AudioConfig {
-            sample_rate,
-            block_size: 512,
-            input_channels: 0,
-            output_channels: channels,
-        };
-        
-        Ok(Self {
-            device,
-            config: stream_config,
-            stream: None,
-            audio_config,
-            process_callback: Arc::new(Mutex::new(None)),
-            is_running: false,
-        })
+
+    /// List all available output devices
+    pub fn list_output_devices(&self) -> Result<Vec<String>> {
+        let devices: Vec<String> = self
+            .host
+            .output_devices()
+            .map_err(|e| Error::AudioBackendError(format!("Failed to enumerate devices: {}", e)))?
+            .filter_map(|d| d.name().ok())
+            .collect();
+        Ok(devices)
     }
-    
-    /// Set the block size
-    pub fn set_block_size(&mut self, block_size: usize) -> Result<()> {
-        if self.is_running {
-            return Err(Error::AudioBackendError(
-                "Cannot change block size while running".to_string()
-            ));
-        }
-        
-        self.config.buffer_size = BufferSize::Fixed(block_size as u32);
-        self.audio_config.block_size = block_size;
-        Ok(())
-    }
-    
-    /// Set the sample rate
-    pub fn set_sample_rate(&mut self, sample_rate: f64) -> Result<()> {
-        if self.is_running {
-            return Err(Error::AudioBackendError(
-                "Cannot change sample rate while running".to_string()
-            ));
-        }
-        
-        self.config.sample_rate = SampleRate(sample_rate as u32);
-        self.audio_config.sample_rate = sample_rate;
-        Ok(())
+
+    /// List all available input devices
+    pub fn list_input_devices(&self) -> Result<Vec<String>> {
+        let devices: Vec<String> = self
+            .host
+            .input_devices()
+            .map_err(|e| Error::AudioBackendError(format!("Failed to enumerate devices: {}", e)))?
+            .filter_map(|d| d.name().ok())
+            .collect();
+        Ok(devices)
     }
 }
 
 impl AudioBackend for CpalBackend {
-    fn start(&mut self) -> Result<()> {
-        if self.is_running {
-            return Ok(());
-        }
-        
-        let callback_arc = Arc::clone(&self.process_callback);
-        let channels = self.audio_config.output_channels;
-        let block_size = self.audio_config.block_size;
-        let sample_rate = self.audio_config.sample_rate;
-        
-        let stream = self.device.build_output_stream(
-            &self.config,
-            {
-                
+    type Stream = CpalStream;
+    type Device = Device;
+    type Error = Error;
+
+    fn enumerate_output_devices(&self) -> Result<Vec<Self::Device>> {
+        let devices: Vec<Device> = self
+            .host
+            .output_devices()
+            .map_err(|e| {
+                Error::AudioBackendError(format!("Failed to enumerate output devices: {}", e))
+            })?
+            .collect();
+        Ok(devices)
+    }
+
+    fn enumerate_input_devices(&self) -> Result<Vec<Self::Device>> {
+        let devices: Vec<Device> = self
+            .host
+            .input_devices()
+            .map_err(|e| {
+                Error::AudioBackendError(format!("Failed to enumerate input devices: {}", e))
+            })?
+            .collect();
+        Ok(devices)
+    }
+
+    fn default_output_device(&self) -> Option<Self::Device> {
+        self.host.default_output_device()
+    }
+
+    fn default_input_device(&self) -> Option<Self::Device> {
+        self.host.default_input_device()
+    }
+
+    fn create_output_stream(
+        &self,
+        device: &Self::Device,
+        config: AudioConfig,
+        mut data_callback: Box<dyn FnMut(&mut [f32]) + Send>,
+        mut error_callback: Box<dyn FnMut(Self::Error) + Send>,
+    ) -> Result<Self::Stream> {
+        let stream_config = StreamConfig {
+            channels: config.output_channels as u16,
+            sample_rate: SampleRate(config.sample_rate as u32),
+            buffer_size: BufferSize::Fixed(config.block_size as u32),
+        };
+
+        let stream = device
+            .build_output_stream(
+                &stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    // Clear output buffer
-                    data.fill(0.0);
-                    
-                    let mut callback_guard = callback_arc.lock().unwrap();
-                    if let Some(ref mut callback) = *callback_guard {
-                        let mut buffers = AudioBuffers::new(0, channels, data.len() / channels, sample_rate);
-                        
-                        // Process audio
-                        if let Ok(()) = callback(&mut buffers) {
-                            // Copy processed audio to output
-                            for (i, sample) in data.iter_mut().enumerate() {
-                                let channel = i % channels;
-                                let frame = i / channels;
-                                if frame < buffers.outputs[channel].len() {
-                                    *sample = buffers.outputs[channel][frame];
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            move |err| {
-                eprintln!("Audio stream error: {}", err);
-            },
-            None
-        ).map_err(|e| Error::AudioBackendError(format!("Failed to build output stream: {}", e)))?;
-        
-        stream.play()
-            .map_err(|e| Error::AudioBackendError(format!("Failed to start stream: {}", e)))?;
-        
-        self.stream = Some(stream);
-        self.is_running = true;
-        Ok(())
+                    data_callback(data);
+                },
+                move |err| {
+                    error_callback(Error::AudioBackendError(format!("Stream error: {}", err)));
+                },
+                None,
+            )
+            .map_err(|e| {
+                Error::AudioBackendError(format!("Failed to build output stream: {}", e))
+            })?;
+
+        Ok(CpalStream {
+            stream: Some(stream),
+        })
     }
-    
-    fn stop(&mut self) -> Result<()> {
-        if let Some(stream) = self.stream.take() {
-            drop(stream);
-        }
-        self.is_running = false;
-        Ok(())
+
+    fn create_input_stream(
+        &self,
+        device: &Self::Device,
+        config: AudioConfig,
+        mut data_callback: Box<dyn FnMut(&[f32]) + Send>,
+        mut error_callback: Box<dyn FnMut(Self::Error) + Send>,
+    ) -> Result<Self::Stream> {
+        let stream_config = StreamConfig {
+            channels: config.input_channels as u16,
+            sample_rate: SampleRate(config.sample_rate as u32),
+            buffer_size: BufferSize::Fixed(config.block_size as u32),
+        };
+
+        let stream = device
+            .build_input_stream(
+                &stream_config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    data_callback(data);
+                },
+                move |err| {
+                    error_callback(Error::AudioBackendError(format!("Stream error: {}", err)));
+                },
+                None,
+            )
+            .map_err(|e| {
+                Error::AudioBackendError(format!("Failed to build input stream: {}", e))
+            })?;
+
+        Ok(CpalStream {
+            stream: Some(stream),
+        })
     }
-    
-    fn is_running(&self) -> bool {
-        self.is_running
-    }
-    
-    fn set_process_callback<F>(&mut self, callback: F) -> Result<()>
-    where
-        F: FnMut(&mut AudioBuffers) -> Result<()> + Send + 'static,
-    {
-        let mut callback_guard = self.process_callback.lock()
-            .map_err(|_| Error::AudioBackendError("Failed to lock callback".to_string()))?;
-        *callback_guard = Some(Box::new(callback));
-        Ok(())
-    }
-    
-    fn sample_rate(&self) -> f64 {
-        self.audio_config.sample_rate
-    }
-    
-    fn block_size(&self) -> usize {
-        self.audio_config.block_size
+
+    fn create_duplex_stream(
+        &self,
+        _input_device: &Self::Device,
+        output_device: &Self::Device,
+        config: AudioConfig,
+        mut data_callback: Box<dyn FnMut(&[f32], &mut [f32]) + Send>,
+        mut error_callback: Box<dyn FnMut(Self::Error) + Send>,
+    ) -> Result<Self::Stream> {
+        // CPAL doesn't directly support duplex streams, so we'll create an output stream
+        // and assume the callback handles both input and output
+        let stream_config = StreamConfig {
+            channels: config.output_channels as u16,
+            sample_rate: SampleRate(config.sample_rate as u32),
+            buffer_size: BufferSize::Fixed(config.block_size as u32),
+        };
+
+        // Create a dummy input buffer
+        let input_buffer = Arc::new(std::sync::Mutex::new(vec![
+            0.0f32;
+            config.block_size
+                * config.input_channels
+        ]));
+        let input_buffer_clone = input_buffer.clone();
+
+        let stream = output_device
+            .build_output_stream(
+                &stream_config,
+                move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let input = input_buffer_clone.lock().unwrap();
+                    data_callback(&input, output);
+                },
+                move |err| {
+                    error_callback(Error::AudioBackendError(format!("Stream error: {}", err)));
+                },
+                None,
+            )
+            .map_err(|e| {
+                Error::AudioBackendError(format!("Failed to build duplex stream: {}", e))
+            })?;
+
+        Ok(CpalStream {
+            stream: Some(stream),
+        })
     }
 }
 
-impl Drop for CpalBackend {
-    fn drop(&mut self) {
-        let _ = self.stop();
+impl Default for CpalBackend {
+    fn default() -> Self {
+        Self::new().expect("Failed to create CPAL backend")
     }
 }

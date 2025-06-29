@@ -1,4 +1,3 @@
-
 pub fn scan_vst3_directories_with_custom(custom_paths: &[String]) -> Vec<String> {
     let mut plugins = Vec::new();
     let mut all_paths = Vec::new();
@@ -17,7 +16,7 @@ pub fn scan_vst3_directories_with_custom(custom_paths: &[String]) -> Vec<String>
         all_paths.push(r"C:\Program Files\Common Files\VST3".to_string());
         all_paths.push(r"C:\Program Files (x86)\Common Files\VST3".to_string());
     }
-    
+
     // Add custom paths
     all_paths.extend(custom_paths.iter().cloned());
 

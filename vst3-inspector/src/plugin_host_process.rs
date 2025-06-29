@@ -1,6 +1,6 @@
-use std::process::{Command, Stdio};
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
-use serde::{Serialize, Deserialize};
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HostCommand {
@@ -14,11 +14,19 @@ pub enum HostCommand {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HostResponse {
-    Success { message: String },
-    Error { message: String },
-    Crashed { message: String },
-    AudioOutput { data: Vec<f32> },
-    PluginInfo { 
+    Success {
+        message: String,
+    },
+    Error {
+        message: String,
+    },
+    Crashed {
+        message: String,
+    },
+    AudioOutput {
+        data: Vec<f32>,
+    },
+    PluginInfo {
         vendor: String,
         name: String,
         version: String,
@@ -37,14 +45,13 @@ pub struct PluginHostProcess {
 impl PluginHostProcess {
     pub fn new() -> Result<Self, String> {
         // Get the path to our helper executable
-        let exe_path = std::env::current_exe()
-            .map_err(|e| format!("Failed to get current exe: {}", e))?;
-        
-        let exe_dir = exe_path.parent()
-            .ok_or("Failed to get exe directory")?;
-        
-        let helper_path = exe_dir.join("vst-host-helper");
-        
+        let exe_path =
+            std::env::current_exe().map_err(|e| format!("Failed to get current exe: {}", e))?;
+
+        let exe_dir = exe_path.parent().ok_or("Failed to get exe directory")?;
+
+        let helper_path = exe_dir.join("vst3-inspector-helper");
+
         // Start the helper process
         let mut child = Command::new(&helper_path)
             .stdin(Stdio::piped())
@@ -52,51 +59,48 @@ impl PluginHostProcess {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| format!("Failed to spawn helper process: {}", e))?;
-        
-        let stdin = child.stdin.take()
-            .ok_or("Failed to get stdin")?;
-        let stdout = child.stdout.take()
-            .ok_or("Failed to get stdout")?;
-        
+
+        let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
+        let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
+
         Ok(Self {
             process: Some(child),
             stdin: Some(stdin),
             stdout: Some(BufReader::new(stdout)),
         })
     }
-    
+
     pub fn send_command(&mut self, command: HostCommand) -> Result<HostResponse, String> {
-        let stdin = self.stdin.as_mut()
-            .ok_or("No stdin available")?;
-        
-        let stdout = self.stdout.as_mut()
-            .ok_or("No stdout available")?;
-        
+        let stdin = self.stdin.as_mut().ok_or("No stdin available")?;
+
+        let stdout = self.stdout.as_mut().ok_or("No stdout available")?;
+
         // Send command
         let command_json = serde_json::to_string(&command)
             .map_err(|e| format!("Failed to serialize command: {}", e))?;
-        
+
         writeln!(stdin, "{}", command_json)
             .map_err(|e| format!("Failed to write command: {}", e))?;
-        
-        stdin.flush()
+
+        stdin
+            .flush()
             .map_err(|e| format!("Failed to flush stdin: {}", e))?;
-        
+
         // Read response with timeout
         let mut response_line = String::new();
-        stdout.read_line(&mut response_line)
+        stdout
+            .read_line(&mut response_line)
             .map_err(|e| format!("Failed to read response: {}", e))?;
-        
+
         if response_line.is_empty() {
             // Process might have crashed
             self.check_process_status()?;
             return Err("No response from helper process".to_string());
         }
-        
-        serde_json::from_str(&response_line)
-            .map_err(|e| format!("Failed to parse response: {}", e))
+
+        serde_json::from_str(&response_line).map_err(|e| format!("Failed to parse response: {}", e))
     }
-    
+
     pub fn check_process_status(&mut self) -> Result<(), String> {
         if let Some(ref mut process) = self.process {
             match process.try_wait() {
@@ -116,16 +120,16 @@ impl PluginHostProcess {
         }
         Ok(())
     }
-    
+
     pub fn shutdown(&mut self) {
         // Send shutdown command
         let _ = self.send_command(HostCommand::Shutdown);
-        
+
         // Wait for process to exit
         if let Some(mut process) = self.process.take() {
             let _ = process.wait();
         }
-        
+
         self.stdin = None;
         self.stdout = None;
     }

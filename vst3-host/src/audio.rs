@@ -15,10 +15,15 @@ pub struct AudioBuffers {
 
 impl AudioBuffers {
     /// Create new audio buffers
-    pub fn new(input_channels: usize, output_channels: usize, block_size: usize, sample_rate: f64) -> Self {
+    pub fn new(
+        input_channels: usize,
+        output_channels: usize,
+        block_size: usize,
+        sample_rate: f64,
+    ) -> Self {
         let inputs = vec![vec![0.0; block_size]; input_channels];
         let outputs = vec![vec![0.0; block_size]; output_channels];
-        
+
         Self {
             inputs,
             outputs,
@@ -26,7 +31,7 @@ impl AudioBuffers {
             block_size,
         }
     }
-    
+
     /// Clear all buffers to silence
     pub fn clear(&mut self) {
         for buffer in &mut self.inputs {
@@ -36,12 +41,12 @@ impl AudioBuffers {
             buffer.fill(0.0);
         }
     }
-    
+
     /// Get the number of input channels
     pub fn input_channels(&self) -> usize {
         self.inputs.len()
     }
-    
+
     /// Get the number of output channels
     pub fn output_channels(&self) -> usize {
         self.outputs.len()
@@ -78,7 +83,7 @@ impl ChannelLevel {
             20.0 * self.peak.log10()
         }
     }
-    
+
     /// Convert RMS level to decibels
     pub fn rms_db(&self) -> f32 {
         if self.rms <= 0.0 {
@@ -87,7 +92,7 @@ impl ChannelLevel {
             20.0 * self.rms.log10()
         }
     }
-    
+
     /// Check if the signal is clipping (> 0dB)
     pub fn is_clipping(&self) -> bool {
         self.peak > 1.0
@@ -108,44 +113,40 @@ impl AudioLevels {
             channels: vec![ChannelLevel::default(); channel_count],
         }
     }
-    
+
     /// Update levels from audio buffers
     pub fn update_from_buffers(&mut self, buffers: &[Vec<f32>]) {
         for (i, buffer) in buffers.iter().enumerate() {
             if i >= self.channels.len() {
                 break;
             }
-            
+
             // Calculate peak
-            let peak = buffer.iter()
-                .map(|&x| x.abs())
-                .fold(0.0f32, f32::max);
-            
+            let peak = buffer.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
+
             // Calculate RMS
-            let sum_squares: f32 = buffer.iter()
-                .map(|&x| x * x)
-                .sum();
+            let sum_squares: f32 = buffer.iter().map(|&x| x * x).sum();
             let rms = (sum_squares / buffer.len() as f32).sqrt();
-            
+
             // Update channel levels
             let channel = &mut self.channels[i];
             channel.peak = peak;
             channel.rms = rms;
-            
+
             // Update peak hold if necessary
             if peak > channel.peak_hold {
                 channel.peak_hold = peak;
             }
         }
     }
-    
+
     /// Reset peak hold values
     pub fn reset_peak_hold(&mut self) {
         for channel in &mut self.channels {
             channel.peak_hold = channel.peak;
         }
     }
-    
+
     /// Check if any channel is clipping
     pub fn is_clipping(&self) -> bool {
         self.channels.iter().any(|ch| ch.is_clipping())
@@ -174,4 +175,63 @@ impl Default for AudioConfig {
             output_channels: 2,
         }
     }
+}
+
+/// Audio stream trait for controlling playback
+pub trait AudioStream: Send {
+    /// Start playback
+    fn play(&self) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Pause playback
+    fn pause(&self) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+/// Audio backend trait for creating audio streams
+pub trait AudioBackend: Send + Sync {
+    /// The stream type this backend produces
+    type Stream: AudioStream + Send + 'static;
+    /// The device type this backend uses
+    type Device: Send + Sync;
+    /// The error type this backend returns
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Enumerate available output devices
+    fn enumerate_output_devices(&self) -> Result<Vec<Self::Device>, Self::Error>;
+
+    /// Enumerate available input devices
+    fn enumerate_input_devices(&self) -> Result<Vec<Self::Device>, Self::Error>;
+
+    /// Get the default output device
+    fn default_output_device(&self) -> Option<Self::Device>;
+
+    /// Get the default input device
+    fn default_input_device(&self) -> Option<Self::Device>;
+
+    /// Create an output stream
+    fn create_output_stream(
+        &self,
+        device: &Self::Device,
+        config: AudioConfig,
+        data_callback: Box<dyn FnMut(&mut [f32]) + Send>,
+        error_callback: Box<dyn FnMut(Self::Error) + Send>,
+    ) -> Result<Self::Stream, Self::Error>;
+
+    /// Create an input stream
+    fn create_input_stream(
+        &self,
+        device: &Self::Device,
+        config: AudioConfig,
+        data_callback: Box<dyn FnMut(&[f32]) + Send>,
+        error_callback: Box<dyn FnMut(Self::Error) + Send>,
+    ) -> Result<Self::Stream, Self::Error>;
+
+    /// Create a duplex stream (input and output)
+    fn create_duplex_stream(
+        &self,
+        input_device: &Self::Device,
+        output_device: &Self::Device,
+        config: AudioConfig,
+        data_callback: Box<dyn FnMut(&[f32], &mut [f32]) + Send>,
+        error_callback: Box<dyn FnMut(Self::Error) + Send>,
+    ) -> Result<Self::Stream, Self::Error>;
 }

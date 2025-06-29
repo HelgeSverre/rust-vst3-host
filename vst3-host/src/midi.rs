@@ -61,7 +61,7 @@ impl MidiChannel {
             MidiChannel::Ch16 => 15,
         }
     }
-    
+
     /// Create from 0-based index (0-15)
     pub fn from_index(index: u8) -> Option<Self> {
         match index {
@@ -200,22 +200,33 @@ pub mod cc {
     pub const SOUND_CONTROLLER_5: u8 = 74;
     /// Sound Controller 6-10
     pub const SOUND_CONTROLLER_6: u8 = 75;
+    /// Sound controller 7
     pub const SOUND_CONTROLLER_7: u8 = 76;
+    /// Sound controller 8
     pub const SOUND_CONTROLLER_8: u8 = 77;
+    /// Sound controller 9
     pub const SOUND_CONTROLLER_9: u8 = 78;
+    /// Sound controller 10
     pub const SOUND_CONTROLLER_10: u8 = 79;
     /// General Purpose Controllers
     pub const GENERAL_PURPOSE_1: u8 = 80;
+    /// General purpose controller 2
     pub const GENERAL_PURPOSE_2: u8 = 81;
+    /// General purpose controller 3
     pub const GENERAL_PURPOSE_3: u8 = 82;
+    /// General purpose controller 4
     pub const GENERAL_PURPOSE_4: u8 = 83;
     /// Portamento Control
     pub const PORTAMENTO_CONTROL: u8 = 84;
     /// Effects Depth
     pub const REVERB_DEPTH: u8 = 91;
+    /// Tremolo depth
     pub const TREMOLO_DEPTH: u8 = 92;
+    /// Chorus depth
     pub const CHORUS_DEPTH: u8 = 93;
+    /// Celeste depth
     pub const CELESTE_DEPTH: u8 = 94;
+    /// Phaser depth
     pub const PHASER_DEPTH: u8 = 95;
     /// Data Increment
     pub const DATA_INCREMENT: u8 = 96;
@@ -250,7 +261,9 @@ pub mod cc {
 /// Convert MIDI note number to note name
 /// Using the convention where C3 = MIDI 60
 pub fn note_to_name(note: u8) -> String {
-    let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let note_names = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
     let octave = (note as i32 / 12) - 2;
     let note_in_octave = note % 12;
     format!("{}{}", note_names[note_in_octave as usize], octave)
@@ -261,11 +274,13 @@ pub fn note_to_name(note: u8) -> String {
 /// Using the convention where C3 = MIDI 60
 pub fn name_to_note(name: &str) -> Option<u8> {
     let name = name.trim().to_uppercase();
-    
+
     // Extract the note letter and accidental
     let (note_part, octave_str) = if name.contains('#') {
         let parts: Vec<&str> = name.split('#').collect();
-        if parts.len() != 2 { return None; }
+        if parts.len() != 2 {
+            return None;
+        }
         (format!("{}#", parts[0]), parts[1])
     } else if name.contains('B') && name.len() > 2 && &name[1..2] == "B" {
         // Handle Bb notation
@@ -277,10 +292,10 @@ pub fn name_to_note(name: &str) -> Option<u8> {
         let octave = chars.as_str();
         (note, octave)
     };
-    
+
     // Parse octave
     let octave: i32 = octave_str.parse().ok()?;
-    
+
     // Convert note to semitone offset within octave
     let semitone = match note_part.as_str() {
         "C" => 0,
@@ -297,11 +312,11 @@ pub fn name_to_note(name: &str) -> Option<u8> {
         "B" => 11,
         _ => return None,
     };
-    
+
     // Calculate MIDI note number
     // Using the convention where C3 = MIDI 60
     let midi_note = (octave + 2) * 12 + semitone;
-    
+
     if (0..=127).contains(&midi_note) {
         Some(midi_note as u8)
     } else {
@@ -312,7 +327,7 @@ pub fn name_to_note(name: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_midi_conversions() {
         // Test some known values using C3=60 convention
@@ -321,20 +336,20 @@ mod tests {
         assert_eq!(name_to_note("A3"), Some(69)); // Concert A
         assert_eq!(name_to_note("C-2"), Some(0));
         assert_eq!(name_to_note("G8"), Some(127));
-        
+
         // Test reverse conversion
         assert_eq!(note_to_name(60), "C3");
         assert_eq!(note_to_name(48), "C2");
         assert_eq!(note_to_name(69), "A3");
         assert_eq!(note_to_name(0), "C-2");
         assert_eq!(note_to_name(127), "G8");
-        
+
         // Test accidentals
         assert_eq!(name_to_note("C#3"), Some(61));
         assert_eq!(name_to_note("Db3"), Some(61));
         assert_eq!(name_to_note("F#3"), Some(66));
     }
-    
+
     #[test]
     fn test_midi_channel() {
         assert_eq!(MidiChannel::Ch1.as_index(), 0);

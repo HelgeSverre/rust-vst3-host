@@ -12,14 +12,14 @@ pub fn c_str_to_string(c_str: &[i8]) -> String {
 /// Convert VST3 String128 (UTF-16) to Rust String
 pub fn vst_string_to_string(vst_str: &String128) -> String {
     let mut utf16_vec = Vec::new();
-    
+
     for &ch in vst_str.iter() {
         if ch == 0 {
             break;
         }
         utf16_vec.push(ch as u16);
     }
-    
+
     String::from_utf16_lossy(&utf16_vec)
 }
 
@@ -28,10 +28,10 @@ pub fn string_to_vst_string(s: &str) -> String128 {
     let mut result = [0i16; 128];
     let utf16: Vec<u16> = s.encode_utf16().collect();
     let len = utf16.len().min(127);
-    
+
     for (i, &ch) in utf16.iter().take(len).enumerate() {
         result[i] = ch as i16;
     }
-    
+
     result
 }

@@ -44,7 +44,7 @@ impl Parameter {
             self.min + normalized * (self.max - self.min)
         }
     }
-    
+
     /// Convert plain value to normalized value (0.0-1.0)
     pub fn plain_to_normalized(&self, plain: f64) -> f64 {
         if (self.max - self.min).abs() < f64::EPSILON {
@@ -53,11 +53,11 @@ impl Parameter {
             ((plain - self.min) / (self.max - self.min)).clamp(0.0, 1.0)
         }
     }
-    
+
     /// Format the value as a string with unit
     pub fn format_value(&self, normalized: f64) -> String {
         let plain = self.normalized_to_plain(normalized);
-        
+
         if self.step_count == 2 {
             // Boolean parameter
             if plain > 0.5 {
@@ -77,12 +77,12 @@ impl Parameter {
             }
         }
     }
-    
+
     /// Check if this is a discrete/stepped parameter
     pub fn is_discrete(&self) -> bool {
         self.step_count > 1
     }
-    
+
     /// Check if this is a boolean/switch parameter
     pub fn is_boolean(&self) -> bool {
         self.step_count == 2
@@ -113,13 +113,13 @@ impl<'a> ParameterUpdate<'a> {
             plugin,
         }
     }
-    
+
     /// Set a parameter value
     pub fn set(&mut self, id: u32, value: f64) -> &mut Self {
         self.updates.push((id, value));
         self
     }
-    
+
     /// Apply all parameter updates
     pub fn apply(self) -> Result<()> {
         for (id, value) in self.updates {
@@ -170,7 +170,7 @@ impl ParameterAutomation {
             looping: false,
         }
     }
-    
+
     /// Add an automation point
     pub fn add_point(mut self, time: f64, value: f64) -> Self {
         self.points.push(AutomationPoint {
@@ -178,10 +178,11 @@ impl ParameterAutomation {
             value,
             curve: AutomationCurve::Linear,
         });
-        self.points.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+        self.points
+            .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
         self
     }
-    
+
     /// Set the curve type
     pub fn with_curve(mut self, curve: AutomationCurve) -> Self {
         for point in &mut self.points {
@@ -189,19 +190,19 @@ impl ParameterAutomation {
         }
         self
     }
-    
+
     /// Enable looping
     pub fn with_loop(mut self, looping: bool) -> Self {
         self.looping = looping;
         self
     }
-    
+
     /// Get value at specific time
     pub fn value_at_time(&self, time: f64) -> Option<f64> {
         if self.points.is_empty() {
             return None;
         }
-        
+
         // Handle looping
         let time = if self.looping && !self.points.is_empty() {
             let duration = self.points.last().unwrap().time;
@@ -213,11 +214,11 @@ impl ParameterAutomation {
         } else {
             time
         };
-        
+
         // Find surrounding points
         let mut prev = None;
         let mut next = None;
-        
+
         for (i, point) in self.points.iter().enumerate() {
             if point.time <= time {
                 prev = Some(i);
@@ -226,29 +227,23 @@ impl ParameterAutomation {
                 break;
             }
         }
-        
+
         match (prev, next) {
             (None, _) => Some(self.points[0].value),
             (Some(i), None) => Some(self.points[i].value),
             (Some(i), Some(j)) => {
                 let p1 = &self.points[i];
                 let p2 = &self.points[j];
-                
+
                 let t = (time - p1.time) / (p2.time - p1.time);
-                
+
                 let value = match p1.curve {
-                    AutomationCurve::Linear => {
-                        p1.value + (p2.value - p1.value) * t
-                    }
-                    AutomationCurve::Exponential => {
-                        p1.value + (p2.value - p1.value) * t * t
-                    }
-                    AutomationCurve::Logarithmic => {
-                        p1.value + (p2.value - p1.value) * t.sqrt()
-                    }
+                    AutomationCurve::Linear => p1.value + (p2.value - p1.value) * t,
+                    AutomationCurve::Exponential => p1.value + (p2.value - p1.value) * t * t,
+                    AutomationCurve::Logarithmic => p1.value + (p2.value - p1.value) * t.sqrt(),
                     AutomationCurve::Step => p1.value,
                 };
-                
+
                 Some(value.clamp(0.0, 1.0))
             }
         }

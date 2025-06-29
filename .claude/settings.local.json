@@ -4,7 +4,9 @@
       "Bash(rg:*)",
       "Bash(cargo:*)",
       "Bash(git add:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)"
     ],
     "deny": []
   }

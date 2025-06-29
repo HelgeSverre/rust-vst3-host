@@ -2,6 +2,109 @@
 
 A Rust library for hosting VST3 plugins with a safe API.
 
+## Building and Running
+
+### Prerequisites
+
+- Rust 1.70 or later
+- VST3 SDK (included as submodule)
+- CMake (for building VST3 SDK)
+
+### Building the Library
+
+```bash
+# Clone the repository (if not already done)
+git clone <repository-url>
+cd vst-host
+
+# Initialize and update submodules (for VST3 SDK)
+git submodule update --init --recursive
+
+# Build the library
+cd vst3-host
+cargo build --release
+
+# Build with CPAL audio backend
+cargo build --release --features cpal-backend
+
+# Run tests
+cargo test
+```
+
+### Building the Main Application
+
+```bash
+# From the root directory
+cd ..
+cargo build --release
+
+# Run the main VST3 host application
+cargo run --release
+
+# Or run the built binary directly
+./target/release/vst-host
+
+# The build also creates a helper binary for process isolation
+# This is built automatically: ./target/release/vst-host-helper
+```
+
+### Building and Running Examples
+
+The library comes with several examples demonstrating different features:
+
+```bash
+# From the vst3-host directory
+cd vst3-host
+
+# 1. Plugin scanner - discover all VST3 plugins on your system
+cargo run --example plugin_scanner
+cargo run --example plugin_scanner -- --isolated  # With process isolation
+
+# 2. Plugin GUI - egui interface with file picker and virtual MIDI keyboard
+cargo run --example plugin_gui --features cpal-backend
+
+# 3. MIDI keyboard - terminal-based interactive MIDI input
+cargo run --example midi_keyboard --features cpal-backend
+
+# Build all examples at once
+cargo build --examples --features cpal-backend
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+cargo test
+
+# Run tests with output
+cargo test -- --nocapture
+
+# Run specific test module
+cargo test midi_tests
+cargo test parameter_tests
+cargo test audio_tests
+
+# Run tests with CPAL backend
+cargo test --features cpal-backend
+```
+
+### Quick Command Reference
+
+```bash
+# Development workflow
+cargo check              # Quick syntax/type check
+cargo clippy            # Linting
+cargo fmt               # Format code
+cargo doc --open        # Build and view documentation
+
+# Release builds
+cargo build --release --features cpal-backend
+cargo test --release
+
+# Run specific example in release mode
+cargo run --release --example plugin_scanner
+```
+
 ## Features
 
 - Safe API - No unsafe code required by library users
@@ -18,8 +121,15 @@ A Rust library for hosting VST3 plugins with a safe API.
 use vst3_host::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a host with default settings
-    let mut host = Vst3Host::new()?;
+    // Create a host that scans system directories
+    let mut host = Vst3Host::builder()
+        .scan_default_paths()  // Opt-in to scanning system VST3 directories
+        .build()?;
+    
+    // Or create a host that only scans specific directories
+    let mut host = Vst3Host::builder()
+        .add_scan_path("./my-plugins")
+        .build()?;
     
     // Discover and load a plugin
     let plugins = host.discover_plugins()?;
@@ -35,36 +145,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Examples
+## Usage Examples
 
-Run the examples with:
+The library includes three focused examples:
 
-```bash
-# Basic host example
-cargo run --example basic_host --features cpal-backend
+1. **plugin_scanner** - Discovers and lists VST3 plugins with optional process isolation
+   ```bash
+   cargo run --example plugin_scanner -- --help
+   cargo run --example plugin_scanner -- --isolated  # Run with process isolation
+   ```
 
-# Plugin scanner
-cargo run --example plugin_scanner
+2. **plugin_gui** - Complete host with egui interface, file picker and virtual MIDI keyboard
+   ```bash
+   cargo run --example plugin_gui --features cpal-backend
+   cargo run --example plugin_gui --features cpal-backend -- --isolated  # With process isolation
+   ```
 
-# MIDI keyboard (coming soon)
-cargo run --example midi_keyboard --features cpal-backend
-```
+3. **midi_keyboard** - Terminal-based MIDI keyboard for testing plugins
+   ```bash
+   cargo run --example midi_keyboard --features cpal-backend
+   ```
 
 ## API Overview
 
 ### Plugin Discovery
 
 ```rust
-// Discover all plugins
+// Create host with custom scan paths only (recommended)
+let mut host = Vst3Host::builder()
+    .add_scan_path("./my-plugins")
+    .add_scan_path("/custom/vst3/folder")
+    .build()?;
+
+// Or include system directories
+let mut host = Vst3Host::builder()
+    .scan_default_paths()  // Opt-in to system paths
+    .add_scan_path("./my-plugins")  // Plus custom paths
+    .build()?;
+
+// Discover all plugins in configured paths
 let plugins = host.discover_plugins()?;
 
 // Discover with progress updates
-let plugins = host.discover_plugins_with_progress(|progress| {
-    println!("Scanning: {}", progress.current_plugin);
+let plugins = host.discover_plugins_with_callback(|progress| {
+    match progress {
+        DiscoveryProgress::Found { plugin, current, total } => {
+            println!("[{}/{}] Found: {}", current, total, plugin.name);
+        }
+        _ => {}
+    }
 })?;
 
-// Add custom scan paths
-host.add_scan_path("/my/custom/vst3/folder")?;
+// Add paths after creation
+host.add_scan_path("/another/vst3/folder")?;
 ```
 
 ### Plugin Loading and Control
@@ -154,6 +287,49 @@ This library prioritizes safety:
 - Process isolation prevents plugin crashes from affecting the host
 - Automatic resource cleanup via RAII
 - Thread-safe parameter access
+
+## Troubleshooting
+
+### Build Issues
+
+If you encounter build errors:
+
+1. **VST3 SDK not found**: Make sure submodules are initialized:
+   ```bash
+   git submodule update --init --recursive
+   ```
+
+2. **CMake errors**: The VST3 SDK requires CMake. Install it:
+   ```bash
+   # macOS
+   brew install cmake
+   
+   # Ubuntu/Debian
+   sudo apt-get install cmake
+   
+   # Windows
+   # Download from https://cmake.org/download/
+   ```
+
+3. **CPAL backend errors**: Install system audio dependencies:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install libasound2-dev
+   
+   # Fedora
+   sudo dnf install alsa-lib-devel
+   ```
+
+### Runtime Issues
+
+1. **No plugins found**: Make sure you have VST3 plugins installed in standard locations:
+   - macOS: `/Library/Audio/Plug-Ins/VST3` or `~/Library/Audio/Plug-Ins/VST3`
+   - Windows: `C:\Program Files\Common Files\VST3`
+   - Linux: `/usr/lib/vst3` or `~/.vst3`
+
+2. **Audio device errors**: Check that your audio device is properly configured and not in use by another application.
+
+3. **Plugin crashes**: The library includes process isolation to handle plugin crashes gracefully. If a plugin consistently crashes, it may be incompatible.
 
 ## License
 
