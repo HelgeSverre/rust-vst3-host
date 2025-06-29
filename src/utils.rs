@@ -1,11 +1,4 @@
-use std::ffi::CStr;
 use vst3::{ComWrapper, Steinberg::Vst::*};
-
-pub fn c_str_to_string(c_str: &[i8]) -> String {
-    unsafe { CStr::from_ptr(c_str.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
-}
 
 #[cfg(target_os = "windows")]
 pub fn win32_string(value: &str) -> Vec<u16> {

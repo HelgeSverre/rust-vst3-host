@@ -24,7 +24,6 @@ use libloading::os::unix::{Library, Symbol};
 mod audio_processing;
 mod com_implementations;
 mod data_structures;
-mod errors;
 mod plugin_discovery;
 mod utils;
 
@@ -117,7 +116,7 @@ fn note_name_to_midi(name: &str) -> Option<u8> {
     // Using the convention where C3 = MIDI 60
     let midi_note = (octave + 1) * 12 + 12 + semitone;
     
-    if midi_note >= 0 && midi_note <= 127 {
+    if (0..=127).contains(&midi_note) {
         Some(midi_note as u8)
     } else {
         None
@@ -499,7 +498,7 @@ unsafe fn properly_initialize_plugin(
     // Create component first
     let mut component_ptr: *mut IComponent = ptr::null_mut();
     let result = factory.createInstance(
-        audio_class_id.as_ptr() as *const i8,
+        audio_class_id.as_ptr(),
         IComponent::IID.as_ptr() as *const i8,
         &mut component_ptr as *mut _ as *mut _,
     );
@@ -814,7 +813,7 @@ unsafe fn check_for_gui(
     controller: &ComPtr<IEditController>,
 ) -> Result<(bool, Option<(i32, i32)>), String> {
     // Try to create view with the standard "editor" view type
-    let editor_view_type = b"editor\0".as_ptr() as *const i8;
+    let editor_view_type = c"editor".as_ptr() as *const i8;
     let view_ptr = controller.createView(editor_view_type);
     if view_ptr.is_null() {
         return Ok((false, None));
@@ -947,7 +946,6 @@ struct MidiEvent {
     channel: u8,
     data1: u8,
     data2: u8,
-    raw_type: u16, // For VST3 event type
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1121,8 +1119,6 @@ struct AudioProcessingState {
     pending_midi_events: Vec<Event>,
     sample_rate: f64,
     block_size: i32,
-    midi_monitor: Arc<Mutex<Vec<MidiEvent>>>,
-    midi_monitor_paused: Arc<Mutex<bool>>,
     // Raw event storage for MonitoredEventList
     raw_midi_events: Arc<Mutex<Vec<(Instant, MidiDirection, Event)>>>,
     // VU meter
@@ -1137,8 +1133,6 @@ impl AudioProcessingState {
     fn new(
         sample_rate: f64,
         block_size: i32,
-        midi_monitor: Arc<Mutex<Vec<MidiEvent>>>,
-        midi_monitor_paused: Arc<Mutex<bool>>,
         peak_level_left: Arc<Mutex<f32>>,
         peak_level_right: Arc<Mutex<f32>>,
         peak_hold_left: Arc<Mutex<(f32, Instant)>>,
@@ -1151,8 +1145,6 @@ impl AudioProcessingState {
             pending_midi_events: Vec::new(),
             sample_rate,
             block_size,
-            midi_monitor,
-            midi_monitor_paused,
             raw_midi_events: Arc::new(Mutex::new(Vec::new())),
             peak_level_left,
             peak_level_right,
@@ -1174,102 +1166,6 @@ impl AudioProcessingState {
         }
     }
 
-    fn capture_midi_event(&self, event: &Event, direction: MidiDirection) {
-        use Event_::EventTypes_::*;
-
-        let event_type = match event.r#type as u32 {
-            kNoteOnEvent => {
-                let note_on = unsafe { event.__field0.noteOn };
-                MidiEventType::NoteOn {
-                    pitch: note_on.pitch,
-                    velocity: note_on.velocity,
-                    channel: note_on.channel,
-                }
-            }
-            kNoteOffEvent => {
-                let note_off = unsafe { event.__field0.noteOff };
-                MidiEventType::NoteOff {
-                    pitch: note_off.pitch,
-                    velocity: note_off.velocity,
-                    channel: note_off.channel,
-                }
-            }
-            kDataEvent => {
-                let data = unsafe { event.__field0.data };
-                let mut bytes = Vec::new();
-                for i in 0..data.size as usize {
-                    bytes.push(unsafe { *data.bytes.add(i) });
-                }
-
-                if bytes.len() >= 1 {
-                    let status = bytes[0];
-                    let data1 = if bytes.len() > 1 { bytes[1] } else { 0 };
-                    let data2 = if bytes.len() > 2 { bytes[2] } else { 0 };
-
-                    match status & 0xF0 {
-                        0x80 => MidiEventType::NoteOff {
-                            pitch: data1 as i16,
-                            velocity: data2 as f32 / 127.0,
-                            channel: (status & 0x0F) as i16,
-                        },
-                        0x90 => MidiEventType::NoteOn {
-                            pitch: data1 as i16,
-                            velocity: data2 as f32 / 127.0,
-                            channel: (status & 0x0F) as i16,
-                        },
-                        0xB0 => MidiEventType::ControlChange {
-                            controller: data1,
-                            value: data2,
-                            channel: (status & 0x0F) as i16,
-                        },
-                        0xC0 => MidiEventType::ProgramChange {
-                            program: data1,
-                            channel: (status & 0x0F) as i16,
-                        },
-                        0xE0 => MidiEventType::PitchBend {
-                            value: ((data2 as i16) << 7) | (data1 as i16),
-                            channel: (status & 0x0F) as i16,
-                        },
-                        _ => MidiEventType::Other {
-                            status,
-                            data1,
-                            data2,
-                        },
-                    }
-                } else {
-                    MidiEventType::Other {
-                        status: 0,
-                        data1: 0,
-                        data2: 0,
-                    }
-                }
-            }
-            _ => MidiEventType::Other {
-                status: event.r#type as u8,
-                data1: 0,
-                data2: 0,
-            },
-        };
-
-        let midi_event = MidiEvent {
-            timestamp: Instant::now(),
-            direction,
-            event_type,
-            channel: 0, // Will be filled based on event type
-            data1: 0,
-            data2: 0,
-            raw_type: event.r#type,
-        };
-
-        // Add to monitor list
-        if let Ok(mut events) = self.midi_monitor.try_lock() {
-            events.push(midi_event);
-            // Limit the size
-            if events.len() > 1000 {
-                events.remove(0);
-            }
-        }
-    }
 
     fn process_audio(&mut self, output: &mut [f32]) -> bool {
         if !self.is_active {
@@ -1496,14 +1392,12 @@ impl eframe::App for VST3Inspector {
                                 {
                                     self.close_plugin_gui();
                                 }
-                            } else {
-                                if ui
-                                    .add_sized([120.0, 40.0], egui::Button::new("Open GUI"))
-                                    .clicked()
-                                {
-                                    if let Err(e) = self.create_plugin_gui() {
-                                        println!("❌ Failed to create plugin GUI: {}", e);
-                                    }
+                            } else if ui
+                                .add_sized([120.0, 40.0], egui::Button::new("Open GUI"))
+                                .clicked()
+                            {
+                                if let Err(e) = self.create_plugin_gui() {
+                                    println!("❌ Failed to create plugin GUI: {}", e);
                                 }
                             }
                         } else {
@@ -1592,8 +1486,6 @@ impl VST3Inspector {
             let audio_state = AudioProcessingState::new(
                 self.sample_rate,
                 self.block_size,
-                self.midi_events.clone(),
-                self.midi_monitor_paused.clone(),
                 self.peak_level_left.clone(),
                 self.peak_level_right.clone(),
                 self.peak_hold_left.clone(),
@@ -1853,11 +1745,9 @@ impl VST3Inspector {
                         row.col(|ui| {
                             if is_current {
                                 ui.label("Current");
-                            } else {
-                                if ui.button("Load").clicked() {
-                                    self.load_plugin(plugin_path.clone());
-                                    self.current_tab = Tab::Plugin; // Switch to plugin tab after loading
-                                }
+                            } else if ui.button("Load").clicked() {
+                                self.load_plugin(plugin_path.clone());
+                                self.current_tab = Tab::Plugin; // Switch to plugin tab after loading
                             }
                         });
                     });
@@ -3025,10 +2915,8 @@ impl VST3Inspector {
                     if ui.button("[Resume]").clicked() {
                         *self.midi_monitor_paused.lock().unwrap() = false;
                     }
-                } else {
-                    if ui.button("[Pause]").clicked() {
-                        *self.midi_monitor_paused.lock().unwrap() = true;
-                    }
+                } else if ui.button("[Pause]").clicked() {
+                    *self.midi_monitor_paused.lock().unwrap() = true;
                 }
 
                 if ui.button("🗑 Clear").clicked() {
@@ -3241,7 +3129,7 @@ impl VST3Inspector {
             .ok_or("No controller instance available - plugin must be loaded first")?;
 
         // Create view using ViewType::kEditor (which is "editor")
-        let editor_view_type = b"editor\0".as_ptr() as *const i8;
+        let editor_view_type = c"editor".as_ptr() as *const i8;
         let view_ptr = controller.createView(editor_view_type);
         if view_ptr.is_null() {
             return Err("Controller does not provide editor view".to_string());
@@ -3315,7 +3203,7 @@ impl VST3Inspector {
             .ok_or("No controller instance available - plugin must be loaded first")?;
 
         // Create view using ViewType::kEditor (which is "editor")
-        let editor_view_type = b"editor\0".as_ptr() as *const i8;
+        let editor_view_type = c"editor".as_ptr() as *const i8;
         let view_ptr = controller.createView(editor_view_type);
         if view_ptr.is_null() {
             controller.terminate();
@@ -3597,7 +3485,25 @@ impl VST3Inspector {
     fn load_plugin(&mut self, plugin_path: String) {
         println!("Loading plugin: {}", plugin_path);
 
-        // Close any existing GUI and stop processing
+        // First, completely stop all audio processing to avoid crashes
+        // This must happen before we destroy any plugin resources
+        if self.audio_stream.is_some() {
+            println!("  Stopping audio stream...");
+            self.audio_stream = None;
+        }
+        
+        // Clear the shared audio state to prevent the audio thread from using stale data
+        if let Some(shared_state) = &self.shared_audio_state {
+            if let Ok(mut state) = shared_state.lock() {
+                state.is_active = false;
+                state.processor = None;
+                state.component = None;
+                state.pending_midi_events.clear();
+                println!("  Cleared shared audio state");
+            }
+        }
+        
+        // Now we can safely stop processing and close GUI
         self.stop_processing();
         if self.gui_attached {
             self.close_plugin_gui();
@@ -3614,6 +3520,7 @@ impl VST3Inspector {
         self.component = None;
         self.controller = None;
         self.host_process_data = None;
+        self.plugin_library = None; // Also reset the library
 
         // Try to load the new plugin
         let binary_path = match get_vst3_binary_path(&self.plugin_path) {
@@ -3634,6 +3541,14 @@ impl VST3Inspector {
                     println!("🚀 Auto-starting processing...");
                     if let Err(e) = self.start_processing() {
                         println!("⚠️ Failed to auto-start processing: {}", e);
+                    }
+                }
+                
+                // If we have an audio device initialized, restart the audio stream
+                if self.audio_device.is_some() {
+                    println!("🔊 Restarting audio stream for new plugin...");
+                    if let Err(e) = self.start_audio_stream() {
+                        println!("⚠️ Failed to restart audio stream: {}", e);
                     }
                 }
             }
@@ -4605,7 +4520,6 @@ impl VST3Inspector {
             channel,
             data1,
             data2,
-            raw_type: event_type,
         };
 
         if let Ok(mut events) = self.midi_events.lock() {
@@ -4763,7 +4677,6 @@ impl VST3Inspector {
             channel,
             data1,
             data2,
-            raw_type: event.r#type,
         }
     }
 
@@ -5077,7 +4990,6 @@ fn log_midi_event_direct(
         channel,
         data1,
         data2,
-        raw_type: event_type,
     };
 
     if let Ok(mut events) = midi_events.lock() {

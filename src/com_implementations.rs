@@ -72,10 +72,6 @@ impl MonitoredEventList {
         }
     }
     
-    pub fn get_events(&self) -> Vec<Event> {
-        self.events.lock().unwrap().clone()
-    }
-    
     pub fn clear(&self) {
         self.events.lock().unwrap().clear();
     }
@@ -137,9 +133,11 @@ impl HostEventList {
     pub fn get_events(&self) -> Vec<Event> {
         self.events.lock().unwrap().clone()
     }
-    
-    pub fn clear(&self) {
-        self.events.lock().unwrap().clear();
+}
+
+impl Default for HostEventList {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

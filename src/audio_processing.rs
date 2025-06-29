@@ -27,6 +27,11 @@ pub struct HostProcessData {
 }
 
 impl HostProcessData {
+    /// Creates a new HostProcessData with MIDI event monitoring
+    /// 
+    /// # Safety
+    /// This function is unsafe because it creates raw pointers to COM interfaces
+    /// that must be properly managed and released when no longer needed.
     pub unsafe fn new_with_monitoring(
         block_size: i32, 
         sample_rate: f64,
@@ -86,11 +91,11 @@ impl HostProcessData {
         data.process_context.tempo = 120.0;
         data.process_context.timeSigNumerator = 4;
         data.process_context.timeSigDenominator = 4;
-        data.process_context.state = ProcessContext_::StatesAndFlags_::kPlaying as u32 |
-                                     ProcessContext_::StatesAndFlags_::kTempoValid as u32 |
-                                     ProcessContext_::StatesAndFlags_::kTimeSigValid as u32 |
-                                     ProcessContext_::StatesAndFlags_::kContTimeValid as u32 |
-                                     ProcessContext_::StatesAndFlags_::kSystemTimeValid as u32;
+        data.process_context.state = ProcessContext_::StatesAndFlags_::kPlaying |
+                                     ProcessContext_::StatesAndFlags_::kTempoValid |
+                                     ProcessContext_::StatesAndFlags_::kTimeSigValid |
+                                     ProcessContext_::StatesAndFlags_::kContTimeValid |
+                                     ProcessContext_::StatesAndFlags_::kSystemTimeValid;
         
         // Set up process data
         data.process_data.processMode = ProcessModes_::kRealtime as i32;
@@ -105,6 +110,11 @@ impl HostProcessData {
         data
     }
     
+    /// Creates a new HostProcessData without MIDI event monitoring
+    /// 
+    /// # Safety
+    /// This function is unsafe because it creates raw pointers to COM interfaces
+    /// that must be properly managed and released when no longer needed.
     pub unsafe fn new(block_size: i32, sample_rate: f64) -> Self {
         let input_events = create_event_list();
         let output_events = create_event_list();
@@ -158,11 +168,11 @@ impl HostProcessData {
         data.process_context.tempo = 120.0;
         data.process_context.timeSigNumerator = 4;
         data.process_context.timeSigDenominator = 4;
-        data.process_context.state = ProcessContext_::StatesAndFlags_::kPlaying as u32 |
-                                     ProcessContext_::StatesAndFlags_::kTempoValid as u32 |
-                                     ProcessContext_::StatesAndFlags_::kTimeSigValid as u32 |
-                                     ProcessContext_::StatesAndFlags_::kContTimeValid as u32 |
-                                     ProcessContext_::StatesAndFlags_::kSystemTimeValid as u32;
+        data.process_context.state = ProcessContext_::StatesAndFlags_::kPlaying |
+                                     ProcessContext_::StatesAndFlags_::kTempoValid |
+                                     ProcessContext_::StatesAndFlags_::kTimeSigValid |
+                                     ProcessContext_::StatesAndFlags_::kContTimeValid |
+                                     ProcessContext_::StatesAndFlags_::kSystemTimeValid;
         
         // Set up process data
         data.process_data.processMode = ProcessModes_::kRealtime as i32;
@@ -177,6 +187,11 @@ impl HostProcessData {
         data
     }
     
+    /// Prepares audio buffers based on plugin bus configuration
+    /// 
+    /// # Safety
+    /// This function is unsafe because it directly manipulates raw pointers for audio buffers
+    /// and assumes the provided IComponent is valid.
     pub unsafe fn prepare_buffers(&mut self, component: &ComPtr<IComponent>, block_size: i32) -> Result<(), String> {
         use BusDirections_::*;
         use MediaTypes_::*;
@@ -278,6 +293,11 @@ impl HostProcessData {
         Ok(())
     }
     
+    /// Clears all audio buffers and event lists
+    /// 
+    /// # Safety
+    /// This function is unsafe because it manipulates the internal state of COM interfaces
+    /// through raw pointers.
     pub unsafe fn clear_buffers(&mut self) {
         // Clear input buffers
         for buffer in &mut self.input_buffers {
