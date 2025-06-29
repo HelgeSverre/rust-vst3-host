@@ -27,9 +27,9 @@ mod plugin_loader;
 mod utils;
 
 use audio_processing::*;
-use utils::*;
 use com_implementations::ComponentHandler;
 use std::sync::Arc;
+use utils::*;
 
 // macOS native window support
 #[cfg(target_os = "macos")]
@@ -886,9 +886,9 @@ struct VST3Inspector {
     audio_device: Option<cpal::Device>,
     audio_config: Option<cpal::StreamConfig>,
     // Shared processing state for audio thread
-    shared_audio_state: Option<std::sync::Arc<std::sync::Mutex<AudioProcessingState>>>,
+    shared_audio_state: Option<Arc<Mutex<AudioProcessingState>>>,
     // Virtual keyboard state
-    pressed_keys: std::collections::HashSet<i16>,
+    pressed_keys: HashSet<i16>,
 }
 
 // Audio processing state that can be shared between UI and audio threads
@@ -1019,9 +1019,16 @@ impl eframe::App for VST3Inspector {
                     // Update our cached parameter values
                     if let Some(ref mut plugin_info) = self.plugin_info {
                         if let Some(ref mut controller_info) = plugin_info.controller_info {
-                            if let Some(param) = controller_info.parameters.iter_mut().find(|p| p.id == param_id) {
+                            if let Some(param) = controller_info
+                                .parameters
+                                .iter_mut()
+                                .find(|p| p.id == param_id)
+                            {
                                 param.current_value = value;
-                                println!("🔄 Parameter {} updated from plugin GUI: {:.3}", param_id, value);
+                                println!(
+                                    "🔄 Parameter {} updated from plugin GUI: {:.3}",
+                                    param_id, value
+                                );
                             }
                         }
                     }
@@ -1155,7 +1162,7 @@ impl VST3Inspector {
         // Initialize shared audio state if not already done
         if self.shared_audio_state.is_none() {
             let audio_state = AudioProcessingState::new(self.sample_rate, self.block_size);
-            self.shared_audio_state = Some(std::sync::Arc::new(std::sync::Mutex::new(audio_state)));
+            self.shared_audio_state = Some(Arc::new(Mutex::new(audio_state)));
 
             // If we have a processor, set it up in the shared state
             if let (Some(processor), Some(component)) = (&self.processor, &self.component) {
@@ -1274,7 +1281,7 @@ impl VST3Inspector {
             let num_events = process_data.output_events.events.lock().unwrap().len();
             if num_events > 0 {
                 println!("🎹 Plugin generated {} MIDI events", num_events);
-                utils::print_midi_events(&process_data.output_events);
+                print_midi_events(&process_data.output_events);
             }
         }
         Ok(())
@@ -2761,10 +2768,13 @@ impl VST3Inspector {
 
         // Connect if separate
         let _ = connect_component_and_controller(&component, &controller);
-        
+
         // Set up our component handler to receive parameter change notifications
-        let component_handler = ComWrapper::new(ComponentHandler::new(self.parameter_changes.clone()));
-        if let Some(handler_ptr) = component_handler.to_com_ptr::<vst3::Steinberg::Vst::IComponentHandler>() {
+        let component_handler =
+            ComWrapper::new(ComponentHandler::new(self.parameter_changes.clone()));
+        if let Some(handler_ptr) =
+            component_handler.to_com_ptr::<vst3::Steinberg::Vst::IComponentHandler>()
+        {
             let handler_result = controller.setComponentHandler(handler_ptr.into_raw());
             if handler_result == vst3::Steinberg::kResultOk {
                 println!("✅ Component handler set successfully");
@@ -3407,6 +3417,7 @@ fn scan_vst3_directories() -> Vec<String> {
             if let Ok(entries) = std::fs::read_dir(path) {
                 for entry in entries.flatten() {
                     let path = entry.path();
+                    #[allow(unused_qualifications)]
                     if path.extension() == Some(std::ffi::OsStr::new("vst3")) {
                         plugins.push(path.to_string_lossy().to_string());
                     }
