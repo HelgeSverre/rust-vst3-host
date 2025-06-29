@@ -20,15 +20,15 @@
 - [ ] Add ability to change block size in audio processing
   - Reallocate all buffers in `HostProcessData`
   - Notify all plugins via `setupProcessing()`
-- [ ] Automatically start processing state when loading plugin
+- [x] Automatically start processing state when loading plugin
   - Add config option in `VST3Inspector::load_plugin()` to auto-call `startProcessing()`
-- [ ] Add "Audio Panic" button that kills sound output immediately
+- [x] Add "Audio Panic" button that kills sound output immediately
   - Zero all output buffers
   - Call `stopProcessing()` on all active plugins
   - Optionally reset audio stream
 
 ### MIDI Features
-- [ ] Add "MIDI Panic" button that sends:
+- [x] Add "MIDI Panic" button that sends:
   - "All Notes Off" (CC 123) to all MIDI channels (0-15)
   - "All Sounds Off" (CC 120) to all MIDI channels
   - "Reset All Controllers" (CC 121) to all MIDI channels
@@ -52,18 +52,18 @@
   - Implement state snapshots with timestamp
 
 ### UI/UX Improvements
-- [ ] Improve "Plugins" tab with ability to add folders to scan for plugins
+- [x] Improve "Plugins" tab with ability to add folders to scan for plugins
   - Add "Add Folder" button
   - Store custom paths in preferences
   - Show scan progress
-- [ ] Add persistent plugin path preferences
+- [x] Add persistent plugin path preferences
   - Save to config file (TOML/JSON)
   - Load on startup
-- [ ] Remove symbols from labels and prefer text:
+- [x] Remove symbols from labels and prefer text:
   - Replace "active" plugin indicator symbol with text (currently shows as "error square")
   - Audit all UI elements for symbol usage
   - Use descriptive text labels instead
-- [ ] Add VU meter/level indicator to show plugin audio output
+- [x] Add VU meter/level indicator to show plugin audio output
   - RMS and peak level calculation
   - Stereo or multi-channel display
   - Configurable ballistics
@@ -87,7 +87,7 @@
       .load()?;
   ```
 - [ ] Add builder pattern for plugin configuration
-- [ ] Implement proper error types instead of String errors
+- [x] Implement proper error types instead of String errors
   - Use `thiserror` crate
   - Specific error variants for each failure mode
 
@@ -144,7 +144,7 @@
   - Track COM reference counts
   - Detect unreleased resources
 - [ ] Parameter snapshot comparison
-  - Save/load plugin states
+  - Save/load plugin states (Note: Basic implementation was removed due to issues)
   - Diff two states
   - Highlight changes
 - [ ] MIDI/Audio recording
