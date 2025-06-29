@@ -4,6 +4,7 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ptr;
 use std::sync::Mutex;
@@ -23,6 +24,7 @@ use libloading::os::unix::{Library, Symbol};
 mod audio_processing;
 mod com_implementations;
 mod data_structures;
+mod errors;
 mod plugin_discovery;
 mod plugin_loader;
 mod utils;
@@ -356,7 +358,8 @@ fn main() {
             let mut inspector = VST3Inspector::from_path(PLUGIN_PATH);
 
             // Scan for available plugins
-            inspector.discovered_plugins = scan_vst3_directories();
+            let prefs = Preferences::load();
+            inspector.discovered_plugins = plugin_discovery::scan_vst3_directories_with_custom(&prefs.custom_plugin_paths);
 
             // Try to load the default plugin
             let binary_path = match get_vst3_binary_path(&inspector.plugin_path) {
@@ -1016,6 +1019,39 @@ impl Default for MidiEventFilter {
     }
 }
 
+#[derive(Serialize, Deserialize, Default)]
+struct Preferences {
+    custom_plugin_paths: Vec<String>,
+    last_loaded_plugin: Option<String>,
+    auto_start_processing: bool,
+    window_size: Option<(f32, f32)>,
+}
+
+impl Preferences {
+    fn load() -> Self {
+        if let Some(config_dir) = directories::ProjectDirs::from("com", "vst-host", "vst-host") {
+            let config_path = config_dir.config_dir().join("preferences.json");
+            if let Ok(data) = std::fs::read_to_string(config_path) {
+                if let Ok(prefs) = serde_json::from_str(&data) {
+                    return prefs;
+                }
+            }
+        }
+        Self::default()
+    }
+    
+    fn save(&self) -> Result<(), std::io::Error> {
+        if let Some(config_dir) = directories::ProjectDirs::from("com", "vst-host", "vst-host") {
+            let config_dir = config_dir.config_dir();
+            std::fs::create_dir_all(config_dir)?;
+            let config_path = config_dir.join("preferences.json");
+            let data = serde_json::to_string_pretty(self)?;
+            std::fs::write(config_path, data)?;
+        }
+        Ok(())
+    }
+}
+
 struct VST3Inspector {
     plugin_path: String,
     plugin_info: Option<PluginInfo>,
@@ -1068,6 +1104,11 @@ struct VST3Inspector {
     midi_event_filter: MidiEventFilter,
     midi_monitor_paused: Arc<Mutex<bool>>,
     max_midi_events: usize,
+    // Preferences
+    preferences: Preferences,
+    // VU meter
+    peak_level_left: Arc<Mutex<f32>>,
+    peak_level_right: Arc<Mutex<f32>>,
 }
 
 // Audio processing state that can be shared between UI and audio threads
@@ -1082,6 +1123,9 @@ struct AudioProcessingState {
     midi_monitor_paused: Arc<Mutex<bool>>,
     // Raw event storage for MonitoredEventList
     raw_midi_events: Arc<Mutex<Vec<(Instant, MidiDirection, Event)>>>,
+    // VU meter
+    peak_level_left: Arc<Mutex<f32>>,
+    peak_level_right: Arc<Mutex<f32>>,
 }
 
 impl AudioProcessingState {
@@ -1090,6 +1134,8 @@ impl AudioProcessingState {
         block_size: i32,
         midi_monitor: Arc<Mutex<Vec<MidiEvent>>>,
         midi_monitor_paused: Arc<Mutex<bool>>,
+        peak_level_left: Arc<Mutex<f32>>,
+        peak_level_right: Arc<Mutex<f32>>,
     ) -> Self {
         Self {
             processor: None,
@@ -1101,6 +1147,8 @@ impl AudioProcessingState {
             midi_monitor,
             midi_monitor_paused,
             raw_midi_events: Arc::new(Mutex::new(Vec::new())),
+            peak_level_left,
+            peak_level_right,
         }
     }
 
@@ -1274,6 +1322,10 @@ impl AudioProcessingState {
                 let channels = output.len() / self.block_size as usize;
                 let mut out_idx = 0;
 
+                // Track peak levels for VU meter
+                let mut peak_left = 0.0f32;
+                let mut peak_right = 0.0f32;
+
                 for frame in 0..self.block_size as usize {
                     for ch in 0..channels {
                         let sample = if ch < process_data.output_buffers.len()
@@ -1287,7 +1339,29 @@ impl AudioProcessingState {
                         if out_idx < output.len() {
                             output[out_idx] = sample;
                             out_idx += 1;
+                            
+                            // Track peak levels
+                            match ch {
+                                0 => peak_left = peak_left.max(sample.abs()),
+                                1 => peak_right = peak_right.max(sample.abs()),
+                                _ => {}
+                            }
                         }
+                    }
+                }
+                
+                // Update peak levels (with decay)
+                const SILENCE_THRESHOLD: f32 = 0.00001; // -100 dB
+                if let Ok(mut level) = self.peak_level_left.try_lock() {
+                    *level = (*level * 0.95).max(peak_left); // Smooth decay
+                    if *level < SILENCE_THRESHOLD {
+                        *level = 0.0; // Clamp to silence
+                    }
+                }
+                if let Ok(mut level) = self.peak_level_right.try_lock() {
+                    *level = (*level * 0.95).max(peak_right); // Smooth decay
+                    if *level < SILENCE_THRESHOLD {
+                        *level = 0.0; // Clamp to silence
                     }
                 }
 
@@ -1483,6 +1557,8 @@ impl VST3Inspector {
                 self.block_size,
                 self.midi_events.clone(),
                 self.midi_monitor_paused.clone(),
+                self.peak_level_left.clone(),
+                self.peak_level_right.clone(),
             );
             self.shared_audio_state = Some(Arc::new(Mutex::new(audio_state)));
 
@@ -1618,11 +1694,57 @@ impl VST3Inspector {
             ui.horizontal(|ui| {
                 ui.label(format!("Found {} plugins", self.discovered_plugins.len()));
                 if ui.button("Refresh").clicked() {
-                    self.discovered_plugins = scan_vst3_directories();
+                    self.discovered_plugins = plugin_discovery::scan_vst3_directories_with_custom(&self.preferences.custom_plugin_paths);
+                }
+                
+                // Add custom path button
+                if ui.button("Add Folder...").clicked() {
+                    if let Some(folder) = rfd::FileDialog::new()
+                        .set_title("Select VST3 Plugin Folder")
+                        .pick_folder() 
+                    {
+                        let folder_path = folder.to_string_lossy().to_string();
+                        if !self.preferences.custom_plugin_paths.contains(&folder_path) {
+                            self.preferences.custom_plugin_paths.push(folder_path);
+                            if let Err(e) = self.preferences.save() {
+                                println!("Failed to save preferences: {}", e);
+                            }
+                            // Refresh plugin list
+                            self.discovered_plugins = plugin_discovery::scan_vst3_directories_with_custom(&self.preferences.custom_plugin_paths);
+                        }
+                    }
                 }
             });
 
             ui.add_space(8.0);
+            
+            // Show custom plugin paths if any exist
+            if !self.preferences.custom_plugin_paths.is_empty() {
+                ui.collapsing("Custom Plugin Paths", |ui| {
+                    let mut paths_to_remove = Vec::new();
+                    
+                    for (idx, path) in self.preferences.custom_plugin_paths.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(path);
+                            if ui.small_button("Remove").clicked() {
+                                paths_to_remove.push(idx);
+                            }
+                        });
+                    }
+                    
+                    // Remove paths marked for deletion
+                    for idx in paths_to_remove.into_iter().rev() {
+                        self.preferences.custom_plugin_paths.remove(idx);
+                        if let Err(e) = self.preferences.save() {
+                            println!("Failed to save preferences: {}", e);
+                        }
+                        // Refresh plugin list
+                        self.discovered_plugins = plugin_discovery::scan_vst3_directories_with_custom(&self.preferences.custom_plugin_paths);
+                    }
+                });
+                
+                ui.add_space(8.0);
+            }
 
             // Plugin table
             self.show_plugins_table(ui);
@@ -1653,22 +1775,33 @@ impl VST3Inspector {
             .body(|mut body| {
                 for plugin_path in &self.discovered_plugins.clone() {
                     let plugin_name = get_plugin_name_from_path(plugin_path);
-                    let _directory = std::path::Path::new(plugin_path)
+                    let directory = std::path::Path::new(plugin_path)
                         .parent()
                         .and_then(|p| p.to_str())
                         .unwrap_or("Unknown");
                     let is_current = self.plugin_path == *plugin_path;
+                    
+                    // Check if this plugin is from a custom path
+                    let is_custom = self.preferences.custom_plugin_paths.iter()
+                        .any(|custom_path| directory.starts_with(custom_path));
 
                     body.row(25.0, |mut row| {
                         // Plugin Name
                         row.col(|ui| {
+                            let mut label = plugin_name.clone();
                             if is_current {
-                                ui.colored_label(
-                                    egui::Color32::GREEN,
-                                    format!("► {}", plugin_name),
-                                );
+                                label = format!("[ACTIVE] {}", label);
+                            }
+                            if is_custom {
+                                label = format!("{} [Custom]", label);
+                            }
+                            
+                            if is_current {
+                                ui.colored_label(egui::Color32::GREEN, label);
+                            } else if is_custom {
+                                ui.colored_label(egui::Color32::from_rgb(100, 149, 237), label); // Cornflower blue
                             } else {
-                                ui.label(&plugin_name);
+                                ui.label(label);
                             }
                         });
 
@@ -2058,7 +2191,7 @@ impl VST3Inspector {
                                         ui.add_enabled_ui(
                                             self.current_page + 1 < total_pages,
                                             |ui| {
-                                                if ui.button("Next ▶").clicked() {
+                                                if ui.button("Next >>").clicked() {
                                                     self.current_page += 1;
                                                 }
                                             },
@@ -2485,6 +2618,113 @@ impl VST3Inspector {
             ui.separator();
             ui.add_space(8.0);
 
+            // VU Meter and Panic Controls
+            ui.heading("Audio Monitoring & Safety");
+            ui.add_space(8.0);
+            
+            ui.horizontal(|ui| {
+                // VU Meter
+                ui.group(|ui| {
+                    ui.label("Output Levels (VU Meter):");
+                    
+                    let peak_left = *self.peak_level_left.lock().unwrap();
+                    let peak_right = *self.peak_level_right.lock().unwrap();
+                    
+                    // Convert to dB
+                    const MIN_DB: f32 = -60.0;
+                    const SILENCE_THRESHOLD: f32 = 0.00001; // -100 dB
+                    
+                    let db_left = if peak_left > SILENCE_THRESHOLD { 
+                        (20.0 * peak_left.log10()).max(MIN_DB)
+                    } else { 
+                        f32::NEG_INFINITY 
+                    };
+                    let db_right = if peak_right > SILENCE_THRESHOLD { 
+                        (20.0 * peak_right.log10()).max(MIN_DB)
+                    } else { 
+                        f32::NEG_INFINITY 
+                    };
+                    
+                    ui.vertical(|ui| {
+                        // Left channel
+                        ui.horizontal(|ui| {
+                            ui.label("L:");
+                            let color = if db_left > -3.0 {
+                                egui::Color32::RED // Clipping warning
+                            } else if db_left > -12.0 {
+                                egui::Color32::YELLOW
+                            } else {
+                                egui::Color32::GREEN
+                            };
+                            
+                            // VU meter bar
+                            let bar_value = if db_left.is_finite() {
+                                ((db_left - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                            } else {
+                                0.0
+                            };
+                            ui.add(egui::ProgressBar::new(bar_value)
+                                .desired_width(200.0)
+                                .fill(color));
+                            
+                            let db_text = if db_left.is_finite() {
+                                format!("{:.1} dB", db_left)
+                            } else {
+                                "-∞ dB".to_string()
+                            };
+                            ui.colored_label(color, db_text);
+                        });
+                        
+                        // Right channel
+                        ui.horizontal(|ui| {
+                            ui.label("R:");
+                            let color = if db_right > -3.0 {
+                                egui::Color32::RED // Clipping warning
+                            } else if db_right > -12.0 {
+                                egui::Color32::YELLOW
+                            } else {
+                                egui::Color32::GREEN
+                            };
+                            
+                            // VU meter bar
+                            let bar_value = if db_right.is_finite() {
+                                ((db_right - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                            } else {
+                                0.0
+                            };
+                            ui.add(egui::ProgressBar::new(bar_value)
+                                .desired_width(200.0)
+                                .fill(color));
+                            
+                            let db_text = if db_right.is_finite() {
+                                format!("{:.1} dB", db_right)
+                            } else {
+                                "-∞ dB".to_string()
+                            };
+                            ui.colored_label(color, db_text);
+                        });
+                    });
+                });
+                
+                ui.add_space(20.0);
+                
+                // Panic buttons
+                ui.vertical(|ui| {
+                    ui.label("Emergency Controls:");
+                    
+                    if ui.button("🚨 MIDI Panic").clicked() {
+                        self.send_midi_panic();
+                    }
+                    
+                    if ui.button("🔇 Audio Panic").clicked() {
+                        self.audio_panic();
+                    }
+                });
+            });
+
+            ui.separator();
+            ui.add_space(8.0);
+
             // MIDI Testing
             ui.heading("MIDI Testing");
             ui.add_space(8.0);
@@ -2599,11 +2839,11 @@ impl VST3Inspector {
             ui.horizontal(|ui| {
                 let is_paused = *self.midi_monitor_paused.lock().unwrap();
                 if is_paused {
-                    if ui.button("▶ Resume").clicked() {
+                    if ui.button("[Resume]").clicked() {
                         *self.midi_monitor_paused.lock().unwrap() = false;
                     }
                 } else {
-                    if ui.button("⏸ Pause").clicked() {
+                    if ui.button("[Pause]").clicked() {
                         *self.midi_monitor_paused.lock().unwrap() = true;
                     }
                 }
@@ -3205,6 +3445,14 @@ impl VST3Inspector {
             Ok(plugin_info) => {
                 println!("✅ Plugin loaded successfully!");
                 self.plugin_info = Some(plugin_info);
+                
+                // Auto-start processing if enabled in preferences
+                if self.preferences.auto_start_processing {
+                    println!("🚀 Auto-starting processing...");
+                    if let Err(e) = self.start_processing() {
+                        println!("⚠️ Failed to auto-start processing: {}", e);
+                    }
+                }
             }
             Err(e) => {
                 println!("❌ Failed to load plugin: {}", e);
@@ -3783,6 +4031,94 @@ impl VST3Inspector {
             }
         }
         Ok(())
+    }
+
+    fn send_midi_cc(&mut self, channel: i16, controller: u8, value: u8) -> Result<(), String> {
+        // Log to MIDI monitor
+        self.log_midi_event(
+            MidiDirection::Input,
+            Event_::EventTypes_::kLegacyMIDICCOutEvent as u16,
+            channel as u8,
+            controller,
+            value,
+        );
+
+        // Try to send to shared audio state first
+        if let Some(shared_state) = &self.shared_audio_state {
+            if let Ok(mut state) = shared_state.try_lock() {
+                unsafe {
+                    let mut event: Event = std::mem::zeroed();
+                    event.busIndex = 0;
+                    event.sampleOffset = 0;
+                    event.ppqPosition = 0.0;
+                    event.flags = 1; // kIsLive
+                    event.r#type = Event_::EventTypes_::kLegacyMIDICCOutEvent as u16;
+
+                    // For legacy MIDI CC event, we need to construct the MIDI data
+                    let status = 0xB0 | (channel & 0x0F); // Control Change status
+                    let bytes = event.__field0.data.bytes as *mut u8;
+                    *bytes.offset(0) = status as u8;
+                    *bytes.offset(1) = controller;
+                    *bytes.offset(2) = value;
+                    event.__field0.data.size = 3;
+
+                    state.add_midi_event(event);
+                    return Ok(());
+                }
+            }
+        }
+
+        Err("No active processing to send MIDI CC".to_string())
+    }
+
+    // Feature 1: MIDI Panic
+    fn send_midi_panic(&mut self) {
+        println!("🚨 Sending MIDI Panic to all channels...");
+        
+        for channel in 0..16 {
+            // All Notes Off (CC 123)
+            if let Err(e) = self.send_midi_cc(channel, 123, 0) {
+                println!("  Failed to send All Notes Off to channel {}: {}", channel + 1, e);
+            }
+            
+            // All Sounds Off (CC 120)
+            if let Err(e) = self.send_midi_cc(channel, 120, 0) {
+                println!("  Failed to send All Sounds Off to channel {}: {}", channel + 1, e);
+            }
+            
+            // Reset All Controllers (CC 121)
+            if let Err(e) = self.send_midi_cc(channel, 121, 0) {
+                println!("  Failed to send Reset Controllers to channel {}: {}", channel + 1, e);
+            }
+        }
+        
+        println!("✅ MIDI Panic sent to all channels");
+    }
+
+    // Feature 2: Audio Panic
+    fn audio_panic(&mut self) {
+        println!("🔇 Audio Panic - stopping all audio processing");
+        
+        // Stop audio processing
+        self.stop_processing();
+        
+        // Clear any pending MIDI events
+        if let Some(state) = &self.shared_audio_state {
+            if let Ok(mut state) = state.lock() {
+                state.pending_midi_events.clear();
+                println!("  Cleared pending MIDI events");
+            }
+        }
+        
+        // Reset peak levels
+        if let Ok(mut level) = self.peak_level_left.lock() {
+            *level = 0.0;
+        }
+        if let Ok(mut level) = self.peak_level_right.lock() {
+            *level = 0.0;
+        }
+        
+        println!("✅ Audio panic complete");
     }
 
     /// Process one audio block with optional input
@@ -4381,6 +4717,9 @@ impl VST3Inspector {
             midi_event_filter: MidiEventFilter::default(),
             midi_monitor_paused: Arc::new(Mutex::new(false)),
             max_midi_events: 1000,
+            preferences: Preferences::load(),
+            peak_level_left: Arc::new(Mutex::new(0.0)),
+            peak_level_right: Arc::new(Mutex::new(0.0)),
         }
     }
 }
@@ -4461,55 +4800,7 @@ fn log_midi_event_direct(
     }
 }
 
-// Plugin discovery functions
-fn scan_vst3_directories() -> Vec<String> {
-    let mut plugins = Vec::new();
-
-    #[cfg(target_os = "macos")]
-    {
-        let paths = [
-            "/Library/Audio/Plug-Ins/VST3",
-            &format!(
-                "{}/Library/Audio/Plug-Ins/VST3",
-                std::env::var("HOME").unwrap_or_default()
-            ),
-        ];
-
-        for path in &paths {
-            if let Ok(entries) = std::fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    #[allow(unused_qualifications)]
-                    if path.extension() == Some(std::ffi::OsStr::new("vst3")) {
-                        plugins.push(path.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let paths = [
-            r"C:\Program Files\Common Files\VST3",
-            r"C:\Program Files (x86)\Common Files\VST3",
-        ];
-
-        for path in &paths {
-            if let Ok(entries) = std::fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension() == Some(std::ffi::OsStr::new("vst3")) {
-                        plugins.push(path.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    plugins.sort();
-    plugins
-}
+// Plugin discovery is now handled by plugin_discovery module
 
 fn get_plugin_name_from_path(path: &str) -> String {
     std::path::Path::new(path)
