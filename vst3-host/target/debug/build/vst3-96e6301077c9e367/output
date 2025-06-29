@@ -1,0 +1,2 @@
+cargo:rerun-if-env-changed=VST3_SDK_DIR
+cargo:rerun-if-changed=/Users/helge/code/vst-host/vst3sdk

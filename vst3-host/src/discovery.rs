@@ -59,7 +59,7 @@ fn scan_directory(dir: &Path, plugins: &mut Vec<PathBuf>) -> Result<()> {
             // Check if it's a VST3 bundle/file
             if let Some(ext) = path.extension() {
                 if ext == "vst3" {
-                    plugins.push(path);
+                    plugins.push(path.clone());
                 }
             }
             
@@ -75,24 +75,133 @@ fn scan_directory(dir: &Path, plugins: &mut Vec<PathBuf>) -> Result<()> {
 
 /// Get metadata for a VST3 plugin without fully loading it
 pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
-    // This will be implemented to actually load and query the plugin
-    // For now, return dummy info
-    Ok(PluginInfo {
-        path: path.to_path_buf(),
-        name: path.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Unknown")
-            .to_string(),
-        vendor: "Unknown".to_string(),
-        version: "1.0.0".to_string(),
-        category: "Unknown".to_string(),
-        uid: "unknown".to_string(),
-        audio_inputs: 0,
-        audio_outputs: 0,
-        has_midi_input: false,
-        has_midi_output: false,
-        has_gui: false,
-    })
+    use vst3::{ComPtr, Interface, Steinberg::*, Steinberg::Vst::*};
+    
+    unsafe {
+        // Get the binary path
+        let binary_path = get_vst3_binary_path(path)?;
+        
+        // Load the library
+        let library = libloading::Library::new(&binary_path)
+            .map_err(|e| crate::Error::PluginLoadFailed(format!("Failed to load library: {}", e)))?;
+        
+        // Get factory function
+        type GetPluginFactoryFunc = unsafe extern "C" fn() -> *mut IPluginFactory;
+        let get_factory: libloading::Symbol<GetPluginFactoryFunc> = library.get(b"GetPluginFactory\0")
+            .map_err(|e| crate::Error::PluginLoadFailed(format!("Failed to find GetPluginFactory: {}", e)))?;
+        
+        let factory_ptr = get_factory();
+        if factory_ptr.is_null() {
+            return Err(crate::Error::PluginLoadFailed("GetPluginFactory returned null".to_string()));
+        }
+        
+        let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr)
+            .ok_or_else(|| crate::Error::PluginLoadFailed("Failed to create factory ComPtr".to_string()))?;
+        
+        // Get factory info
+        let mut factory_info: PFactoryInfo = std::mem::zeroed();
+        factory.getFactoryInfo(&mut factory_info);
+        
+        let vendor = crate::internal::utils::c_str_to_string(&factory_info.vendor);
+        
+        // Find audio component
+        let num_classes = factory.countClasses();
+        let mut plugin_name = String::new();
+        let mut category = String::new();
+        let mut uid = String::new();
+        let mut has_midi_input = false;
+        let mut audio_inputs = 0u32;
+        let mut audio_outputs = 0u32;
+        let mut has_gui = false;
+        
+        for i in 0..num_classes {
+            let mut class_info: PClassInfo = std::mem::zeroed();
+            if factory.getClassInfo(i, &mut class_info) == kResultOk {
+                let class_category = crate::internal::utils::c_str_to_string(&class_info.category);
+                
+                if class_category.contains("Audio Module Class") {
+                    plugin_name = crate::internal::utils::c_str_to_string(&class_info.name);
+                    category = if class_category.contains("Instrument") {
+                        "Instrument".to_string()
+                    } else if class_category.contains("Fx") {
+                        "Effect".to_string()
+                    } else {
+                        "Other".to_string()
+                    };
+                    
+                    // Convert UID to string
+                    uid = format!("{:08X}{:08X}{:08X}{:08X}",
+                        class_info.cid.data1,
+                        class_info.cid.data2,
+                        class_info.cid.data3,
+                        class_info.cid.data4);
+                    
+                    // Try to create component to get more info
+                    let mut component_ptr: *mut IComponent = ptr::null_mut();
+                    let result = factory.createInstance(
+                        class_info.cid.as_ptr() as *const i8,
+                        IComponent::IID.as_ptr() as *const i8,
+                        &mut component_ptr as *mut _ as *mut _,
+                    );
+                    
+                    if result == kResultOk && !component_ptr.is_null() {
+                        let component = ComPtr::<IComponent>::from_raw(component_ptr).unwrap();
+                        
+                        // Initialize to get bus info
+                        component.initialize(ptr::null_mut());
+                        
+                        // Get bus counts
+                        audio_inputs = component.getBusCount(kAudio as i32, kInput as i32) as u32;
+                        audio_outputs = component.getBusCount(kAudio as i32, kOutput as i32) as u32;
+                        
+                        // Check for MIDI input
+                        let event_inputs = component.getBusCount(kEvent as i32, kInput as i32);
+                        has_midi_input = event_inputs > 0;
+                        
+                        // Check for GUI
+                        if let Some(controller) = component.cast::<IEditController>() {
+                            has_gui = true;
+                            controller.terminate();
+                        }
+                        
+                        // Cleanup
+                        component.terminate();
+                    }
+                    
+                    break;
+                }
+            }
+        }
+        
+        // If no audio component found, use first class
+        if plugin_name.is_empty() && num_classes > 0 {
+            let mut class_info: PClassInfo = std::mem::zeroed();
+            if factory.getClassInfo(0, &mut class_info) == kResultOk {
+                plugin_name = crate::internal::utils::c_str_to_string(&class_info.name);
+            }
+        }
+        
+        Ok(PluginInfo {
+            path: path.to_path_buf(),
+            name: if plugin_name.is_empty() {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string()
+            } else {
+                plugin_name
+            },
+            vendor,
+            version: "1.0.0".to_string(), // Version not available in PClassInfo
+            category,
+            uid,
+            audio_inputs,
+            audio_outputs,
+            has_midi_input,
+            has_midi_output: false, // Would need to check event output buses
+            has_gui,
+        })
+    }
 }
 
 /// Platform-specific VST3 binary path resolution

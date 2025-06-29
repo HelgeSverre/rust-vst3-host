@@ -129,15 +129,9 @@ impl AudioBackend for CpalBackend {
         let block_size = self.audio_config.block_size;
         let sample_rate = self.audio_config.sample_rate;
         
-        // Create a buffer to accumulate samples
-        let buffer_arc = Arc::new(Mutex::new(vec![0.0f32; channels * block_size]));
-        let buffer_position = Arc::new(Mutex::new(0usize));
-        
         let stream = self.device.build_output_stream(
             &self.config,
             {
-                let buffer_arc = Arc::clone(&buffer_arc);
-                let buffer_position_arc = Arc::clone(&buffer_position);
                 
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     // Clear output buffer

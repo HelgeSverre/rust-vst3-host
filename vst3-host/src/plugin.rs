@@ -6,7 +6,6 @@ use crate::{
     midi::{MidiChannel, MidiEvent},
     parameters::{Parameter, ParameterUpdate},
 };
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Information about a VST3 plugin

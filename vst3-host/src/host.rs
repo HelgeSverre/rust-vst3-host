@@ -98,20 +98,20 @@ impl Vst3Host {
             return Err(Error::PluginNotFound(path.display().to_string()));
         }
         
-        // This will be implemented to actually load the plugin
-        // For now, create a dummy plugin
-        let info = PluginInfo {
-            path: path.to_path_buf(),
-            name: "Test Plugin".to_string(),
-            vendor: "Test Vendor".to_string(),
-            version: "1.0.0".to_string(),
-            category: "Effect".to_string(),
-            uid: "test-uid".to_string(),
-            audio_inputs: 2,
-            audio_outputs: 2,
-            has_midi_input: true,
-            has_midi_output: false,
-            has_gui: false,
+        // Get plugin info first
+        let info = crate::discovery::get_plugin_info(path)?;
+        
+        // Get the binary path
+        let binary_path = crate::discovery::get_vst3_binary_path(path)?;
+        
+        // Load the plugin implementation
+        let plugin_impl = crate::internal::plugin_impl::PluginImpl::load(&binary_path, info.clone())?;
+        
+        // Create the plugin wrapper
+        let output_channels = if info.audio_outputs > 0 { 
+            info.audio_outputs as usize * 2 // Assume stereo buses 
+        } else { 
+            2 
         };
         
         let plugin = Plugin {
@@ -119,10 +119,10 @@ impl Vst3Host {
             is_processing: false,
             sample_rate: self.config.sample_rate,
             block_size: self.config.block_size,
-            audio_levels: Arc::new(Mutex::new(crate::audio::AudioLevels::new(2))),
+            audio_levels: Arc::new(Mutex::new(crate::audio::AudioLevels::new(output_channels))),
             parameter_change_callback: None,
             audio_callback: None,
-            internal: None,
+            internal: Some(Box::new(plugin_impl)),
         };
         
         Ok(plugin)
@@ -231,7 +231,7 @@ impl Vst3Host {
     }
     
     /// Create a host with a custom audio backend
-    pub fn with_backend<B: crate::backends::AudioBackend>(backend: B) -> Result<Self> {
+    pub fn with_backend<B: crate::backends::AudioBackend>(_backend: B) -> Result<Self> {
         // This will be implemented when we create the AudioBackend trait
         Self::new()
     }

@@ -1,16 +1,16 @@
 # vst3-host
 
-A safe, simple, and lightweight Rust library for hosting VST3 plugins.
+A Rust library for hosting VST3 plugins with a safe API.
 
 ## Features
 
-- 🛡️ **Safe by Default** - All unsafe VST3 COM interactions are hidden behind a safe Rust API
-- 🚀 **Simple to Use** - Load and play a plugin in under 10 lines of code
-- 🔊 **Batteries Included** - Comes with CPAL audio backend, ready to make sound
-- 💪 **Crash Resistant** - Plugin crashes won't take down your host (process isolation)
-- 🎹 **Full MIDI Support** - Send notes, CCs, and other MIDI events
-- 🎛️ **Parameter Control** - Get, set, and automate plugin parameters
-- 📊 **Real-time Monitoring** - VU meters, peak levels, and parameter change callbacks
+- Safe API - No unsafe code required by library users
+- Simple to use - Minimal boilerplate for common tasks
+- CPAL audio backend included
+- Process isolation for plugin crash protection
+- Full MIDI support
+- Parameter control and automation
+- Real-time audio level monitoring
 
 ## Quick Start
 
