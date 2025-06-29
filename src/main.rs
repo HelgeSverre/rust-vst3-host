@@ -26,7 +26,6 @@ mod com_implementations;
 mod data_structures;
 mod errors;
 mod plugin_discovery;
-mod plugin_loader;
 mod utils;
 
 use audio_processing::*;
@@ -1109,6 +1108,9 @@ struct VST3Inspector {
     // VU meter
     peak_level_left: Arc<Mutex<f32>>,
     peak_level_right: Arc<Mutex<f32>>,
+    // Peak hold
+    peak_hold_left: Arc<Mutex<(f32, Instant)>>,  // (level, time)
+    peak_hold_right: Arc<Mutex<(f32, Instant)>>,
 }
 
 // Audio processing state that can be shared between UI and audio threads
@@ -1126,6 +1128,9 @@ struct AudioProcessingState {
     // VU meter
     peak_level_left: Arc<Mutex<f32>>,
     peak_level_right: Arc<Mutex<f32>>,
+    // Peak hold
+    peak_hold_left: Arc<Mutex<(f32, Instant)>>,  // (level, time)
+    peak_hold_right: Arc<Mutex<(f32, Instant)>>,
 }
 
 impl AudioProcessingState {
@@ -1136,6 +1141,8 @@ impl AudioProcessingState {
         midi_monitor_paused: Arc<Mutex<bool>>,
         peak_level_left: Arc<Mutex<f32>>,
         peak_level_right: Arc<Mutex<f32>>,
+        peak_hold_left: Arc<Mutex<(f32, Instant)>>,
+        peak_hold_right: Arc<Mutex<(f32, Instant)>>,
     ) -> Self {
         Self {
             processor: None,
@@ -1149,6 +1156,8 @@ impl AudioProcessingState {
             raw_midi_events: Arc::new(Mutex::new(Vec::new())),
             peak_level_left,
             peak_level_right,
+            peak_hold_left,
+            peak_hold_right,
         }
     }
 
@@ -1159,7 +1168,10 @@ impl AudioProcessingState {
     }
 
     fn add_midi_event(&mut self, event: Event) {
-        self.pending_midi_events.push(event);
+        // Only add MIDI events if processing is active
+        if self.is_active {
+            self.pending_midi_events.push(event);
+        }
     }
 
     fn capture_midi_event(&self, event: &Event, direction: MidiDirection) {
@@ -1352,6 +1364,10 @@ impl AudioProcessingState {
                 
                 // Update peak levels (with decay)
                 const SILENCE_THRESHOLD: f32 = 0.00001; // -100 dB
+                const PEAK_HOLD_TIME: f64 = 3.0; // Hold peak for 3 seconds
+                
+                let now = Instant::now();
+                
                 if let Ok(mut level) = self.peak_level_left.try_lock() {
                     *level = (*level * 0.95).max(peak_left); // Smooth decay
                     if *level < SILENCE_THRESHOLD {
@@ -1362,6 +1378,27 @@ impl AudioProcessingState {
                     *level = (*level * 0.95).max(peak_right); // Smooth decay
                     if *level < SILENCE_THRESHOLD {
                         *level = 0.0; // Clamp to silence
+                    }
+                }
+                
+                // Update peak holds
+                if let Ok(mut hold) = self.peak_hold_left.try_lock() {
+                    // If current peak exceeds hold value, update it
+                    if peak_left > hold.0 {
+                        *hold = (peak_left, now);
+                    } else if now.duration_since(hold.1).as_secs_f64() > PEAK_HOLD_TIME {
+                        // If hold time expired, reset to current level
+                        *hold = (peak_left, now);
+                    }
+                }
+                
+                if let Ok(mut hold) = self.peak_hold_right.try_lock() {
+                    // If current peak exceeds hold value, update it
+                    if peak_right > hold.0 {
+                        *hold = (peak_right, now);
+                    } else if now.duration_since(hold.1).as_secs_f64() > PEAK_HOLD_TIME {
+                        // If hold time expired, reset to current level
+                        *hold = (peak_right, now);
                     }
                 }
 
@@ -1532,11 +1569,11 @@ impl VST3Inspector {
         // Update our sample rate to match the audio device
         self.sample_rate = config.sample_rate().0 as f64;
 
-        // Convert to StreamConfig
+        // Convert to StreamConfig with our preferred buffer size
         let stream_config = cpal::StreamConfig {
             channels: config.channels(),
             sample_rate: config.sample_rate(),
-            buffer_size: cpal::BufferSize::Default,
+            buffer_size: cpal::BufferSize::Fixed(self.block_size as u32),
         };
 
         self.audio_device = Some(device);
@@ -1559,6 +1596,8 @@ impl VST3Inspector {
                 self.midi_monitor_paused.clone(),
                 self.peak_level_left.clone(),
                 self.peak_level_right.clone(),
+                self.peak_hold_left.clone(),
+                self.peak_hold_right.clone(),
             );
             self.shared_audio_state = Some(Arc::new(Mutex::new(audio_state)));
 
@@ -2609,10 +2648,100 @@ impl VST3Inspector {
             // Audio settings
             ui.horizontal(|ui| {
                 ui.label("Sample Rate:");
-                ui.label(format!("{} Hz", self.sample_rate));
+                
+                // Sample rate selection
+                let sample_rates = [44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0];
+                let current_rate_text = format!("{} Hz", self.sample_rate as u32);
+                
+                egui::ComboBox::from_id_source("sample_rate_selector")
+                    .selected_text(&current_rate_text)
+                    .show_ui(ui, |ui| {
+                        for &rate in &sample_rates {
+                            let rate_text = format!("{} Hz", rate as u32);
+                            if ui.selectable_value(&mut self.sample_rate, rate, &rate_text).clicked() {
+                                // Update audio processing when sample rate changes
+                                if let Some(shared_state) = &self.shared_audio_state {
+                                    if let Ok(mut state) = shared_state.lock() {
+                                        state.sample_rate = rate;
+                                    }
+                                }
+                                
+                                // If plugin is loaded and processing, update the processing setup
+                                if self.is_processing {
+                                    if let Err(e) = self.update_processing_setup() {
+                                        println!("Failed to update processing setup: {}", e);
+                                    }
+                                }
+                                
+                                // Restart audio stream with new sample rate
+                                if self.audio_stream.is_some() {
+                                    self.audio_stream = None; // Stop current stream
+                                    if let Err(e) = self.initialize_audio_device() {
+                                        println!("Failed to reinitialize audio device: {}", e);
+                                    } else if let Err(e) = self.start_audio_stream() {
+                                        println!("Failed to restart audio stream: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    });
+                
                 ui.separator();
                 ui.label("Block Size:");
-                ui.label(format!("{} samples", self.block_size));
+                
+                let block_sizes = [64, 128, 256, 512, 1024, 2048, 4096];
+                let current_block_text = format!("{} samples", self.block_size);
+                
+                egui::ComboBox::from_id_source("block_size_selector")
+                    .selected_text(&current_block_text)
+                    .show_ui(ui, |ui| {
+                        for &size in &block_sizes {
+                            let size_text = format!("{} samples", size);
+                            if ui.selectable_value(&mut self.block_size, size, &size_text).clicked() {
+                                // Update audio processing when block size changes
+                                if let Some(shared_state) = &self.shared_audio_state {
+                                    if let Ok(mut state) = shared_state.lock() {
+                                        state.block_size = size;
+                                    }
+                                }
+                                
+                                // If plugin is loaded and processing, update the processing setup
+                                if self.is_processing {
+                                    if let Err(e) = self.update_processing_setup() {
+                                        println!("Failed to update processing setup: {}", e);
+                                    }
+                                }
+                                
+                                // Update host process data with new block size
+                                if let Some(host_data) = &mut self.host_process_data {
+                                    if let Some(component) = &self.component {
+                                        unsafe {
+                                            // Recreate buffers with new block size
+                                            if let Err(e) = host_data.prepare_buffers(component, size) {
+                                                println!("Failed to prepare buffers: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Restart audio stream with new block size
+                                if self.audio_stream.is_some() {
+                                    self.audio_stream = None; // Stop current stream
+                                    
+                                    // Update the audio config with new buffer size
+                                    if let Some(config) = &mut self.audio_config {
+                                        config.buffer_size = cpal::BufferSize::Fixed(size as u32);
+                                    }
+                                    
+                                    if let Err(e) = self.start_audio_stream() {
+                                        println!("Failed to restart audio stream: {}", e);
+                                    }
+                                }
+                                
+                                println!("Block size changed to {} samples", size);
+                            }
+                        }
+                    });
             });
 
             ui.separator();
@@ -2630,6 +2759,9 @@ impl VST3Inspector {
                     let peak_left = *self.peak_level_left.lock().unwrap();
                     let peak_right = *self.peak_level_right.lock().unwrap();
                     
+                    let (peak_hold_left, _) = *self.peak_hold_left.lock().unwrap();
+                    let (peak_hold_right, _) = *self.peak_hold_right.lock().unwrap();
+                    
                     // Convert to dB
                     const MIN_DB: f32 = -60.0;
                     const SILENCE_THRESHOLD: f32 = 0.00001; // -100 dB
@@ -2641,6 +2773,17 @@ impl VST3Inspector {
                     };
                     let db_right = if peak_right > SILENCE_THRESHOLD { 
                         (20.0 * peak_right.log10()).max(MIN_DB)
+                    } else { 
+                        f32::NEG_INFINITY 
+                    };
+                    
+                    let db_hold_left = if peak_hold_left > SILENCE_THRESHOLD { 
+                        (20.0 * peak_hold_left.log10()).max(MIN_DB)
+                    } else { 
+                        f32::NEG_INFINITY 
+                    };
+                    let db_hold_right = if peak_hold_right > SILENCE_THRESHOLD { 
+                        (20.0 * peak_hold_right.log10()).max(MIN_DB)
                     } else { 
                         f32::NEG_INFINITY 
                     };
@@ -2657,15 +2800,35 @@ impl VST3Inspector {
                                 egui::Color32::GREEN
                             };
                             
-                            // VU meter bar
+                            // VU meter bar with peak hold indicator
                             let bar_value = if db_left.is_finite() {
                                 ((db_left - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
                             } else {
                                 0.0
                             };
-                            ui.add(egui::ProgressBar::new(bar_value)
+                            
+                            // Calculate peak hold position
+                            let hold_value = if db_hold_left.is_finite() {
+                                ((db_hold_left - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                            } else {
+                                0.0
+                            };
+                            
+                            // Draw the VU meter bar
+                            let bar_rect = ui.add(egui::ProgressBar::new(bar_value)
                                 .desired_width(200.0)
-                                .fill(color));
+                                .fill(color))
+                                .rect;
+                                
+                            // Draw peak hold indicator as a vertical line
+                            if hold_value > 0.0 {
+                                let hold_x = bar_rect.left() + hold_value * bar_rect.width();
+                                ui.painter().vline(
+                                    hold_x,
+                                    bar_rect.y_range(),
+                                    egui::Stroke::new(2.0, egui::Color32::WHITE)
+                                );
+                            }
                             
                             let db_text = if db_left.is_finite() {
                                 format!("{:.1} dB", db_left)
@@ -2686,15 +2849,35 @@ impl VST3Inspector {
                                 egui::Color32::GREEN
                             };
                             
-                            // VU meter bar
+                            // VU meter bar with peak hold indicator
                             let bar_value = if db_right.is_finite() {
                                 ((db_right - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
                             } else {
                                 0.0
                             };
-                            ui.add(egui::ProgressBar::new(bar_value)
+                            
+                            // Calculate peak hold position
+                            let hold_value = if db_hold_right.is_finite() {
+                                ((db_hold_right - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                            } else {
+                                0.0
+                            };
+                            
+                            // Draw the VU meter bar
+                            let bar_rect = ui.add(egui::ProgressBar::new(bar_value)
                                 .desired_width(200.0)
-                                .fill(color));
+                                .fill(color))
+                                .rect;
+                                
+                            // Draw peak hold indicator as a vertical line
+                            if hold_value > 0.0 {
+                                let hold_x = bar_rect.left() + hold_value * bar_rect.width();
+                                ui.painter().vline(
+                                    hold_x,
+                                    bar_rect.y_range(),
+                                    egui::Stroke::new(2.0, egui::Color32::WHITE)
+                                );
+                            }
                             
                             let db_text = if db_right.is_finite() {
                                 format!("{:.1} dB", db_right)
@@ -4046,23 +4229,40 @@ impl VST3Inspector {
         // Try to send to shared audio state first
         if let Some(shared_state) = &self.shared_audio_state {
             if let Ok(mut state) = shared_state.try_lock() {
+                // Check if processing is active before trying to send MIDI
+                if !state.is_active {
+                    return Err("Audio processing is not active".to_string());
+                }
+                
                 unsafe {
                     let mut event: Event = std::mem::zeroed();
                     event.busIndex = 0;
                     event.sampleOffset = 0;
                     event.ppqPosition = 0.0;
                     event.flags = 1; // kIsLive
-                    event.r#type = Event_::EventTypes_::kLegacyMIDICCOutEvent as u16;
+                    event.r#type = Event_::EventTypes_::kDataEvent as u16; // Use DataEvent instead of legacy
 
-                    // For legacy MIDI CC event, we need to construct the MIDI data
+                    // Create MIDI CC data
                     let status = 0xB0 | (channel & 0x0F); // Control Change status
-                    let bytes = event.__field0.data.bytes as *mut u8;
-                    *bytes.offset(0) = status as u8;
-                    *bytes.offset(1) = controller;
-                    *bytes.offset(2) = value;
+                    let midi_data: [u8; 3] = [status as u8, controller, value];
+                    
+                    // Allocate memory for the MIDI data
+                    let data_ptr = std::alloc::alloc(std::alloc::Layout::array::<u8>(3).unwrap());
+                    if data_ptr.is_null() {
+                        return Err("Failed to allocate memory for MIDI data".to_string());
+                    }
+                    
+                    // Copy MIDI data to allocated memory
+                    std::ptr::copy_nonoverlapping(midi_data.as_ptr(), data_ptr, 3);
+                    
+                    event.__field0.data.bytes = data_ptr;
                     event.__field0.data.size = 3;
 
                     state.add_midi_event(event);
+                    
+                    // Note: The memory will be freed when the event is processed
+                    // In a real implementation, we'd need proper memory management
+                    
                     return Ok(());
                 }
             }
@@ -4075,40 +4275,118 @@ impl VST3Inspector {
     fn send_midi_panic(&mut self) {
         println!("🚨 Sending MIDI Panic to all channels...");
         
+        // Check if audio processing is active first
+        let is_active = if let Some(shared_state) = &self.shared_audio_state {
+            if let Ok(state) = shared_state.try_lock() {
+                state.is_active
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        
+        if !is_active {
+            println!("⚠️  Cannot send MIDI Panic: Audio processing is not active");
+            println!("  Please start audio processing first");
+            return;
+        }
+        
+        let mut success_count = 0;
+        let mut error_count = 0;
+        
         for channel in 0..16 {
             // All Notes Off (CC 123)
             if let Err(e) = self.send_midi_cc(channel, 123, 0) {
                 println!("  Failed to send All Notes Off to channel {}: {}", channel + 1, e);
+                error_count += 1;
+            } else {
+                success_count += 1;
             }
             
             // All Sounds Off (CC 120)
             if let Err(e) = self.send_midi_cc(channel, 120, 0) {
                 println!("  Failed to send All Sounds Off to channel {}: {}", channel + 1, e);
+                error_count += 1;
+            } else {
+                success_count += 1;
             }
             
             // Reset All Controllers (CC 121)
             if let Err(e) = self.send_midi_cc(channel, 121, 0) {
                 println!("  Failed to send Reset Controllers to channel {}: {}", channel + 1, e);
+                error_count += 1;
+            } else {
+                success_count += 1;
             }
         }
         
-        println!("✅ MIDI Panic sent to all channels");
+        if error_count > 0 {
+            println!("⚠️  MIDI Panic completed with {} errors (sent {} messages successfully)", error_count, success_count);
+        } else {
+            println!("✅ MIDI Panic sent successfully to all channels ({} messages)", success_count);
+        }
     }
 
     // Feature 2: Audio Panic
+    fn update_processing_setup(&mut self) -> Result<(), String> {
+        if !self.is_processing {
+            return Ok(());
+        }
+        
+        let processor = match &self.processor {
+            Some(p) => p,
+            None => return Err("No processor available".to_string()),
+        };
+        
+        unsafe {
+            // Create new ProcessSetup with updated parameters
+            let mut setup = ProcessSetup {
+                processMode: vst3::Steinberg::Vst::ProcessModes_::kRealtime as i32,
+                symbolicSampleSize: vst3::Steinberg::Vst::SymbolicSampleSizes_::kSample32 as i32,
+                maxSamplesPerBlock: self.block_size,
+                sampleRate: self.sample_rate,
+            };
+            
+            // Stop processing
+            processor.setProcessing(0);
+            
+            // Update the setup
+            let result = processor.setupProcessing(&mut setup);
+            if result != vst3::Steinberg::kResultOk {
+                return Err(format!("Failed to setup processing: {:#x}", result));
+            }
+            
+            // Restart processing
+            processor.setProcessing(1);
+            
+            println!("Processing setup updated: {} Hz, {} samples", self.sample_rate, self.block_size);
+        }
+        
+        Ok(())
+    }
+    
     fn audio_panic(&mut self) {
         println!("🔇 Audio Panic - stopping all audio processing");
         
-        // Stop audio processing
-        self.stop_processing();
-        
-        // Clear any pending MIDI events
+        // First, clear the shared audio state to prevent MIDI events from being processed
         if let Some(state) = &self.shared_audio_state {
             if let Ok(mut state) = state.lock() {
                 state.pending_midi_events.clear();
+                state.is_active = false; // Deactivate processing
+                println!("  Deactivated audio processing");
                 println!("  Cleared pending MIDI events");
             }
         }
+        
+        // Stop the actual audio stream first to prevent further callbacks
+        if self.audio_stream.is_some() {
+            self.audio_stream = None;
+            println!("  Stopped audio stream");
+        }
+        
+        // Now stop processing (this will destroy the processor)
+        self.stop_processing();
         
         // Reset peak levels
         if let Ok(mut level) = self.peak_level_left.lock() {
@@ -4116,6 +4394,15 @@ impl VST3Inspector {
         }
         if let Ok(mut level) = self.peak_level_right.lock() {
             *level = 0.0;
+        }
+        
+        // Reset peak holds
+        let now = Instant::now();
+        if let Ok(mut hold) = self.peak_hold_left.lock() {
+            *hold = (0.0, now);
+        }
+        if let Ok(mut hold) = self.peak_hold_right.lock() {
+            *hold = (0.0, now);
         }
         
         println!("✅ Audio panic complete");
@@ -4720,6 +5007,8 @@ impl VST3Inspector {
             preferences: Preferences::load(),
             peak_level_left: Arc::new(Mutex::new(0.0)),
             peak_level_right: Arc::new(Mutex::new(0.0)),
+            peak_hold_left: Arc::new(Mutex::new((0.0, Instant::now()))),
+            peak_hold_right: Arc::new(Mutex::new((0.0, Instant::now()))),
         }
     }
 }

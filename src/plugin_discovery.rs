@@ -1,6 +1,3 @@
-pub fn scan_vst3_directories() -> Vec<String> {
-    scan_vst3_directories_with_custom(&[])
-}
 
 pub fn scan_vst3_directories_with_custom(custom_paths: &[String]) -> Vec<String> {
     let mut plugins = Vec::new();
