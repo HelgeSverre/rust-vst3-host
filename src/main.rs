@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+#![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -7,11 +8,10 @@ use std::collections::HashSet;
 use std::ptr;
 use std::sync::Mutex;
 use std::time::Instant;
-use vst3::Steinberg::Vst::{BusDirections_::*, IAudioProcessorTrait, MediaTypes_::*};
-// Import the constants
 use vst3::Steinberg::Vst::{
-    Event, Event_, IAudioProcessor, IComponent, IComponentTrait, IConnectionPoint,
-    IConnectionPointTrait, IEditController, IEditControllerTrait, ProcessSetup,
+    BusDirections_::*, Event, Event_, IAudioProcessor, IAudioProcessorTrait, IComponent,
+    IComponentTrait, IConnectionPoint, IConnectionPointTrait, IEditController,
+    IEditControllerTrait, IEventList, IEventListTrait, MediaTypes_::*, ProcessSetup,
 };
 use vst3::Steinberg::{IPlugView, IPlugViewTrait, IPluginFactoryTrait};
 use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory};
@@ -62,6 +62,98 @@ use winapi::um::winuser::{
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, SW_SHOW, WM_DESTROY, WM_QUIT, WNDCLASSEXW,
     WS_OVERLAPPEDWINDOW,
 };
+
+// MIDI note conversion helpers
+fn midi_note_to_name(note: u8) -> String {
+    let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    // Using the convention where C3 = MIDI 60
+    let octave = (note as i32 / 12) - 2;
+    let note_in_octave = note % 12;
+    format!("{}{}", note_names[note_in_octave as usize], octave)
+}
+
+fn note_name_to_midi(name: &str) -> Option<u8> {
+    // Parse note name like "C#4" or "Bb3"
+    let name = name.trim().to_uppercase();
+    
+    // Extract the note letter and accidental
+    let (note_part, octave_str) = if name.contains('#') {
+        let parts: Vec<&str> = name.split('#').collect();
+        if parts.len() != 2 { return None; }
+        (format!("{}#", parts[0]), parts[1])
+    } else if name.contains('B') && name.len() > 2 && &name[1..2] == "B" {
+        // Handle Bb notation
+        (format!("{}B", &name[0..1]), &name[2..])
+    } else {
+        // Natural note
+        let mut chars = name.chars();
+        let note = chars.next()?.to_string();
+        let octave = chars.as_str();
+        (note, octave)
+    };
+    
+    // Parse octave
+    let octave: i32 = octave_str.parse().ok()?;
+    
+    // Convert note to semitone offset within octave
+    let semitone = match note_part.as_str() {
+        "C" => 0,
+        "C#" | "DB" => 1,
+        "D" => 2,
+        "D#" | "EB" => 3,
+        "E" => 4,
+        "F" => 5,
+        "F#" | "GB" => 6,
+        "G" => 7,
+        "G#" | "AB" => 8,
+        "A" => 9,
+        "A#" | "BB" => 10,
+        "B" => 11,
+        _ => return None,
+    };
+    
+    // Calculate MIDI note number
+    // Using the convention where C3 = MIDI 60
+    let midi_note = (octave + 1) * 12 + 12 + semitone;
+    
+    if midi_note >= 0 && midi_note <= 127 {
+        Some(midi_note as u8)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_midi_conversions() {
+        // Test some known values using C3=60 convention
+        assert_eq!(note_name_to_midi("C3"), Some(60)); // User's desired C3
+        assert_eq!(note_name_to_midi("C2"), Some(48)); 
+        assert_eq!(note_name_to_midi("A3"), Some(69)); // Concert A
+        assert_eq!(note_name_to_midi("C-2"), Some(0));
+        assert_eq!(note_name_to_midi("G8"), Some(127));
+        
+        // Test reverse conversion
+        assert_eq!(midi_note_to_name(60), "C3");
+        assert_eq!(midi_note_to_name(48), "C2");
+        assert_eq!(midi_note_to_name(69), "A3");
+        assert_eq!(midi_note_to_name(0), "C-2");
+        assert_eq!(midi_note_to_name(127), "G8");
+        
+        // Test accidentals
+        assert_eq!(note_name_to_midi("C#3"), Some(61));
+        assert_eq!(note_name_to_midi("Db3"), Some(61));
+        assert_eq!(note_name_to_midi("F#3"), Some(66));
+        
+        // Print for debugging
+        println!("C3 = MIDI {}", note_name_to_midi("C3").unwrap());
+        println!("C4 = MIDI {}", note_name_to_midi("C4").unwrap());
+        println!("C5 = MIDI {}", note_name_to_midi("C5").unwrap());
+    }
+}
 
 // Platform-specific plugin paths - adjust these for your system
 #[cfg(target_os = "macos")]
@@ -853,9 +945,8 @@ struct MidiEvent {
     channel: u8,
     data1: u8,
     data2: u8,
-    raw_type: u16,  // For VST3 event type
+    raw_type: u16, // For VST3 event type
 }
-
 
 #[derive(Debug, Clone, PartialEq)]
 enum MidiEventType {
@@ -920,7 +1011,7 @@ impl Default for MidiEventFilter {
             show_aftertouch: true,
             show_system_events: true,
             show_clock_events: true,
-            show_active_sensing: false,  // Off by default as it's spammy
+            show_active_sensing: false, // Off by default as it's spammy
         }
     }
 }
@@ -971,6 +1062,7 @@ struct VST3Inspector {
     shared_audio_state: Option<Arc<Mutex<AudioProcessingState>>>,
     // Virtual keyboard state
     pressed_keys: HashSet<i16>,
+    selected_midi_channel: i16, // 0-15 for MIDI channels 1-16
     // MIDI monitoring
     midi_events: Arc<Mutex<Vec<MidiEvent>>>,
     midi_event_filter: MidiEventFilter,
@@ -988,10 +1080,17 @@ struct AudioProcessingState {
     block_size: i32,
     midi_monitor: Arc<Mutex<Vec<MidiEvent>>>,
     midi_monitor_paused: Arc<Mutex<bool>>,
+    // Raw event storage for MonitoredEventList
+    raw_midi_events: Arc<Mutex<Vec<(Instant, MidiDirection, Event)>>>,
 }
 
 impl AudioProcessingState {
-    fn new(sample_rate: f64, block_size: i32, midi_monitor: Arc<Mutex<Vec<MidiEvent>>>, midi_monitor_paused: Arc<Mutex<bool>>) -> Self {
+    fn new(
+        sample_rate: f64,
+        block_size: i32,
+        midi_monitor: Arc<Mutex<Vec<MidiEvent>>>,
+        midi_monitor_paused: Arc<Mutex<bool>>,
+    ) -> Self {
         Self {
             processor: None,
             component: None,
@@ -1001,6 +1100,7 @@ impl AudioProcessingState {
             block_size,
             midi_monitor,
             midi_monitor_paused,
+            raw_midi_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -1016,7 +1116,7 @@ impl AudioProcessingState {
 
     fn capture_midi_event(&self, event: &Event, direction: MidiDirection) {
         use Event_::EventTypes_::*;
-        
+
         let event_type = match event.r#type as u32 {
             kNoteOnEvent => {
                 let note_on = unsafe { event.__field0.noteOn };
@@ -1040,12 +1140,12 @@ impl AudioProcessingState {
                 for i in 0..data.size as usize {
                     bytes.push(unsafe { *data.bytes.add(i) });
                 }
-                
+
                 if bytes.len() >= 1 {
                     let status = bytes[0];
                     let data1 = if bytes.len() > 1 { bytes[1] } else { 0 };
                     let data2 = if bytes.len() > 2 { bytes[2] } else { 0 };
-                    
+
                     match status & 0xF0 {
                         0x80 => MidiEventType::NoteOff {
                             pitch: data1 as i16,
@@ -1090,7 +1190,7 @@ impl AudioProcessingState {
                 data2: 0,
             },
         };
-        
+
         let midi_event = MidiEvent {
             timestamp: Instant::now(),
             direction,
@@ -1100,7 +1200,7 @@ impl AudioProcessingState {
             data2: 0,
             raw_type: event.r#type,
         };
-        
+
         // Add to monitor list
         if let Ok(mut events) = self.midi_monitor.try_lock() {
             events.push(midi_event);
@@ -1127,8 +1227,13 @@ impl AudioProcessingState {
         };
 
         unsafe {
-            // Create fresh process data for this audio callback
-            let mut process_data = HostProcessData::new(self.block_size, self.sample_rate);
+            // Create fresh process data for this audio callback with monitoring
+            let raw_events = self.raw_midi_events.clone();
+            let mut process_data = HostProcessData::new_with_monitoring(
+                self.block_size, 
+                self.sample_rate,
+                raw_events
+            );
 
             // Prepare buffers for the current component
             if let Err(_) = process_data.prepare_buffers(component, self.block_size) {
@@ -1138,16 +1243,21 @@ impl AudioProcessingState {
             // Clear buffers
             process_data.clear_buffers();
 
-            // Add any pending MIDI events and capture them for monitoring
-            let paused = *self.midi_monitor_paused.lock().unwrap();
-            if !paused {
-                for event in &self.pending_midi_events {
-                    self.capture_midi_event(event, MidiDirection::Input);
+            // Add any pending MIDI events
+            // The MonitoredEventList will automatically capture them
+            for mut event in self.pending_midi_events.drain(..) {
+                if process_data.monitored_input_events.is_some() {
+                    // Use the COM interface to add events
+                    let event_ptr = &mut event as *mut Event;
+                    // Create a temporary ComPtr to call the method
+                    if let Some(event_list) = ComPtr::<IEventList>::from_raw(process_data.input_events_ptr) {
+                        event_list.addEvent(event_ptr);
+                        // Don't drop the ComPtr - just forget it to avoid decrementing ref count
+                        std::mem::forget(event_list);
+                    }
+                } else {
+                    process_data.input_events.events.lock().unwrap().push(event);
                 }
-            }
-            
-            for event in self.pending_midi_events.drain(..) {
-                process_data.input_events.events.lock().unwrap().push(event);
             }
 
             // Update time - use a simple counter for now
@@ -1159,13 +1269,7 @@ impl AudioProcessingState {
             let result = processor.process(&mut process_data.process_data);
 
             if result == vst3::Steinberg::kResultOk {
-                // Capture output MIDI events
-                if !paused {
-                    let output_events = process_data.output_events.get_events();
-                    for event in &output_events {
-                        self.capture_midi_event(event, MidiDirection::Output);
-                    }
-                }
+                // Output events are automatically captured by MonitoredEventList
                 // Copy output to buffer
                 let channels = output.len() / self.block_size as usize;
                 let mut out_idx = 0;
@@ -1214,6 +1318,14 @@ enum ParameterFilter {
 
 impl eframe::App for VST3Inspector {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Process raw MIDI events from the audio thread
+        let had_new_midi_events = self.process_raw_midi_events();
+        
+        // Request repaint if we have new MIDI events and we're on the MIDI Monitor tab
+        if had_new_midi_events && self.current_tab == Tab::MidiMonitor {
+            ctx.request_repaint();
+        }
+        
         // Check for parameter changes from plugin GUI
         if let Ok(mut changes) = self.parameter_changes.try_lock() {
             if !changes.is_empty() {
@@ -1367,10 +1479,10 @@ impl VST3Inspector {
         // Initialize shared audio state if not already done
         if self.shared_audio_state.is_none() {
             let audio_state = AudioProcessingState::new(
-                self.sample_rate, 
+                self.sample_rate,
                 self.block_size,
                 self.midi_events.clone(),
-                self.midi_monitor_paused.clone()
+                self.midi_monitor_paused.clone(),
             );
             self.shared_audio_state = Some(Arc::new(Mutex::new(audio_state)));
 
@@ -2379,7 +2491,26 @@ impl VST3Inspector {
 
             // Virtual keyboard
             ui.group(|ui| {
-                ui.label("Virtual MIDI Keyboard (3 Octaves: C3-C6):");
+                ui.horizontal(|ui| {
+                    ui.label("Virtual MIDI Keyboard:");
+                    
+                    // MIDI channel selector
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Create channel options
+                        let channel_names: Vec<String> = (1..=16).map(|ch| format!("Channel {}", ch)).collect();
+                        let selected_text = &channel_names[self.selected_midi_channel as usize];
+                        
+                        egui::ComboBox::from_label("MIDI Channel")
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                for (idx, channel_name) in channel_names.iter().enumerate() {
+                                    ui.selectable_value(&mut self.selected_midi_channel, idx as i16, channel_name);
+                                }
+                            });
+                    });
+                });
+                
+                ui.add_space(4.0);
                 self.draw_piano_keyboard(ui);
             });
 
@@ -2484,7 +2615,7 @@ impl VST3Inspector {
                 ui.separator();
                 let event_count = self.midi_events.lock().unwrap().len();
                 ui.label(format!("Events: {}", event_count));
-                
+
                 if event_count >= self.max_midi_events {
                     ui.colored_label(egui::Color32::YELLOW, "(buffer full)");
                 }
@@ -2497,14 +2628,23 @@ impl VST3Inspector {
                 ui.horizontal_wrapped(|ui| {
                     ui.checkbox(&mut self.midi_event_filter.show_note_events, "Note On/Off");
                     ui.checkbox(&mut self.midi_event_filter.show_cc_events, "Control Change");
-                    ui.checkbox(&mut self.midi_event_filter.show_program_change, "Program Change");
+                    ui.checkbox(
+                        &mut self.midi_event_filter.show_program_change,
+                        "Program Change",
+                    );
                     ui.checkbox(&mut self.midi_event_filter.show_pitch_bend, "Pitch Bend");
                     ui.checkbox(&mut self.midi_event_filter.show_aftertouch, "Aftertouch");
                     ui.checkbox(&mut self.midi_event_filter.show_system_events, "System");
-                    ui.checkbox(&mut self.midi_event_filter.show_clock_events, "Clock/Timing");
-                    ui.checkbox(&mut self.midi_event_filter.show_active_sensing, "Active Sensing");
+                    ui.checkbox(
+                        &mut self.midi_event_filter.show_clock_events,
+                        "Clock/Timing",
+                    );
+                    ui.checkbox(
+                        &mut self.midi_event_filter.show_active_sensing,
+                        "Active Sensing",
+                    );
                 });
-                
+
                 ui.horizontal(|ui| {
                     if ui.button("Show All").clicked() {
                         self.midi_event_filter = MidiEventFilter {
@@ -2535,64 +2675,105 @@ impl VST3Inspector {
 
             ui.separator();
 
-            // Event list
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    // Table header
-                    ui.horizontal(|ui| {
-                        ui.add_sized([80.0, 20.0], egui::Label::new(egui::RichText::new("Time").strong()));
-                        ui.add_sized([50.0, 20.0], egui::Label::new(egui::RichText::new("Dir").strong()));
-                        ui.add_sized([120.0, 20.0], egui::Label::new(egui::RichText::new("Type").strong()));
-                        ui.add_sized([30.0, 20.0], egui::Label::new(egui::RichText::new("Ch").strong()));
-                        ui.add_sized([80.0, 20.0], egui::Label::new(egui::RichText::new("Data").strong()));
-                        ui.label(egui::RichText::new("Description").strong());
+            // Event list using proper table
+            use egui_extras::{Column, TableBuilder};
+            
+            // Get events and calculate start time
+            let events = self.midi_events.lock().unwrap().clone();
+            let start_time = events
+                .first()
+                .map(|e| e.timestamp)
+                .unwrap_or_else(Instant::now);
+            
+            // Filter events
+            let filtered_events: Vec<_> = events
+                .iter()
+                .rev() // Show newest first
+                .filter(|event| self.should_show_event(event))
+                .collect();
+            
+            TableBuilder::new(ui)
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .column(Column::exact(80.0))  // Time
+                .column(Column::exact(50.0))  // Direction
+                .column(Column::exact(100.0)) // Type
+                .column(Column::exact(40.0))  // Channel
+                .column(Column::exact(80.0))  // Data
+                .column(Column::remainder())  // Description
+                .header(20.0, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("Time");
                     });
-                    
-                    ui.separator();
-
-                    // Show events in reverse order (newest first)
-                    let events = self.midi_events.lock().unwrap().clone();
-                    let start_time = events.first().map(|e| e.timestamp).unwrap_or_else(Instant::now);
-                    
-                    for event in events.iter().rev() {
-                        if self.should_show_event(event) {
-                            ui.horizontal(|ui| {
-                                // Time
+                    header.col(|ui| {
+                        ui.strong("Dir");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Type");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Ch");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Data");
+                    });
+                    header.col(|ui| {
+                        ui.strong("Description");
+                    });
+                })
+                .body(|mut body| {
+                    for event in filtered_events {
+                        body.row(20.0, |mut row| {
+                            // Time
+                            row.col(|ui| {
                                 let elapsed = event.timestamp.duration_since(start_time).as_secs_f64();
                                 ui.monospace(format!("{:8.3}", elapsed));
-                                
-                                // Direction
+                            });
+                            
+                            // Direction
+                            row.col(|ui| {
                                 let dir_color = match event.direction {
                                     MidiDirection::Input => egui::Color32::from_rgb(100, 200, 100),
                                     MidiDirection::Output => egui::Color32::from_rgb(100, 150, 200),
                                 };
-                                ui.colored_label(dir_color, match event.direction {
-                                    MidiDirection::Input => "In ",
-                                    MidiDirection::Output => "Out",
-                                });
-                                
-                                // Type
-                                ui.monospace(format!("{:<12}", self.event_type_name(&event.event_type)));
-                                
-                                // Channel
+                                ui.colored_label(
+                                    dir_color,
+                                    match event.direction {
+                                        MidiDirection::Input => "In",
+                                        MidiDirection::Output => "Out",
+                                    },
+                                );
+                            });
+                            
+                            // Type
+                            row.col(|ui| {
+                                ui.monospace(self.event_type_name(&event.event_type));
+                            });
+                            
+                            // Channel
+                            row.col(|ui| {
                                 let channel = match &event.event_type {
-                                    MidiEventType::NoteOn { channel, .. } |
-                                    MidiEventType::NoteOff { channel, .. } |
-                                    MidiEventType::ControlChange { channel, .. } |
-                                    MidiEventType::ProgramChange { channel, .. } |
-                                    MidiEventType::PitchBend { channel, .. } => *channel + 1,
+                                    MidiEventType::NoteOn { channel, .. }
+                                    | MidiEventType::NoteOff { channel, .. }
+                                    | MidiEventType::ControlChange { channel, .. }
+                                    | MidiEventType::ProgramChange { channel, .. }
+                                    | MidiEventType::PitchBend { channel, .. } => *channel + 1,
                                     _ => event.channel as i16 + 1,
                                 };
                                 ui.monospace(format!("{:2}", channel));
-                                
-                                // Data
+                            });
+                            
+                            // Data
+                            row.col(|ui| {
                                 ui.monospace(format!("{:3} {:3}", event.data1, event.data2));
-                                
-                                // Description
+                            });
+                            
+                            // Description
+                            row.col(|ui| {
                                 ui.label(self.format_event_description(event));
                             });
-                        }
+                        });
                     }
                 });
         });
@@ -3305,9 +3486,9 @@ impl VST3Inspector {
             Event_::EventTypes_::kNoteOnEvent as u16,
             channel as u8,
             pitch as u8,
-            (velocity * 127.0) as u8
+            (velocity * 127.0) as u8,
         );
-        
+
         // Try to send to shared audio state first (for real-time processing)
         if let Some(shared_state) = &self.shared_audio_state {
             if let Ok(mut state) = shared_state.try_lock() {
@@ -3331,7 +3512,7 @@ impl VST3Inspector {
                         "🎹 Note ON sent to audio thread: ch={}, pitch={}, vel={}",
                         channel, pitch, velocity
                     );
-                    
+
                     return Ok(());
                 }
             }
@@ -3406,16 +3587,19 @@ impl VST3Inspector {
 
             // Check output events
             let output_events = process_data.output_events.get_events();
-            
+
             // Log output events to MIDI monitor before borrowing process_data
             if !output_events.is_empty() {
-                println!("[MIDI Input] Output events generated: {}", output_events.len());
-                
+                println!(
+                    "[MIDI Input] Output events generated: {}",
+                    output_events.len()
+                );
+
                 // Clone the references we need for logging
                 let midi_events = self.midi_events.clone();
                 let midi_monitor_paused = self.midi_monitor_paused.clone();
                 let max_midi_events = self.max_midi_events;
-                
+
                 for event in &output_events {
                     match event.r#type as u32 {
                         Event_::EventTypes_::kNoteOnEvent => {
@@ -3428,7 +3612,7 @@ impl VST3Inspector {
                                 event.r#type,
                                 note_on.channel as u8,
                                 note_on.pitch as u8,
-                                (note_on.velocity * 127.0) as u8
+                                (note_on.velocity * 127.0) as u8,
                             );
                         }
                         Event_::EventTypes_::kNoteOffEvent => {
@@ -3441,14 +3625,14 @@ impl VST3Inspector {
                                 event.r#type,
                                 note_off.channel as u8,
                                 note_off.pitch as u8,
-                                (note_off.velocity * 127.0) as u8
+                                (note_off.velocity * 127.0) as u8,
                             );
                         }
                         _ => {}
                     }
                 }
             }
-            
+
             // Now we can borrow process_data again
             if !output_events.is_empty() {
                 print_midi_events(&process_data.output_events);
@@ -3470,9 +3654,9 @@ impl VST3Inspector {
             Event_::EventTypes_::kNoteOffEvent as u16,
             channel as u8,
             pitch as u8,
-            (velocity * 127.0) as u8
+            (velocity * 127.0) as u8,
         );
-        
+
         // Try to send to shared audio state first (for real-time processing)
         if let Some(shared_state) = &self.shared_audio_state {
             if let Ok(mut state) = shared_state.try_lock() {
@@ -3495,7 +3679,7 @@ impl VST3Inspector {
                         "🎹 Note OFF sent to audio thread: ch={}, pitch={}, vel={}",
                         channel, pitch, velocity
                     );
-                    
+
                     return Ok(());
                 }
             }
@@ -3547,16 +3731,19 @@ impl VST3Inspector {
 
             // Check output events
             let output_events = process_data.output_events.get_events();
-            
+
             // Log output events to MIDI monitor before borrowing process_data
             if !output_events.is_empty() {
-                println!("[MIDI Input] Output events generated: {}", output_events.len());
-                
+                println!(
+                    "[MIDI Input] Output events generated: {}",
+                    output_events.len()
+                );
+
                 // Clone the references we need for logging
                 let midi_events = self.midi_events.clone();
                 let midi_monitor_paused = self.midi_monitor_paused.clone();
                 let max_midi_events = self.max_midi_events;
-                
+
                 for event in &output_events {
                     match event.r#type as u32 {
                         Event_::EventTypes_::kNoteOnEvent => {
@@ -3569,7 +3756,7 @@ impl VST3Inspector {
                                 event.r#type,
                                 note_on.channel as u8,
                                 note_on.pitch as u8,
-                                (note_on.velocity * 127.0) as u8
+                                (note_on.velocity * 127.0) as u8,
                             );
                         }
                         Event_::EventTypes_::kNoteOffEvent => {
@@ -3582,14 +3769,14 @@ impl VST3Inspector {
                                 event.r#type,
                                 note_off.channel as u8,
                                 note_off.pitch as u8,
-                                (note_off.velocity * 127.0) as u8
+                                (note_off.velocity * 127.0) as u8,
                             );
                         }
                         _ => {}
                     }
                 }
             }
-            
+
             // Now we can borrow process_data again
             if !output_events.is_empty() {
                 print_midi_events(&process_data.output_events);
@@ -3654,13 +3841,22 @@ impl VST3Inspector {
 
     fn should_show_event(&self, event: &MidiEvent) -> bool {
         match &event.event_type {
-            MidiEventType::NoteOn { .. } | MidiEventType::NoteOff { .. } => self.midi_event_filter.show_note_events,
+            MidiEventType::NoteOn { .. } | MidiEventType::NoteOff { .. } => {
+                self.midi_event_filter.show_note_events
+            }
             MidiEventType::ControlChange { .. } => self.midi_event_filter.show_cc_events,
             MidiEventType::ProgramChange { .. } => self.midi_event_filter.show_program_change,
             MidiEventType::PitchBend { .. } => self.midi_event_filter.show_pitch_bend,
-            MidiEventType::Aftertouch | MidiEventType::ChannelPressure => self.midi_event_filter.show_aftertouch,
-            MidiEventType::SystemExclusive | MidiEventType::Reset => self.midi_event_filter.show_system_events,
-            MidiEventType::Clock | MidiEventType::Start | MidiEventType::Continue | MidiEventType::Stop => self.midi_event_filter.show_clock_events,
+            MidiEventType::Aftertouch | MidiEventType::ChannelPressure => {
+                self.midi_event_filter.show_aftertouch
+            }
+            MidiEventType::SystemExclusive | MidiEventType::Reset => {
+                self.midi_event_filter.show_system_events
+            }
+            MidiEventType::Clock
+            | MidiEventType::Start
+            | MidiEventType::Continue
+            | MidiEventType::Stop => self.midi_event_filter.show_clock_events,
             MidiEventType::ActiveSensing => self.midi_event_filter.show_active_sensing,
             MidiEventType::Other { .. } => true,
         }
@@ -3688,42 +3884,51 @@ impl VST3Inspector {
 
     fn format_event_description(&self, event: &MidiEvent) -> String {
         match &event.event_type {
-            MidiEventType::NoteOn { pitch, velocity, .. } => {
+            MidiEventType::NoteOn {
+                pitch, velocity, ..
+            } => {
                 let note_name = self.note_number_to_name(*pitch as u8);
                 format!("{} velocity {}", note_name, (*velocity * 127.0) as u8)
-            },
-            MidiEventType::NoteOff { pitch, velocity, .. } => {
+            }
+            MidiEventType::NoteOff {
+                pitch, velocity, ..
+            } => {
                 let note_name = self.note_number_to_name(*pitch as u8);
                 format!("{} velocity {}", note_name, (*velocity * 127.0) as u8)
-            },
-            MidiEventType::ControlChange { controller, value, .. } => {
+            }
+            MidiEventType::ControlChange {
+                controller, value, ..
+            } => {
                 format!("CC {} = {}", controller, value)
-            },
+            }
             MidiEventType::ProgramChange { program, .. } => {
                 format!("Program {}", program)
-            },
+            }
             MidiEventType::PitchBend { value, .. } => {
                 format!("Value: {} ({})", value, value - 8192)
-            },
+            }
             MidiEventType::Aftertouch => {
                 format!("Key {} pressure {}", event.data1, event.data2)
-            },
+            }
             MidiEventType::ChannelPressure => {
                 format!("Pressure {}", event.data1)
-            },
+            }
             _ => String::new(),
         }
     }
 
     fn note_number_to_name(&self, note: u8) -> String {
-        let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-        let octave = (note / 12) as i32 - 1;
-        let note_index = (note % 12) as usize;
-        format!("{}{}", note_names[note_index], octave)
+        midi_note_to_name(note)
     }
 
-    
-    fn log_midi_event(&self, direction: MidiDirection, event_type: u16, channel: u8, data1: u8, data2: u8) {
+    fn log_midi_event(
+        &self,
+        direction: MidiDirection,
+        event_type: u16,
+        channel: u8,
+        data1: u8,
+        data2: u8,
+    ) {
         if let Ok(is_paused) = self.midi_monitor_paused.lock() {
             if *is_paused {
                 return;
@@ -3789,15 +3994,165 @@ impl VST3Inspector {
         }
     }
 
+    fn process_raw_midi_events(&mut self) -> bool {
+        let mut had_new_events = false;
+        
+        // Check if we have access to the shared audio state
+        if let Some(shared_state) = &self.shared_audio_state {
+            if let Ok(state) = shared_state.try_lock() {
+                if let Ok(mut raw_events) = state.raw_midi_events.try_lock() {
+                    if let Ok(is_paused) = self.midi_monitor_paused.try_lock() {
+                        if !*is_paused && !raw_events.is_empty() {
+                            had_new_events = true;
+                            
+                            // Convert raw events to MidiEvent format
+                            let mut converted_events = Vec::new();
+                            
+                            for (timestamp, direction, event) in raw_events.drain(..) {
+                                converted_events.push(self.convert_raw_event_to_midi_event(timestamp, direction, &event));
+                            }
+                            
+                            // Add to the main event list
+                            if let Ok(mut events) = self.midi_events.try_lock() {
+                                for event in converted_events {
+                                    events.push(event);
+                                    // Keep buffer size under control
+                                    if events.len() > self.max_midi_events {
+                                        events.remove(0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        had_new_events
+    }
+    
+    fn convert_raw_event_to_midi_event(&self, timestamp: Instant, direction: MidiDirection, event: &Event) -> MidiEvent {
+        use Event_::EventTypes_::*;
+        
+        let (event_type, channel, data1, data2) = match event.r#type as u32 {
+            kNoteOnEvent => {
+                let note_on = unsafe { event.__field0.noteOn };
+                (
+                    MidiEventType::NoteOn {
+                        pitch: note_on.pitch,
+                        velocity: note_on.velocity,
+                        channel: note_on.channel,
+                    },
+                    note_on.channel as u8,
+                    note_on.pitch as u8,
+                    (note_on.velocity * 127.0) as u8,
+                )
+            }
+            kNoteOffEvent => {
+                let note_off = unsafe { event.__field0.noteOff };
+                (
+                    MidiEventType::NoteOff {
+                        pitch: note_off.pitch,
+                        velocity: note_off.velocity,
+                        channel: note_off.channel,
+                    },
+                    note_off.channel as u8,
+                    note_off.pitch as u8,
+                    (note_off.velocity * 127.0) as u8,
+                )
+            }
+            kDataEvent => {
+                let data = unsafe { event.__field0.data };
+                let mut bytes = Vec::new();
+                for i in 0..data.size as usize {
+                    bytes.push(unsafe { *data.bytes.add(i) });
+                }
+                
+                if bytes.len() >= 1 {
+                    let status = bytes[0];
+                    let data1 = if bytes.len() > 1 { bytes[1] } else { 0 };
+                    let data2 = if bytes.len() > 2 { bytes[2] } else { 0 };
+                    let channel = (status & 0x0F) as u8;
+                    
+                    let event_type = match status & 0xF0 {
+                        0x80 => MidiEventType::NoteOff {
+                            pitch: data1 as i16,
+                            velocity: data2 as f32 / 127.0,
+                            channel: channel as i16,
+                        },
+                        0x90 => MidiEventType::NoteOn {
+                            pitch: data1 as i16,
+                            velocity: data2 as f32 / 127.0,
+                            channel: channel as i16,
+                        },
+                        0xB0 => MidiEventType::ControlChange {
+                            controller: data1,
+                            value: data2,
+                            channel: channel as i16,
+                        },
+                        0xC0 => MidiEventType::ProgramChange {
+                            program: data1,
+                            channel: channel as i16,
+                        },
+                        0xE0 => MidiEventType::PitchBend {
+                            value: ((data2 as i16) << 7) | (data1 as i16),
+                            channel: channel as i16,
+                        },
+                        _ => MidiEventType::Other {
+                            status,
+                            data1,
+                            data2,
+                        },
+                    };
+                    
+                    (event_type, channel, data1, data2)
+                } else {
+                    (
+                        MidiEventType::Other {
+                            status: 0,
+                            data1: 0,
+                            data2: 0,
+                        },
+                        0,
+                        0,
+                        0,
+                    )
+                }
+            }
+            _ => {
+                (
+                    MidiEventType::Other {
+                        status: event.r#type as u8,
+                        data1: 0,
+                        data2: 0,
+                    },
+                    0,
+                    0,
+                    0,
+                )
+            }
+        };
+        
+        MidiEvent {
+            timestamp,
+            direction,
+            event_type,
+            channel,
+            data1,
+            data2,
+            raw_type: event.r#type,
+        }
+    }
+
     fn draw_piano_keyboard(&mut self, ui: &mut egui::Ui) {
         let white_key_width = 24.0;
         let white_key_height = 120.0;
         let black_key_width = 16.0;
         let black_key_height = 80.0;
 
-        // Define notes for 3 octaves (C3 to C6)
-        let octave_start = 3;
-        let octave_count = 3;
+        // Define notes for 6 octaves (C0 to C6)
+        let octave_start = 0;
+        let octave_count = 6;
 
         // Calculate total width needed
         let keys_per_octave = 7;
@@ -3818,8 +4173,14 @@ impl VST3Inspector {
 
         // Helper to calculate note number
         let note_for_white_key = |octave: i32, key_in_octave: i32| -> i16 {
-            let white_key_offsets = [0, 2, 4, 5, 7, 9, 11]; // C, D, E, F, G, A, B
-            (octave * 12 + white_key_offsets[key_in_octave as usize]) as i16
+            let _white_key_offsets = [0, 2, 4, 5, 7, 9, 11]; // C, D, E, F, G, A, B
+            let note_names = ["C", "D", "E", "F", "G", "A", "B"];
+            
+            // Generate the note name (e.g., "C3")
+            let note_name = format!("{}{}", note_names[key_in_octave as usize], octave);
+            
+            // Convert to MIDI note using our helper
+            note_name_to_midi(&note_name).unwrap_or(0) as i16
         };
 
         // Draw white keys first
@@ -3870,11 +4231,21 @@ impl VST3Inspector {
                 let note_names = ["C", "D", "E", "F", "G", "A", "B"];
                 let label = format!("{}{}", note_names[key as usize], octave_start + octave);
                 painter.text(
-                    egui::pos2(x + white_key_width / 2.0, rect.bottom() - 15.0),
+                    egui::pos2(x + white_key_width / 2.0, rect.bottom() - 20.0),
                     egui::Align2::CENTER_CENTER,
                     label,
                     egui::FontId::default(),
                     egui::Color32::BLACK,
+                );
+                
+                // Draw MIDI number
+                let midi_num = format!("{}", note);
+                painter.text(
+                    egui::pos2(x + white_key_width / 2.0, rect.bottom() - 8.0),
+                    egui::Align2::CENTER_CENTER,
+                    midi_num,
+                    egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                    egui::Color32::from_gray(100),
                 );
             }
         }
@@ -3884,7 +4255,7 @@ impl VST3Inspector {
             // Black keys positions within an octave (after C, D, F, G, A)
             let black_key_positions = [(0, 1), (1, 3), (3, 6), (4, 8), (5, 10)]; // (white_key_index, semitone_offset)
 
-            for (white_idx, semitone) in black_key_positions {
+            for (i, (white_idx, _semitone)) in black_key_positions.iter().enumerate() {
                 let x = rect.left()
                     + (octave * keys_per_octave + white_idx) as f32 * white_key_width
                     + white_key_width
@@ -3895,7 +4266,10 @@ impl VST3Inspector {
                     egui::vec2(black_key_width, black_key_height),
                 );
 
-                let note = ((octave_start + octave) * 12 + semitone) as i16;
+                // Use our helper to convert the note name to MIDI
+                let black_note_names = ["C#", "D#", "F#", "G#", "A#"];
+                let note_name = format!("{}{}", black_note_names[i], octave_start + octave);
+                let note = note_name_to_midi(&note_name).unwrap_or(0) as i16;
                 let is_pressed = self.pressed_keys.contains(&note);
 
                 // Check if mouse is over this key (black keys take priority)
@@ -3923,6 +4297,21 @@ impl VST3Inspector {
                     egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
                     egui::epaint::StrokeKind::Middle,
                 );
+                
+                // Draw MIDI number on black key
+                let text_color = if is_pressed {
+                    egui::Color32::from_gray(200)
+                } else {
+                    egui::Color32::from_gray(150)
+                };
+                let midi_num = format!("{}", note);
+                painter.text(
+                    egui::pos2(x + black_key_width / 2.0, key_rect.bottom() - 8.0),
+                    egui::Align2::CENTER_CENTER,
+                    midi_num,
+                    egui::FontId::new(9.0, egui::FontFamily::Proportional),
+                    text_color,
+                );
             }
         }
 
@@ -3934,7 +4323,7 @@ impl VST3Inspector {
                 // Mouse down - send note on
                 if !self.pressed_keys.contains(&note) {
                     self.pressed_keys.insert(note);
-                    if let Err(e) = self.send_midi_note_on(0, note, 0.8) {
+                    if let Err(e) = self.send_midi_note_on(self.selected_midi_channel, note, 0.8) {
                         println!("Failed to send note on: {}", e);
                     }
                 }
@@ -3945,7 +4334,7 @@ impl VST3Inspector {
         if response.drag_released() || !response.is_pointer_button_down_on() {
             // Mouse up - send note off for all pressed keys
             for &note in self.pressed_keys.clone().iter() {
-                if let Err(e) = self.send_midi_note_off(0, note, 0.0) {
+                if let Err(e) = self.send_midi_note_off(self.selected_midi_channel, note, 0.0) {
                     println!("Failed to send note off: {}", e);
                 }
             }
@@ -3987,6 +4376,7 @@ impl VST3Inspector {
             audio_config: None,
             shared_audio_state: None,
             pressed_keys: HashSet::new(),
+            selected_midi_channel: 0, // Default to channel 1 (0-based)
             midi_events: Arc::new(Mutex::new(Vec::new())),
             midi_event_filter: MidiEventFilter::default(),
             midi_monitor_paused: Arc::new(Mutex::new(false)),
@@ -4004,7 +4394,7 @@ fn log_midi_event_direct(
     event_type: u16,
     channel: u8,
     data1: u8,
-    data2: u8
+    data2: u8,
 ) {
     if let Ok(is_paused) = midi_monitor_paused.lock() {
         if *is_paused {

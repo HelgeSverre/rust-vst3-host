@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 use std::ptr;
+use std::time::Instant;
 use vst3::{Class, ComWrapper, Steinberg::*, Steinberg::Vst::*};
+use crate::data_structures::MidiDirection;
 
 // Component Handler implementation
 pub struct ComponentHandler {
@@ -52,6 +54,77 @@ impl IComponentHandlerTrait for ComponentHandler {
 // Event List implementation
 pub struct HostEventList {
     pub events: Mutex<Vec<Event>>,
+}
+
+// Wrapper that monitors events while maintaining COM compatibility
+pub struct MonitoredEventList {
+    events: Mutex<Vec<Event>>,
+    monitor_events: Arc<Mutex<Vec<(Instant, MidiDirection, Event)>>>,
+    direction: MidiDirection,
+}
+
+impl MonitoredEventList {
+    pub fn new(direction: MidiDirection, monitor_events: Arc<Mutex<Vec<(Instant, MidiDirection, Event)>>>) -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+            monitor_events,
+            direction,
+        }
+    }
+    
+    pub fn get_events(&self) -> Vec<Event> {
+        self.events.lock().unwrap().clone()
+    }
+    
+    pub fn clear(&self) {
+        self.events.lock().unwrap().clear();
+    }
+}
+
+impl Class for MonitoredEventList {
+    type Interfaces = (IEventList,);
+}
+
+impl IEventListTrait for MonitoredEventList {
+    unsafe fn getEventCount(&self) -> i32 {
+        let count = self.events.lock().unwrap().len() as i32;
+        count
+    }
+    
+    unsafe fn getEvent(&self, index: i32, event: *mut Event) -> i32 {
+        if let Some(e) = self.events.lock().unwrap().get(index as usize) {
+            *event = *e;
+            kResultOk
+        } else {
+            kResultFalse
+        }
+    }
+    
+    unsafe fn addEvent(&self, event: *mut Event) -> i32 {
+        if !event.is_null() {
+            let evt = *event;
+            
+            // Store in our internal list
+            self.events.lock().unwrap().push(evt);
+            
+            // Also store in the monitor with timestamp and direction
+            if let Ok(mut monitor) = self.monitor_events.try_lock() {
+                monitor.push((Instant::now(), self.direction, evt));
+                // Keep buffer size under control
+                if monitor.len() > 1000 {
+                    monitor.remove(0);
+                }
+            }
+            
+            kResultOk
+        } else {
+            kResultFalse
+        }
+    }
+}
+
+pub fn create_monitored_event_list(direction: MidiDirection, monitor_events: Arc<Mutex<Vec<(Instant, MidiDirection, Event)>>>) -> ComWrapper<MonitoredEventList> {
+    ComWrapper::new(MonitoredEventList::new(direction, monitor_events))
 }
 
 impl HostEventList {
