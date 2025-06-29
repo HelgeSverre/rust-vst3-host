@@ -3,18 +3,17 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
-use std::ptr;
 use std::collections::HashSet;
+use std::ptr;
 use vst3::Steinberg::Vst::{BusDirections_::*, IAudioProcessorTrait, MediaTypes_::*};
 // Import the constants
 use vst3::Steinberg::Vst::{
     Event, Event_, IAudioProcessor, IComponent, IComponentTrait, IConnectionPoint,
-    IConnectionPointTrait, IEditController, IEditControllerTrait, IEventListTrait,
-    IParamValueQueueTrait, IParameterChangesTrait, ProcessSetup,
+    IConnectionPointTrait, IEditController, IEditControllerTrait, ProcessSetup,
 };
 use vst3::Steinberg::{IPlugView, IPlugViewTrait, IPluginFactoryTrait};
 use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory};
-use vst3::{Class, ComPtr, Interface};
+use vst3::{ComPtr, Interface};
 
 use libloading::os::unix::{Library, Symbol};
 
@@ -162,6 +161,7 @@ struct ClassInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ComponentInfo {
     bus_count_inputs: i32,
     bus_count_outputs: i32,
@@ -173,6 +173,7 @@ struct ComponentInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BusInfo {
     name: String,
     bus_type: i32,
@@ -187,6 +188,7 @@ struct ControllerInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ParameterInfo {
     id: u32,
     title: String,
@@ -201,11 +203,13 @@ struct ParameterInfo {
 
 // Platform-specific PlugFrame implementations
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 struct PlugFrame {
     window: Option<id>,
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 impl PlugFrame {
     fn new() -> Self {
         Self { window: None }
@@ -217,11 +221,13 @@ impl PlugFrame {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 struct PlugFrame {
     window: Option<HWND>,
 }
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 impl PlugFrame {
     fn new() -> Self {
         Self { window: None }
@@ -236,12 +242,14 @@ impl PlugFrame {
 struct ComponentHandler;
 
 impl ComponentHandler {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self
     }
 }
 
 // We need to implement the VST3 interface manually since the vst3 crate doesn't provide a trait impl
+#[allow(dead_code)]
 impl ComponentHandler {
     unsafe fn begin_edit(&self, id: u32) -> i32 {
         println!("🎛️ Parameter edit started: ID {}", id);
@@ -1222,6 +1230,7 @@ impl VST3Inspector {
     }
 
     /// Process audio with the current plugin and check for output
+    #[allow(dead_code)]
     fn process_audio_with_output_check(&mut self) -> Result<(), String> {
         if !self.is_processing {
             self.start_processing()?;
@@ -2168,7 +2177,6 @@ impl VST3Inspector {
                 self.draw_piano_keyboard(ui);
             });
 
-
             ui.separator();
             ui.add_space(8.0);
 
@@ -2276,7 +2284,7 @@ impl VST3Inspector {
 
     // macOS GUI creation
     #[cfg(target_os = "macos")]
-    unsafe fn create_macos_gui(&mut self, binary_path: String) -> Result<(), String> {
+    unsafe fn create_macos_gui(&mut self, _binary_path: String) -> Result<(), String> {
         // Use existing component and controller - don't create new ones!
         let controller = self
             .controller
@@ -2350,7 +2358,7 @@ impl VST3Inspector {
 
     // Windows GUI creation
     #[cfg(target_os = "windows")]
-    unsafe fn create_windows_gui(&mut self, binary_path: String) -> Result<(), String> {
+    unsafe fn create_windows_gui(&mut self, _binary_path: String) -> Result<(), String> {
         // Use existing component and controller - don't create new ones!
         let controller = self
             .controller
@@ -2882,6 +2890,7 @@ impl VST3Inspector {
         }
     }
 
+    #[allow(dead_code)]
     fn monitor_midi_output(&mut self) -> Result<(), String> {
         if !self.is_processing {
             self.start_processing()?;
@@ -3124,6 +3133,7 @@ impl VST3Inspector {
     }
 
     /// Process one audio block with optional input
+    #[allow(dead_code)]
     fn process_audio_block(&mut self) -> Result<(), String> {
         if !self.is_processing {
             self.start_processing()?;
@@ -3175,54 +3185,58 @@ impl VST3Inspector {
 
         Ok(())
     }
-    
+
     fn draw_piano_keyboard(&mut self, ui: &mut egui::Ui) {
         let white_key_width = 24.0;
         let white_key_height = 120.0;
         let black_key_width = 16.0;
         let black_key_height = 80.0;
-        
+
         // Define notes for 3 octaves (C3 to C6)
         let octave_start = 3;
         let octave_count = 3;
-        
+
         // Calculate total width needed
         let keys_per_octave = 7;
         let total_white_keys = keys_per_octave * octave_count + 1; // +1 for final C
         let total_width = total_white_keys as f32 * white_key_width;
-        
+
         // Allocate space for the keyboard
         let (response, painter) = ui.allocate_painter(
             egui::vec2(total_width, white_key_height),
             egui::Sense::click_and_drag(),
         );
-        
+
         let rect = response.rect;
         let mouse_pos = response.interact_pointer_pos();
-        
+
         // Track which key is being interacted with
         let mut key_under_mouse: Option<i16> = None;
-        
+
         // Helper to calculate note number
         let note_for_white_key = |octave: i32, key_in_octave: i32| -> i16 {
             let white_key_offsets = [0, 2, 4, 5, 7, 9, 11]; // C, D, E, F, G, A, B
             (octave * 12 + white_key_offsets[key_in_octave as usize]) as i16
         };
-        
+
         // Draw white keys first
         for octave in 0..=octave_count {
-            let keys_in_octave = if octave == octave_count { 1 } else { keys_per_octave };
-            
+            let keys_in_octave = if octave == octave_count {
+                1
+            } else {
+                keys_per_octave
+            };
+
             for key in 0..keys_in_octave {
                 let x = rect.left() + (octave * keys_per_octave + key) as f32 * white_key_width;
                 let key_rect = egui::Rect::from_min_size(
                     egui::pos2(x, rect.top()),
                     egui::vec2(white_key_width - 1.0, white_key_height),
                 );
-                
+
                 let note = note_for_white_key(octave_start + octave, key);
                 let is_pressed = self.pressed_keys.contains(&note);
-                
+
                 // Check if mouse is over this key
                 let mut is_hover = false;
                 if let Some(pos) = mouse_pos {
@@ -3231,7 +3245,7 @@ impl VST3Inspector {
                         is_hover = true;
                     }
                 }
-                
+
                 // Draw the key
                 let color = if is_pressed {
                     egui::Color32::GRAY
@@ -3240,10 +3254,15 @@ impl VST3Inspector {
                 } else {
                     egui::Color32::WHITE
                 };
-                
+
                 painter.rect_filled(key_rect, egui::Rounding::ZERO, color);
-                painter.rect_stroke(key_rect, egui::Rounding::ZERO, egui::Stroke::new(1.0, egui::Color32::BLACK), egui::epaint::StrokeKind::Middle);
-                
+                painter.rect_stroke(
+                    key_rect,
+                    egui::Rounding::ZERO,
+                    egui::Stroke::new(1.0, egui::Color32::BLACK),
+                    egui::epaint::StrokeKind::Middle,
+                );
+
                 // Draw note label
                 let note_names = ["C", "D", "E", "F", "G", "A", "B"];
                 let label = format!("{}{}", note_names[key as usize], octave_start + octave);
@@ -3256,25 +3275,26 @@ impl VST3Inspector {
                 );
             }
         }
-        
+
         // Draw black keys
         for octave in 0..octave_count {
             // Black keys positions within an octave (after C, D, F, G, A)
             let black_key_positions = [(0, 1), (1, 3), (3, 6), (4, 8), (5, 10)]; // (white_key_index, semitone_offset)
-            
+
             for (white_idx, semitone) in black_key_positions {
-                let x = rect.left() + 
-                    (octave * keys_per_octave + white_idx) as f32 * white_key_width + 
-                    white_key_width - black_key_width / 2.0;
-                    
+                let x = rect.left()
+                    + (octave * keys_per_octave + white_idx) as f32 * white_key_width
+                    + white_key_width
+                    - black_key_width / 2.0;
+
                 let key_rect = egui::Rect::from_min_size(
                     egui::pos2(x, rect.top()),
                     egui::vec2(black_key_width, black_key_height),
                 );
-                
+
                 let note = ((octave_start + octave) * 12 + semitone) as i16;
                 let is_pressed = self.pressed_keys.contains(&note);
-                
+
                 // Check if mouse is over this key (black keys take priority)
                 let mut is_hover = false;
                 if let Some(pos) = mouse_pos {
@@ -3283,7 +3303,7 @@ impl VST3Inspector {
                         is_hover = true;
                     }
                 }
-                
+
                 // Draw the key
                 let color = if is_pressed {
                     egui::Color32::from_gray(60)
@@ -3292,15 +3312,22 @@ impl VST3Inspector {
                 } else {
                     egui::Color32::BLACK
                 };
-                
+
                 painter.rect_filled(key_rect, egui::Rounding::ZERO, color);
-                painter.rect_stroke(key_rect, egui::Rounding::ZERO, egui::Stroke::new(1.0, egui::Color32::DARK_GRAY), egui::epaint::StrokeKind::Middle);
+                painter.rect_stroke(
+                    key_rect,
+                    egui::Rounding::ZERO,
+                    egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
+                    egui::epaint::StrokeKind::Middle,
+                );
             }
         }
-        
+
         // Handle mouse interactions
         if let Some(note) = key_under_mouse {
-            if response.drag_started() || (response.is_pointer_button_down_on() && !self.pressed_keys.contains(&note)) {
+            if response.drag_started()
+                || (response.is_pointer_button_down_on() && !self.pressed_keys.contains(&note))
+            {
                 // Mouse down - send note on
                 if !self.pressed_keys.contains(&note) {
                     self.pressed_keys.insert(note);
@@ -3310,7 +3337,7 @@ impl VST3Inspector {
                 }
             }
         }
-        
+
         // Check for released keys
         if response.drag_released() || !response.is_pointer_button_down_on() {
             // Mouse up - send note off for all pressed keys

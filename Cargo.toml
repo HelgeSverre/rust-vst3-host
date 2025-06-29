@@ -7,11 +7,10 @@ edition = "2021"
 catppuccin-egui = { version = "5.5.0", default-features = false, features = ["egui31"] }
 
 eframe = "0.31.1"
-raw-window-handle = "0.6.2"
 vst3 = "0.1.2"
 libloading = "0.8.8"
 egui_extras = "0.31.1"
-cpal = "0.15"
+cpal = "0.16.0"
 
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
