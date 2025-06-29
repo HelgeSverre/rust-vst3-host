@@ -4,6 +4,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
 use std::ptr;
+use std::collections::HashSet;
 use vst3::Steinberg::Vst::{BusDirections_::*, IAudioProcessorTrait, MediaTypes_::*};
 // Import the constants
 use vst3::Steinberg::Vst::{
@@ -906,6 +907,8 @@ struct VST3Inspector {
     audio_config: Option<cpal::StreamConfig>,
     // Shared processing state for audio thread
     shared_audio_state: Option<std::sync::Arc<std::sync::Mutex<AudioProcessingState>>>,
+    // Virtual keyboard state
+    pressed_keys: std::collections::HashSet<i16>,
 }
 
 // Audio processing state that can be shared between UI and audio threads
@@ -2161,51 +2164,8 @@ impl VST3Inspector {
 
             // Virtual keyboard
             ui.group(|ui| {
-                ui.label("Virtual MIDI Keyboard:");
-                ui.horizontal(|ui| {
-                    // White keys
-                    let white_keys = [
-                        (60, "C"),
-                        (62, "D"),
-                        (64, "E"),
-                        (65, "F"),
-                        (67, "G"),
-                        (69, "A"),
-                        (71, "B"),
-                        (72, "C"),
-                    ];
-                    for (note, label) in &white_keys {
-                        if ui.button(format!("{}\n{}", label, note)).clicked() {
-                            // Send note on
-                            if let Err(e) = self.send_midi_note_on(0, *note, 0.8) {
-                                println!("Failed to send note on: {}", e);
-                            }
-                            // Schedule note off
-                            if let Err(e) = self.send_midi_note_off(0, *note, 0.0) {
-                                println!("Failed to send note off: {}", e);
-                            }
-                        }
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    // Black keys
-                    let black_keys = [(61, "C#"), (63, "D#"), (66, "F#"), (68, "G#"), (70, "A#")];
-                    ui.add_space(30.0); // Offset for first black key
-                    for (note, label) in &black_keys {
-                        if ui.button(format!("{}\n{}", label, note)).clicked() {
-                            if let Err(e) = self.send_midi_note_on(0, *note, 0.8) {
-                                println!("Failed to send note on: {}", e);
-                            }
-                            if let Err(e) = self.send_midi_note_off(0, *note, 0.0) {
-                                println!("Failed to send note off: {}", e);
-                            }
-                        }
-                        if *note == 63 {
-                            ui.add_space(40.0); // Gap between E and F
-                        }
-                    }
-                });
+                ui.label("Virtual MIDI Keyboard (3 Octaves: C3-C6):");
+                self.draw_piano_keyboard(ui);
             });
 
             ui.add_space(8.0);
@@ -3242,6 +3202,153 @@ impl VST3Inspector {
 
         Ok(())
     }
+    
+    fn draw_piano_keyboard(&mut self, ui: &mut egui::Ui) {
+        let white_key_width = 24.0;
+        let white_key_height = 120.0;
+        let black_key_width = 16.0;
+        let black_key_height = 80.0;
+        
+        // Define notes for 3 octaves (C3 to C6)
+        let octave_start = 3;
+        let octave_count = 3;
+        
+        // Calculate total width needed
+        let keys_per_octave = 7;
+        let total_white_keys = keys_per_octave * octave_count + 1; // +1 for final C
+        let total_width = total_white_keys as f32 * white_key_width;
+        
+        // Allocate space for the keyboard
+        let (response, painter) = ui.allocate_painter(
+            egui::vec2(total_width, white_key_height),
+            egui::Sense::click_and_drag(),
+        );
+        
+        let rect = response.rect;
+        let mouse_pos = response.interact_pointer_pos();
+        
+        // Track which key is being interacted with
+        let mut key_under_mouse: Option<i16> = None;
+        
+        // Helper to calculate note number
+        let note_for_white_key = |octave: i32, key_in_octave: i32| -> i16 {
+            let white_key_offsets = [0, 2, 4, 5, 7, 9, 11]; // C, D, E, F, G, A, B
+            (octave * 12 + white_key_offsets[key_in_octave as usize]) as i16
+        };
+        
+        // Draw white keys first
+        for octave in 0..=octave_count {
+            let keys_in_octave = if octave == octave_count { 1 } else { keys_per_octave };
+            
+            for key in 0..keys_in_octave {
+                let x = rect.left() + (octave * keys_per_octave + key) as f32 * white_key_width;
+                let key_rect = egui::Rect::from_min_size(
+                    egui::pos2(x, rect.top()),
+                    egui::vec2(white_key_width - 1.0, white_key_height),
+                );
+                
+                let note = note_for_white_key(octave_start + octave, key);
+                let is_pressed = self.pressed_keys.contains(&note);
+                
+                // Check if mouse is over this key
+                let mut is_hover = false;
+                if let Some(pos) = mouse_pos {
+                    if key_rect.contains(pos) && key_under_mouse.is_none() {
+                        key_under_mouse = Some(note);
+                        is_hover = true;
+                    }
+                }
+                
+                // Draw the key
+                let color = if is_pressed {
+                    egui::Color32::GRAY
+                } else if is_hover {
+                    egui::Color32::from_gray(240)
+                } else {
+                    egui::Color32::WHITE
+                };
+                
+                painter.rect_filled(key_rect, egui::Rounding::ZERO, color);
+                painter.rect_stroke(key_rect, egui::Rounding::ZERO, egui::Stroke::new(1.0, egui::Color32::BLACK), egui::epaint::StrokeKind::Middle);
+                
+                // Draw note label
+                let note_names = ["C", "D", "E", "F", "G", "A", "B"];
+                let label = format!("{}{}", note_names[key as usize], octave_start + octave);
+                painter.text(
+                    egui::pos2(x + white_key_width / 2.0, rect.bottom() - 15.0),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    egui::FontId::default(),
+                    egui::Color32::BLACK,
+                );
+            }
+        }
+        
+        // Draw black keys
+        for octave in 0..octave_count {
+            // Black keys positions within an octave (after C, D, F, G, A)
+            let black_key_positions = [(0, 1), (1, 3), (3, 6), (4, 8), (5, 10)]; // (white_key_index, semitone_offset)
+            
+            for (white_idx, semitone) in black_key_positions {
+                let x = rect.left() + 
+                    (octave * keys_per_octave + white_idx) as f32 * white_key_width + 
+                    white_key_width - black_key_width / 2.0;
+                    
+                let key_rect = egui::Rect::from_min_size(
+                    egui::pos2(x, rect.top()),
+                    egui::vec2(black_key_width, black_key_height),
+                );
+                
+                let note = ((octave_start + octave) * 12 + semitone) as i16;
+                let is_pressed = self.pressed_keys.contains(&note);
+                
+                // Check if mouse is over this key (black keys take priority)
+                let mut is_hover = false;
+                if let Some(pos) = mouse_pos {
+                    if key_rect.contains(pos) {
+                        key_under_mouse = Some(note);
+                        is_hover = true;
+                    }
+                }
+                
+                // Draw the key
+                let color = if is_pressed {
+                    egui::Color32::from_gray(60)
+                } else if is_hover {
+                    egui::Color32::from_gray(40)
+                } else {
+                    egui::Color32::BLACK
+                };
+                
+                painter.rect_filled(key_rect, egui::Rounding::ZERO, color);
+                painter.rect_stroke(key_rect, egui::Rounding::ZERO, egui::Stroke::new(1.0, egui::Color32::DARK_GRAY), egui::epaint::StrokeKind::Middle);
+            }
+        }
+        
+        // Handle mouse interactions
+        if let Some(note) = key_under_mouse {
+            if response.drag_started() || (response.is_pointer_button_down_on() && !self.pressed_keys.contains(&note)) {
+                // Mouse down - send note on
+                if !self.pressed_keys.contains(&note) {
+                    self.pressed_keys.insert(note);
+                    if let Err(e) = self.send_midi_note_on(0, note, 0.8) {
+                        println!("Failed to send note on: {}", e);
+                    }
+                }
+            }
+        }
+        
+        // Check for released keys
+        if response.drag_released() || !response.is_pointer_button_down_on() {
+            // Mouse up - send note off for all pressed keys
+            for &note in self.pressed_keys.clone().iter() {
+                if let Err(e) = self.send_midi_note_off(0, note, 0.0) {
+                    println!("Failed to send note off: {}", e);
+                }
+            }
+            self.pressed_keys.clear();
+        }
+    }
 }
 
 impl VST3Inspector {
@@ -3275,6 +3382,7 @@ impl VST3Inspector {
             audio_device: None,
             audio_config: None,
             shared_audio_state: None,
+            pressed_keys: HashSet::new(),
         }
     }
 }
