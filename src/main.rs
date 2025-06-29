@@ -23,8 +23,10 @@ use libloading::os::unix::{Library, Symbol};
 // Import modules
 mod audio_processing;
 mod com_implementations;
+mod crash_protection;
 mod data_structures;
 mod plugin_discovery;
+mod plugin_host_process;
 mod utils;
 
 use audio_processing::*;
@@ -255,6 +257,7 @@ struct ClassInfo {
     category: String,
     class_id: String,
     cardinality: i32,
+    version: String,
 }
 
 #[derive(Debug, Clone)]
@@ -866,6 +869,7 @@ unsafe fn get_all_classes(factory: &ComPtr<IPluginFactory>) -> Result<Vec<ClassI
                 category: c_str_to_string(&class_info.category),
                 class_id: format!("{:?}", class_info.cid),
                 cardinality: class_info.cardinality,
+                version: String::new(), // Version not available in factory info
             });
         }
     }
@@ -1109,6 +1113,10 @@ struct VST3Inspector {
     // Peak hold
     peak_hold_left: Arc<Mutex<(f32, Instant)>>,  // (level, time)
     peak_hold_right: Arc<Mutex<(f32, Instant)>>,
+    // Crash protection
+    crash_protection: Arc<Mutex<crash_protection::CrashProtection>>,
+    // Process isolation
+    plugin_host_process: Option<plugin_host_process::PluginHostProcess>,
 }
 
 // Audio processing state that can be shared between UI and audio threads
@@ -1127,6 +1135,8 @@ struct AudioProcessingState {
     // Peak hold
     peak_hold_left: Arc<Mutex<(f32, Instant)>>,  // (level, time)
     peak_hold_right: Arc<Mutex<(f32, Instant)>>,
+    // Crash protection
+    crash_protection: Arc<Mutex<crash_protection::CrashProtection>>,
 }
 
 impl AudioProcessingState {
@@ -1137,6 +1147,7 @@ impl AudioProcessingState {
         peak_level_right: Arc<Mutex<f32>>,
         peak_hold_left: Arc<Mutex<(f32, Instant)>>,
         peak_hold_right: Arc<Mutex<(f32, Instant)>>,
+        crash_protection: Arc<Mutex<crash_protection::CrashProtection>>,
     ) -> Self {
         Self {
             processor: None,
@@ -1150,6 +1161,7 @@ impl AudioProcessingState {
             peak_level_right,
             peak_hold_left,
             peak_hold_right,
+            crash_protection,
         }
     }
 
@@ -1221,10 +1233,13 @@ impl AudioProcessingState {
             process_data.process_context.continousTimeSamples = SAMPLE_COUNTER;
             SAMPLE_COUNTER += self.block_size as i64;
 
-            // Process audio
-            let result = processor.process(&mut process_data.process_data);
+            // Process audio with crash protection
+            let process_result = crash_protection::protected_call(std::panic::AssertUnwindSafe(|| {
+                processor.process(&mut process_data.process_data)
+            }));
 
-            if result == vst3::Steinberg::kResultOk {
+            match process_result {
+                Ok(result) if result == vst3::Steinberg::kResultOk => {
                 // Output events are automatically captured by MonitoredEventList
                 // Copy output to buffer
                 let channels = output.len() / self.block_size as usize;
@@ -1298,9 +1313,41 @@ impl AudioProcessingState {
                     }
                 }
 
+                // Update crash protection status to OK
+                if let Ok(mut protection) = self.crash_protection.try_lock() {
+                    if !protection.is_healthy() {
+                        protection.reset();
+                        println!("Plugin recovered from crash/timeout");
+                    }
+                }
+
                 true
-            } else {
-                false
+                }
+                Ok(result) => {
+                    // Plugin returned an error code
+                    println!("Plugin process returned error: {:#x}", result);
+                    if let Ok(mut protection) = self.crash_protection.try_lock() {
+                        protection.mark_crashed(format!("Process returned error: {:#x}", result));
+                    }
+                    false
+                }
+                Err(crash_msg) => {
+                    // Plugin crashed
+                    println!("Plugin CRASHED during processing: {}", crash_msg);
+                    if let Ok(mut protection) = self.crash_protection.try_lock() {
+                        protection.mark_crashed(crash_msg);
+                    }
+                    
+                    // Fill output with silence
+                    for sample in output.iter_mut() {
+                        *sample = 0.0;
+                    }
+                    
+                    // Mark as inactive to prevent further processing
+                    self.is_active = false;
+                    
+                    false
+                }
             }
         }
     }
@@ -1378,6 +1425,27 @@ impl eframe::App for VST3Inspector {
                             .as_ref()
                             .map_or("Unknown", |p| &p.factory_info.vendor)
                     ));
+                    
+                    // Show crash protection status
+                    if let Ok(protection) = self.crash_protection.lock() {
+                        match &protection.status {
+                            crash_protection::PluginStatus::Ok => {},
+                            crash_protection::PluginStatus::Crashed(reason) => {
+                                ui.colored_label(egui::Color32::RED, format!("🛡️ Crash Protected: {}", reason));
+                            },
+                            crash_protection::PluginStatus::Timeout(duration) => {
+                                ui.colored_label(egui::Color32::YELLOW, format!("⏱️ Timeout: {:?}", duration));
+                            },
+                            crash_protection::PluginStatus::Error(error) => {
+                                ui.colored_label(egui::Color32::ORANGE, format!("⚠️ Error: {}", error));
+                            },
+                        }
+                    }
+                    
+                    // Show if using process isolation
+                    if self.plugin_host_process.is_some() {
+                        ui.colored_label(egui::Color32::GREEN, "🛡️ Process Isolation Active");
+                    }
                 });
 
                 // Push GUI button to the right - only show on Plugin tab
@@ -1490,6 +1558,7 @@ impl VST3Inspector {
                 self.peak_level_right.clone(),
                 self.peak_hold_left.clone(),
                 self.peak_hold_right.clone(),
+                self.crash_protection.clone(),
             );
             self.shared_audio_state = Some(Arc::new(Mutex::new(audio_state)));
         }
@@ -2506,6 +2575,49 @@ impl VST3Inspector {
                 }
             });
 
+            // Crash protection status
+            ui.horizontal(|ui| {
+                ui.label("Plugin Status:");
+                
+                let mut should_reset = false;
+                
+                if let Ok(protection) = self.crash_protection.try_lock() {
+                    match &protection.status {
+                        crash_protection::PluginStatus::Ok => {
+                            ui.colored_label(egui::Color32::GREEN, "Healthy");
+                        }
+                        crash_protection::PluginStatus::Crashed(reason) => {
+                            ui.colored_label(egui::Color32::RED, format!("CRASHED: {}", reason));
+                            if ui.button("Reset").clicked() {
+                                should_reset = true;
+                            }
+                        }
+                        crash_protection::PluginStatus::Timeout(duration) => {
+                            ui.colored_label(egui::Color32::YELLOW, format!("Timeout: {:?}", duration));
+                        }
+                        crash_protection::PluginStatus::Error(err) => {
+                            ui.colored_label(egui::Color32::RED, format!("Error: {}", err));
+                        }
+                    }
+                    
+                    if protection.crash_count > 0 {
+                        ui.label(format!("(Crashes: {})", protection.crash_count));
+                    }
+                }
+                
+                if should_reset {
+                    if let Ok(mut protection) = self.crash_protection.lock() {
+                        protection.reset();
+                        // Also try to restart the audio state
+                        if let Some(audio_state) = &self.shared_audio_state {
+                            if let Ok(mut state) = audio_state.lock() {
+                                state.is_active = true;
+                            }
+                        }
+                    }
+                }
+            });
+
             ui.separator();
 
             // Audio Device
@@ -3095,6 +3207,26 @@ impl VST3Inspector {
 
     fn create_plugin_gui(&mut self) -> Result<(), String> {
         println!("🎨 Creating plugin GUI...");
+        
+        // Wrap GUI creation in crash protection
+        let gui_result = crash_protection::protected_call(std::panic::AssertUnwindSafe(|| {
+            self.create_plugin_gui_internal()
+        }));
+        
+        match gui_result {
+            Ok(result) => result,
+            Err(crash_msg) => {
+                println!("💥 Plugin CRASHED during GUI creation: {}", crash_msg);
+                if let Ok(mut protection) = self.crash_protection.lock() {
+                    protection.mark_crashed(format!("Crashed during GUI creation: {}", crash_msg));
+                }
+                self.cleanup_after_crash();
+                Err(format!("Plugin crashed: {}", crash_msg))
+            }
+        }
+    }
+    
+    fn create_plugin_gui_internal(&mut self) -> Result<(), String> {
 
         if let Some(plugin_info) = &self.plugin_info {
             if !plugin_info.has_gui {
@@ -3487,6 +3619,178 @@ impl VST3Inspector {
 
     fn load_plugin(&mut self, plugin_path: String) {
         println!("Loading plugin: {}", plugin_path);
+        
+        // Special handling for problematic plugins using process isolation
+        if plugin_path.to_lowercase().contains("waveshell") || plugin_path.to_lowercase().contains("waves") {
+            println!("⚠️ Detected Waves plugin - using process isolation for safety...");
+            self.load_plugin_with_isolation(plugin_path);
+            return;
+        }
+        
+        // For other plugins, use the existing crash protection
+        let load_result = crash_protection::protected_call(std::panic::AssertUnwindSafe(|| {
+            self.load_plugin_internal(plugin_path.clone())
+        }));
+        
+        match load_result {
+            Ok(Ok(())) => {
+                println!("✅ Plugin loaded successfully!");
+                // Reset crash protection status on successful load
+                if let Ok(mut protection) = self.crash_protection.lock() {
+                    protection.reset();
+                }
+            }
+            Ok(Err(e)) => {
+                println!("❌ Plugin loading failed: {}", e);
+                self.plugin_info = None;
+                if let Ok(mut protection) = self.crash_protection.lock() {
+                    protection.mark_crashed(format!("Load failed: {}", e));
+                }
+            }
+            Err(crash_msg) => {
+                println!("💥 Plugin CRASHED during loading: {}", crash_msg);
+                self.plugin_info = None;
+                if let Ok(mut protection) = self.crash_protection.lock() {
+                    protection.mark_crashed(format!("Crashed during load: {}", crash_msg));
+                }
+                // Clean up any partial state
+                self.cleanup_after_crash();
+            }
+        }
+    }
+    
+    fn load_plugin_with_isolation(&mut self, plugin_path: String) {
+        println!("🛡️ Using process isolation to load plugin safely...");
+        
+        // Clean up existing plugin state
+        self.cleanup_after_crash();
+        
+        // Shut down existing helper process if any
+        if let Some(mut helper) = self.plugin_host_process.take() {
+            helper.shutdown();
+        }
+        
+        // Create new helper process
+        match plugin_host_process::PluginHostProcess::new() {
+            Ok(mut helper) => {
+                println!("✅ Helper process started");
+                
+                // Get the binary path
+                let binary_path = match get_vst3_binary_path(&plugin_path) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        println!("❌ Failed to get binary path: {}", e);
+                        return;
+                    }
+                };
+                
+                // Send load command to helper
+                match helper.send_command(plugin_host_process::HostCommand::LoadPlugin { path: binary_path }) {
+                    Ok(plugin_host_process::HostResponse::PluginInfo { vendor, name, version, has_gui, audio_inputs, audio_outputs }) => {
+                        println!("✅ Plugin loaded in isolation!");
+                        println!("   Name: {}", name);
+                        println!("   Vendor: {}", vendor);
+                        println!("   Version: {}", version);
+                        println!("   GUI: {}", if has_gui { "Yes" } else { "No" });
+                        println!("   Audio I/O: {} inputs, {} outputs", audio_inputs, audio_outputs);
+                        
+                        // Create a basic PluginInfo from the response
+                        self.plugin_info = Some(PluginInfo {
+                            factory_info: FactoryInfo {
+                                vendor,
+                                url: String::new(),
+                                email: String::new(),
+                                flags: 0,
+                            },
+                            classes: vec![ClassInfo {
+                                class_id: String::new(),
+                                cardinality: 0,
+                                category: "Audio Module Class".to_string(),
+                                name,
+                                version,
+                            }],
+                            has_gui,
+                            component_info: Some(ComponentInfo {
+                                bus_count_inputs: audio_inputs,
+                                bus_count_outputs: audio_outputs,
+                                audio_inputs: Vec::new(),
+                                audio_outputs: Vec::new(),
+                                event_inputs: Vec::new(),
+                                event_outputs: Vec::new(),
+                                supports_processing: true,
+                            }),
+                            controller_info: Some(ControllerInfo {
+                                parameter_count: 0,
+                                parameters: Vec::new(),
+                            }),
+                            gui_size: None,
+                        });
+                        
+                        // Store the helper process
+                        self.plugin_host_process = Some(helper);
+                        
+                        // Update plugin path
+                        self.plugin_path = plugin_path;
+                        
+                        // Mark as successfully loaded in crash protection
+                        if let Ok(mut protection) = self.crash_protection.lock() {
+                            protection.reset();
+                        }
+                    }
+                    Ok(plugin_host_process::HostResponse::Error { message }) => {
+                        println!("❌ Helper process failed to load plugin: {}", message);
+                        if let Ok(mut protection) = self.crash_protection.lock() {
+                            protection.mark_crashed(format!("Helper error: {}", message));
+                        }
+                    }
+                    Ok(_) => {
+                        println!("❌ Unexpected response from helper process");
+                    }
+                    Err(e) => {
+                        println!("❌ Failed to communicate with helper process: {}", e);
+                        // Check if helper crashed
+                        if let Err(status) = helper.check_process_status() {
+                            println!("💥 Helper process crashed: {}", status);
+                            if let Ok(mut protection) = self.crash_protection.lock() {
+                                protection.mark_crashed(format!("Helper crashed: {}", status));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("❌ Failed to start helper process: {}", e);
+                if let Ok(mut protection) = self.crash_protection.lock() {
+                    protection.mark_crashed(format!("Failed to start helper: {}", e));
+                }
+            }
+        }
+    }
+    
+    fn cleanup_after_crash(&mut self) {
+        // Clean up any resources that might have been partially initialized
+        self.plugin_view = None;
+        self.controller = None;
+        self.component = None;
+        self.processor = None;
+        self.host_process_data = None;
+        self.is_processing = false;
+        self.gui_attached = false;
+        self.native_window = None;
+        self.component_handler = None;
+        self.plugin_library = None;
+        
+        // Clear shared audio state
+        if let Some(state) = &self.shared_audio_state {
+            if let Ok(mut state) = state.lock() {
+                state.processor = None;
+                state.component = None;
+                state.is_active = false;
+            }
+        }
+    }
+    
+    fn load_plugin_internal(&mut self, plugin_path: String) -> Result<(), String> {
 
         // First, completely stop all audio processing to avoid crashes
         // This must happen before we destroy any plugin resources
@@ -3524,19 +3828,17 @@ impl VST3Inspector {
         self.controller = None;
         self.host_process_data = None;
         self.plugin_library = None; // Also reset the library
-
+        
         // Try to load the new plugin
         let binary_path = match get_vst3_binary_path(&self.plugin_path) {
             Ok(path) => path,
             Err(e) => {
-                println!("❌ Failed to get binary path: {}", e);
-                return;
+                return Err(format!("Failed to get binary path: {}", e));
             }
         };
 
         match unsafe { self.load_and_init_plugin(&binary_path) } {
             Ok(plugin_info) => {
-                println!("✅ Plugin loaded successfully!");
                 self.plugin_info = Some(plugin_info);
                 
                 // Auto-start processing if enabled in preferences
@@ -3554,9 +3856,11 @@ impl VST3Inspector {
                         println!("⚠️ Failed to restart audio stream: {}", e);
                     }
                 }
+                
+                Ok(())
             }
             Err(e) => {
-                println!("❌ Failed to load plugin: {}", e);
+                Err(e)
             }
         }
     }
@@ -3604,6 +3908,7 @@ impl VST3Inspector {
                     cardinality: class_info.cardinality,
                     category: category.clone(),
                     name: c_str_to_string(&class_info.name),
+                    version: String::new(), // Version not available in factory info
                 });
             }
         }
@@ -4955,6 +5260,8 @@ impl VST3Inspector {
             peak_level_right: Arc::new(Mutex::new(0.0)),
             peak_hold_left: Arc::new(Mutex::new((0.0, Instant::now()))),
             peak_hold_right: Arc::new(Mutex::new((0.0, Instant::now()))),
+            crash_protection: Arc::new(Mutex::new(crash_protection::CrashProtection::new())),
+            plugin_host_process: None,
         }
     }
 }

@@ -3,6 +3,14 @@ name = "vst-host"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "vst-host"
+path = "src/main.rs"
+
+[[bin]]
+name = "vst-host-helper"
+path = "src/bin/vst-host-helper.rs"
+
 [dependencies]
 catppuccin-egui = { version = "5.5.0", default-features = false, features = ["egui31"] }
 
