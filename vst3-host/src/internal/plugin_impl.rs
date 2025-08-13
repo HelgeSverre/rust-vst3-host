@@ -8,6 +8,7 @@ use crate::{
     plugin::{PluginInfo, PluginInternal},
 };
 use std::ptr;
+use std::sync::{Arc, Mutex};
 use vst3::Steinberg::Vst::BusDirections_::*;
 use vst3::Steinberg::Vst::Event_::EventTypes_::*;
 use vst3::Steinberg::Vst::MediaTypes_::*;
@@ -73,48 +74,132 @@ struct AudioBufferPointers {
 }
 
 impl PluginImpl {
+    /// Get parameter changes captured from the plugin GUI
+    pub fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
+        if let Some(ref handler) = self.component_handler {
+            if let Ok(mut changes) = handler.parameter_changes.lock() {
+                let result = changes.clone();
+                changes.clear(); // Clear after reading
+                result
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Load a VST3 plugin from the given path
     pub fn load(path: &std::path::Path, info: PluginInfo) -> Result<Self> {
         unsafe {
+            log::info!("=== PLUGIN LOADING START ===");
+            log::info!("Loading plugin from: {}", path.display());
+            
             // Load the library
+            log::debug!("Step 1: Loading dynamic library...");
             let library = Library::new(path)
                 .map_err(|e| Error::PluginLoadFailed(format!("Failed to load library: {}", e)))?;
+            log::debug!("✅ Library loaded successfully");
 
             // Get factory function
+            log::debug!("Step 2: Getting GetPluginFactory function...");
             type GetPluginFactoryFunc = unsafe extern "C" fn() -> *mut IPluginFactory;
             let get_factory: Symbol<GetPluginFactoryFunc> =
                 library.get(b"GetPluginFactory\0").map_err(|e| {
                     Error::PluginLoadFailed(format!("Failed to find GetPluginFactory: {}", e))
                 })?;
+            log::debug!("✅ GetPluginFactory function found");
 
+            log::debug!("Step 3: Calling GetPluginFactory...");
             let factory_ptr = get_factory();
+            log::debug!("✅ GetPluginFactory called, ptr: {:?}", factory_ptr);
             if factory_ptr.is_null() {
                 return Err(Error::PluginLoadFailed(
                     "GetPluginFactory returned null".to_string(),
                 ));
             }
 
+            log::debug!("Step 4: Wrapping factory in ComPtr...");
             let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or_else(|| {
                 Error::PluginLoadFailed("Failed to create factory ComPtr".to_string())
             })?;
+            log::debug!("✅ Factory wrapped successfully");
 
             // Find and create the audio component
+            log::debug!("Step 5: Creating audio component...");
             let component = Self::create_component(&factory)?;
+            log::debug!("✅ Component created successfully");
 
             // Initialize component
-            component.initialize(ptr::null_mut());
+            log::debug!("Step 6: Initializing component...");
+            let init_result = component.initialize(ptr::null_mut());
+            log::debug!("✅ Component initialized with result: {:#x}", init_result);
+
+            // CRITICAL: Activate event buses for MIDI processing
+            log::debug!("Step 7: Activating event buses...");
+            Self::activate_event_buses(&component)?;
+            log::debug!("✅ Event buses activated");
 
             // Get processor interface
+            log::debug!("Step 8: Getting IAudioProcessor interface...");
             let processor = component.cast::<IAudioProcessor>().ok_or_else(|| {
                 Error::InterfaceError("Component does not implement IAudioProcessor".to_string())
             })?;
+            log::debug!("✅ IAudioProcessor interface obtained");
 
-            // Try to get controller
-            let controller = component.cast::<IEditController>();
+            // Create component handler for parameter change notifications  
+            log::debug!("Step 9: Creating component handler...");
+            let parameter_changes = Arc::new(Mutex::new(Vec::new()));
+            let component_handler = ComWrapper::new(ComponentHandler::new(parameter_changes.clone()));
+            log::debug!("✅ Component handler created");
+
+            // Get or create controller (handles both single-component and separate controller)
+            log::debug!("Step 10: Getting or creating controller...");
+            let controller = Self::get_or_create_controller(&component, &factory)?;
+            log::debug!("✅ Controller obtained: {}", controller.is_some());
+
+            // Connect component and controller if they are separate
+            if let Some(ref ctrl) = controller {
+                log::debug!("Step 11: Connecting component and controller...");
+                Self::connect_component_and_controller(&component, ctrl)?;
+                log::debug!("✅ Component and controller connected");
+                
+                // Set component handler on controller for parameter change notifications
+                log::debug!("Step 12: Setting component handler on controller...");
+                if let Some(handler_ptr) = component_handler.to_com_ptr::<IComponentHandler>() {
+                    let result = ctrl.setComponentHandler(handler_ptr.into_raw());
+                    if result == kResultOk {
+                        log::debug!("✅ Component handler set on controller successfully");
+                    } else {
+                        log::warn!("Failed to set component handler on controller: {:#x}", result);
+                    }
+                } else {
+                    log::error!("Failed to get IComponentHandler COM pointer");
+                }
+                
+                // TEMPORARILY DISABLED: Transfer component state to controller
+                // This was causing hangs with some plugins like Dexed
+                // Self::transfer_component_state(&component, ctrl)?;
+                log::debug!("State transfer temporarily disabled to prevent hangs");
+            }
+
+            // Activate component (important for parameter access)
+            log::debug!("Step 13: Activating component...");
+            let activate_result = component.setActive(1);
+            log::debug!("Component activation result: {:#x}", activate_result);
+            let is_active = if activate_result == kResultOk {
+                log::debug!("Component activated successfully during initialization");
+                true
+            } else {
+                log::warn!("Component activation failed during initialization: {:#x}", activate_result);
+                false
+            };
 
             // Create event lists
+            log::debug!("Step 14: Creating event lists...");
             let input_events = create_event_list();
             let output_events = create_event_list();
+            log::debug!("✅ Event lists created");
 
             // Update has_gui based on actual capability
             let mut updated_info = info;
@@ -137,17 +222,21 @@ impl PluginImpl {
                 }
             };
 
+            log::info!("=== PLUGIN LOADING COMPLETE ===");
+            log::info!("Plugin info: {} by {}", updated_info.name, updated_info.vendor);
+            log::info!("Has GUI: {}, Active: {}", updated_info.has_gui, is_active);
+            
             Ok(Self {
                 component,
                 processor,
                 controller,
                 info: updated_info,
-                is_active: false,
+                is_active,
                 is_processing: false,
                 sample_rate: 44100.0,
                 block_size: 512,
                 process_data: None,
-                component_handler: None,
+                component_handler: Some(component_handler),
                 input_events,
                 output_events,
                 plugin_view: None,
@@ -278,9 +367,43 @@ impl PluginImpl {
     /// Prepare audio buffers based on plugin bus configuration
     unsafe fn prepare_buffers(&mut self, data: &mut HostProcessData) -> Result<()> {
         // Get bus counts
+        let input_bus_count = self.component.getBusCount(kAudio as i32, kInput as i32);
         let output_bus_count = self.component.getBusCount(kAudio as i32, kOutput as i32);
 
-        // Prepare output buffers (most important for instruments)
+        // Clear existing buffers
+        data.input_buffers.clear();
+        data.output_buffers.clear();
+        data.input_bus_buffers.clear();
+        data.output_bus_buffers.clear();
+
+        // Prepare input buffers
+        for bus_idx in 0..input_bus_count {
+            let mut bus_info: BusInfo = std::mem::zeroed();
+            if self
+                .component
+                .getBusInfo(kAudio as i32, kInput as i32, bus_idx, &mut bus_info)
+                == kResultOk
+            {
+                let channel_count = bus_info.channelCount;
+
+                // Activate the bus
+                self.component
+                    .activateBus(kAudio as i32, kInput as i32, bus_idx, 1);
+
+                // Create buffers for this bus
+                for _ in 0..channel_count {
+                    let buffer = vec![0.0f32; self.block_size];
+                    data.input_buffers.push(buffer);
+                }
+
+                // Create AudioBusBuffers struct
+                let mut audio_bus_buffer: AudioBusBuffers = std::mem::zeroed();
+                audio_bus_buffer.numChannels = channel_count;
+                data.input_bus_buffers.push(audio_bus_buffer);
+            }
+        }
+
+        // Prepare output buffers
         for bus_idx in 0..output_bus_count {
             let mut bus_info: BusInfo = std::mem::zeroed();
             if self
@@ -301,14 +424,23 @@ impl PluginImpl {
                 }
 
                 // Create AudioBusBuffers struct
-                let audio_bus_buffer: AudioBusBuffers = std::mem::zeroed();
+                let mut audio_bus_buffer: AudioBusBuffers = std::mem::zeroed();
+                audio_bus_buffer.numChannels = channel_count;
                 data.output_bus_buffers.push(audio_bus_buffer);
             }
         }
 
-        // We'll set up the actual pointers during process() to avoid storing raw pointers
-        data.process_data.numInputs = 0;
+        // Set up process data counts
+        data.process_data.numInputs = data.input_bus_buffers.len() as i32;
         data.process_data.numOutputs = data.output_bus_buffers.len() as i32;
+
+        log::debug!(
+            "Prepared buffers: {} input buses, {} output buses, {} input channels, {} output channels",
+            input_bus_count,
+            output_bus_count,
+            data.input_buffers.len(),
+            data.output_buffers.len()
+        );
 
         Ok(())
     }
@@ -380,31 +512,59 @@ impl PluginInternal for PluginImpl {
 
         if let Some(ref mut data) = self.process_data {
             unsafe {
-                // Clear events
-                self.input_events.clear();
+                // Clear output events only - input events should be preserved for processing
                 self.output_events.clear();
+
+                // Copy input audio to plugin buffers
+                for (ch_idx, channel) in buffers.inputs.iter().enumerate() {
+                    if ch_idx < data.input_buffers.len() {
+                        data.input_buffers[ch_idx].copy_from_slice(channel);
+                    }
+                }
 
                 // Clear output buffers
                 for buffer in &mut data.output_buffers {
                     buffer.fill(0.0);
                 }
 
-                // Create temporary pointer arrays for this process call
+                // Set up input buffer pointers
+                let mut input_channel_ptrs: Vec<Vec<*mut f32>> = Vec::new();
+                let mut input_channel_offset = 0;
+
+                for bus in &data.input_bus_buffers {
+                    let mut bus_ptrs = Vec::new();
+                    for _ in 0..bus.numChannels {
+                        if input_channel_offset < data.input_buffers.len() {
+                            bus_ptrs.push(data.input_buffers[input_channel_offset].as_mut_ptr());
+                            input_channel_offset += 1;
+                        }
+                    }
+                    input_channel_ptrs.push(bus_ptrs);
+                }
+
+                // Set up output buffer pointers
                 let mut output_channel_ptrs: Vec<Vec<*mut f32>> = Vec::new();
-                let mut channel_offset = 0;
+                let mut output_channel_offset = 0;
 
                 for bus in &data.output_bus_buffers {
                     let mut bus_ptrs = Vec::new();
                     for _ in 0..bus.numChannels {
-                        if channel_offset < data.output_buffers.len() {
-                            bus_ptrs.push(data.output_buffers[channel_offset].as_mut_ptr());
-                            channel_offset += 1;
+                        if output_channel_offset < data.output_buffers.len() {
+                            bus_ptrs.push(data.output_buffers[output_channel_offset].as_mut_ptr());
+                            output_channel_offset += 1;
                         }
                     }
                     output_channel_ptrs.push(bus_ptrs);
                 }
 
-                // Update the bus buffer pointers
+                // Update input bus buffer pointers
+                for (i, bus) in data.input_bus_buffers.iter_mut().enumerate() {
+                    if i < input_channel_ptrs.len() && !input_channel_ptrs[i].is_empty() {
+                        bus.__field0.channelBuffers32 = input_channel_ptrs[i].as_mut_ptr();
+                    }
+                }
+
+                // Update output bus buffer pointers
                 for (i, bus) in data.output_bus_buffers.iter_mut().enumerate() {
                     if i < output_channel_ptrs.len() && !output_channel_ptrs[i].is_empty() {
                         bus.__field0.channelBuffers32 = output_channel_ptrs[i].as_mut_ptr();
@@ -412,6 +572,12 @@ impl PluginInternal for PluginImpl {
                 }
 
                 // Update process data pointers
+                data.process_data.inputs = if data.input_bus_buffers.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    data.input_bus_buffers.as_mut_ptr()
+                };
+
                 data.process_data.outputs = if data.output_bus_buffers.is_empty() {
                     ptr::null_mut()
                 } else {
@@ -423,6 +589,9 @@ impl PluginInternal for PluginImpl {
                 if result != kResultOk {
                     return Err(Error::Other(format!("Process failed: {:#x}", result)));
                 }
+
+                // Clear input events AFTER processing so plugin can see them
+                self.input_events.clear();
 
                 // Copy output to provided buffers
                 for (ch_idx, channel) in buffers.outputs.iter_mut().enumerate() {
@@ -496,8 +665,10 @@ impl PluginInternal for PluginImpl {
 
     fn start_processing(&mut self) -> Result<()> {
         unsafe {
-            // Activate component if needed
+            // Component should already be activated during initialization
+            // But activate it if somehow it's not active
             if !self.is_active {
+                log::warn!("Component not active, attempting to activate");
                 let result = self.component.setActive(1);
                 if result != kResultOk {
                     return Err(Error::Other(format!("Failed to activate: {:#x}", result)));
@@ -518,6 +689,7 @@ impl PluginInternal for PluginImpl {
             }
 
             self.is_processing = true;
+            log::debug!("Plugin processing started successfully");
             Ok(())
         }
     }
@@ -671,6 +843,10 @@ impl PluginInternal for PluginImpl {
             Err(Error::Other("No controller available".to_string()))
         }
     }
+
+    fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
+        self.get_parameter_changes()
+    }
 }
 
 impl PluginImpl {
@@ -697,6 +873,162 @@ impl PluginImpl {
         };
 
         self.input_events.add_event(event);
+        Ok(())
+    }
+
+    /// Activate all event buses for MIDI processing
+    unsafe fn activate_event_buses(component: &ComPtr<IComponent>) -> Result<()> {
+        // Activate event input buses
+        let event_input_count = component.getBusCount(kEvent as i32, kInput as i32);
+        for i in 0..event_input_count {
+            let mut bus_info = std::mem::zeroed();
+            let info_result = component.getBusInfo(kEvent as i32, kInput as i32, i, &mut bus_info);
+            let name = if info_result == kResultOk {
+                crate::internal::utils::vst_string_to_string(&bus_info.name)
+            } else {
+                format!("#{}", i)
+            };
+            
+            let activate_result = component.activateBus(kEvent as i32, kInput as i32, i, 1);
+            log::debug!(
+                "Event Input Bus {} (index {}): activation result = {:#x}",
+                name, i, activate_result
+            );
+        }
+
+        // Activate event output buses
+        let event_output_count = component.getBusCount(kEvent as i32, kOutput as i32);
+        for i in 0..event_output_count {
+            let mut bus_info = std::mem::zeroed();
+            let info_result = component.getBusInfo(kEvent as i32, kOutput as i32, i, &mut bus_info);
+            let name = if info_result == kResultOk {
+                crate::internal::utils::vst_string_to_string(&bus_info.name)
+            } else {
+                format!("#{}", i)
+            };
+            
+            let activate_result = component.activateBus(kEvent as i32, kOutput as i32, i, 1);
+            log::debug!(
+                "Event Output Bus {} (index {}): activation result = {:#x}",
+                name, i, activate_result
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Get or create controller (handles both single-component and separate controller)
+    unsafe fn get_or_create_controller(
+        component: &ComPtr<IComponent>,
+        factory: &ComPtr<IPluginFactory>,
+    ) -> Result<Option<ComPtr<IEditController>>> {
+        // First, try to cast component to IEditController (single component)
+        if let Some(controller) = component.cast::<IEditController>() {
+            log::debug!("Component implements IEditController (single component)");
+            return Ok(Some(controller));
+        }
+
+        // If not single component, try to get separate controller
+        log::debug!("Component is separate from controller, getting controller class ID...");
+        let mut controller_cid = [0i8; 16];
+        let result = component.getControllerClassId(&mut controller_cid);
+
+        if result != kResultOk {
+            log::warn!("Failed to get controller class ID: {:#x}", result);
+            return Ok(None);
+        }
+
+        log::debug!("Got controller class ID, creating controller...");
+        let mut controller_ptr: *mut IEditController = ptr::null_mut();
+        let create_result = factory.createInstance(
+            controller_cid.as_ptr(),
+            IEditController::IID.as_ptr() as *const i8,
+            &mut controller_ptr as *mut _ as *mut _,
+        );
+
+        if create_result != kResultOk || controller_ptr.is_null() {
+            log::warn!(
+                "Failed to create controller: {:#x}, ptr is null: {}",
+                create_result,
+                controller_ptr.is_null()
+            );
+            return Ok(None);
+        }
+
+        let controller = ComPtr::<IEditController>::from_raw(controller_ptr)
+            .ok_or_else(|| Error::InterfaceError("Failed to wrap controller".to_string()))?;
+
+        // Initialize controller
+        log::debug!("Initializing controller...");
+        let init_result = controller.initialize(ptr::null_mut());
+        if init_result != kResultOk {
+            log::warn!("Failed to initialize controller: {:#x}", init_result);
+            return Ok(None);
+        }
+
+        log::debug!("Controller created and initialized successfully");
+        Ok(Some(controller))
+    }
+
+    /// Connect component and controller via IConnectionPoint
+    unsafe fn connect_component_and_controller(
+        component: &ComPtr<IComponent>,
+        controller: &ComPtr<IEditController>,
+    ) -> Result<()> {
+        // Try to get connection points
+        let comp_cp = component.cast::<IConnectionPoint>();
+        let ctrl_cp = controller.cast::<IConnectionPoint>();
+
+        if let (Some(comp_cp), Some(ctrl_cp)) = (comp_cp, ctrl_cp) {
+            // Connect component to controller
+            let result1 = comp_cp.connect(ctrl_cp.as_ptr());
+            let result2 = ctrl_cp.connect(comp_cp.as_ptr());
+
+            if result1 == kResultOk && result2 == kResultOk {
+                log::debug!("Components connected successfully");
+                Ok(())
+            } else {
+                log::warn!(
+                    "Component connection failed: comp->ctrl={:#x}, ctrl->comp={:#x}",
+                    result1, result2
+                );
+                Err(Error::InterfaceError("Failed to connect components".to_string()))
+            }
+        } else {
+            log::debug!("Components do not support IConnectionPoint - might be single component");
+            Ok(()) // Not an error - single components don't need connection
+        }
+    }
+
+    /// Transfer component state to controller
+    unsafe fn transfer_component_state(
+        component: &ComPtr<IComponent>,
+        controller: &ComPtr<IEditController>,
+    ) -> Result<()> {
+        // Get state from component
+        let mut state_ptr: *mut vst3::Steinberg::IBStream = ptr::null_mut();
+        
+        // First check if component supports state saving
+        let save_result = component.getState(&mut state_ptr as *mut _ as *mut _);
+        
+        if save_result != kResultOk || state_ptr.is_null() {
+            log::debug!("Component does not provide state or state is empty");
+            return Ok(()); // Not an error - some plugins don't have state
+        }
+
+        // Wrap the state stream
+        let state_stream = ComPtr::<vst3::Steinberg::IBStream>::from_raw(state_ptr)
+            .ok_or_else(|| Error::InterfaceError("Failed to wrap state stream".to_string()))?;
+
+        // Set state on controller
+        let set_result = controller.setComponentState(state_stream.as_ptr());
+        
+        if set_result == kResultOk {
+            log::debug!("Component state transferred to controller successfully");
+        } else {
+            log::warn!("Failed to set component state on controller: {:#x}", set_result);
+        }
+
         Ok(())
     }
 }

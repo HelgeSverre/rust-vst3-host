@@ -188,6 +188,11 @@ impl PluginInternal for IsolatedPluginImpl {
         // TODO: Query the isolated process for editor size
         Ok((800, 600))
     }
+
+    fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
+        // Parameter changes not supported in process isolation mode
+        Vec::new()
+    }
 }
 
 // Ensure IsolatedPluginImpl is Send

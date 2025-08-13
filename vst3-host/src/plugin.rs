@@ -63,6 +63,7 @@ pub(crate) trait PluginInternal: Send {
     fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()>;
     fn close_editor(&mut self) -> Result<()>;
     fn get_editor_size(&self) -> Result<(i32, i32)>;
+    fn get_parameter_changes(&self) -> Vec<(u32, f64)>;
 }
 
 impl Plugin {
@@ -326,6 +327,16 @@ impl Plugin {
             }
         }
         Ok(())
+    }
+
+    /// Get parameter changes from plugin GUI
+    /// Returns a vector of (parameter_id, normalized_value) pairs
+    /// This should be called regularly to pick up parameter changes made through the plugin's GUI
+    pub fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
+        self.internal
+            .as_ref()
+            .map(|i| i.get_parameter_changes())
+            .unwrap_or_else(Vec::new)
     }
 }
 

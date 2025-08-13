@@ -17,7 +17,7 @@ impl ComponentHandler {
 }
 
 impl Class for ComponentHandler {
-    type Interfaces = (IComponentHandler,);
+    type Interfaces = (IComponentHandler, IComponentHandler2);
 }
 
 impl IComponentHandlerTrait for ComponentHandler {
@@ -50,6 +50,28 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 }
 
+impl IComponentHandler2Trait for ComponentHandler {
+    unsafe fn setDirty(&self, _state: u8) -> i32 {
+        log::debug!("Host: Plugin marked state as dirty (state: {})", _state);
+        kResultOk
+    }
+    
+    unsafe fn requestOpenEditor(&self, _name: *const i8) -> i32 {
+        log::debug!("Host: Plugin requested editor open");
+        kResultOk
+    }
+    
+    unsafe fn startGroupEdit(&self) -> i32 {
+        log::debug!("Host: Plugin started group edit");
+        kResultOk
+    }
+    
+    unsafe fn finishGroupEdit(&self) -> i32 {
+        log::debug!("Host: Plugin finished group edit");
+        kResultOk
+    }
+}
+
 // Event List implementation
 pub struct HostEventList {
     pub events: Mutex<Vec<Event>>,
@@ -63,11 +85,27 @@ impl HostEventList {
     }
 
     pub fn clear(&self) {
-        self.events.lock().unwrap().clear();
+        match self.events.lock() {
+            Ok(mut events) => {
+                events.clear();
+                log::trace!("HostEventList: Cleared all events");
+            }
+            Err(_) => {
+                log::error!("HostEventList: Failed to lock events for clear");
+            }
+        }
     }
 
     pub fn add_event(&self, event: Event) {
-        self.events.lock().unwrap().push(event);
+        match self.events.lock() {
+            Ok(mut events) => {
+                events.push(event);
+                log::trace!("HostEventList: Added event via add_event, total count: {}", events.len());
+            }
+            Err(_) => {
+                log::error!("HostEventList: Failed to lock events for add_event");
+            }
+        }
     }
 }
 
@@ -83,24 +121,59 @@ impl Class for HostEventList {
 
 impl IEventListTrait for HostEventList {
     unsafe fn getEventCount(&self) -> i32 {
-        self.events.lock().unwrap().len() as i32
+        match self.events.lock() {
+            Ok(events) => events.len() as i32,
+            Err(_) => {
+                log::error!("HostEventList: Failed to lock events for getEventCount");
+                0
+            }
+        }
     }
 
     unsafe fn getEvent(&self, index: i32, event: *mut Event) -> i32 {
-        if let Some(e) = self.events.lock().unwrap().get(index as usize) {
-            *event = *e;
-            kResultOk
-        } else {
-            kResultFalse
+        if event.is_null() {
+            log::warn!("HostEventList: getEvent called with null event pointer");
+            return kResultFalse;
+        }
+        
+        if index < 0 {
+            log::warn!("HostEventList: getEvent called with negative index: {}", index);
+            return kResultFalse;
+        }
+        
+        match self.events.lock() {
+            Ok(events) => {
+                if let Some(e) = events.get(index as usize) {
+                    *event = *e;
+                    kResultOk
+                } else {
+                    log::warn!("HostEventList: getEvent index {} out of bounds (count: {})", index, events.len());
+                    kResultFalse
+                }
+            }
+            Err(_) => {
+                log::error!("HostEventList: Failed to lock events for getEvent");
+                kResultFalse
+            }
         }
     }
 
     unsafe fn addEvent(&self, event: *mut Event) -> i32 {
-        if !event.is_null() {
-            self.events.lock().unwrap().push(*event);
-            kResultOk
-        } else {
-            kResultFalse
+        if event.is_null() {
+            log::warn!("HostEventList: addEvent called with null event pointer");
+            return kResultFalse;
+        }
+        
+        match self.events.lock() {
+            Ok(mut events) => {
+                events.push(*event);
+                log::trace!("HostEventList: Added event, total count: {}", events.len());
+                kResultOk
+            }
+            Err(_) => {
+                log::error!("HostEventList: Failed to lock events for addEvent");
+                kResultFalse
+            }
         }
     }
 }
@@ -128,54 +201,101 @@ impl Class for ParameterChanges {
 
 impl IParameterChangesTrait for ParameterChanges {
     unsafe fn getParameterCount(&self) -> i32 {
-        self.queues.lock().unwrap().len() as i32
+        match self.queues.lock() {
+            Ok(queues) => {
+                let count = queues.len() as i32;
+                log::trace!("Internal ParameterChanges: getParameterCount returning {}", count);
+                count
+            }
+            Err(_) => {
+                log::error!("Internal ParameterChanges: Failed to lock queues for getParameterCount");
+                0
+            }
+        }
     }
 
     unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
-        if let Some(queue) = self.queues.lock().unwrap().get(index as usize) {
-            queue
-                .to_com_ptr::<IParamValueQueue>()
-                .map(|ptr| ptr.into_raw())
-                .unwrap_or(ptr::null_mut())
-        } else {
-            ptr::null_mut()
+        if index < 0 {
+            log::warn!("Internal ParameterChanges: getParameterData called with negative index: {}", index);
+            return ptr::null_mut();
+        }
+        
+        match self.queues.lock() {
+            Ok(queues) => {
+                if let Some(queue) = queues.get(index as usize) {
+                    match queue.to_com_ptr::<IParamValueQueue>() {
+                        Some(ptr) => {
+                            log::trace!("Internal ParameterChanges: getParameterData returning queue for index {}", index);
+                            ptr.into_raw()
+                        }
+                        None => {
+                            log::error!("Internal ParameterChanges: Failed to convert queue to COM pointer for index {}", index);
+                            ptr::null_mut()
+                        }
+                    }
+                } else {
+                    log::warn!("Internal ParameterChanges: getParameterData index {} out of bounds (count: {})", index, queues.len());
+                    ptr::null_mut()
+                }
+            }
+            Err(_) => {
+                log::error!("Internal ParameterChanges: Failed to lock queues for getParameterData");
+                ptr::null_mut()
+            }
         }
     }
 
     unsafe fn addParameterData(&self, id: *const u32, index: *mut i32) -> *mut IParamValueQueue {
         if id.is_null() {
+            log::warn!("Internal ParameterChanges: addParameterData called with null id pointer");
             return ptr::null_mut();
         }
 
         let param_id = *id;
-        let mut queues = self.queues.lock().unwrap();
-
-        // Check if queue for this parameter already exists
-        for (i, queue) in queues.iter().enumerate() {
-            if queue.param_id == param_id {
-                if !index.is_null() {
-                    *index = i as i32;
+        
+        match self.queues.lock() {
+            Ok(mut queues) => {
+                // Check if queue for this parameter already exists
+                for (i, queue) in queues.iter().enumerate() {
+                    if queue.param_id == param_id {
+                        if !index.is_null() {
+                            *index = i as i32;
+                        }
+                        log::trace!("Internal ParameterChanges: Found existing queue for parameter {}", param_id);
+                        return queue
+                            .to_com_ptr::<IParamValueQueue>()
+                            .map(|ptr| ptr.into_raw())
+                            .unwrap_or_else(|| {
+                                log::error!("Internal ParameterChanges: Failed to convert existing queue to COM pointer");
+                                ptr::null_mut()
+                            });
+                    }
                 }
-                return queue
+
+                // Create new queue
+                let new_queue = ComWrapper::new(ParameterValueQueue::new(param_id));
+                let queue_ptr = new_queue
                     .to_com_ptr::<IParamValueQueue>()
                     .map(|ptr| ptr.into_raw())
-                    .unwrap_or(ptr::null_mut());
+                    .unwrap_or_else(|| {
+                        log::error!("Internal ParameterChanges: Failed to convert new queue to COM pointer");
+                        ptr::null_mut()
+                    });
+
+                if !index.is_null() {
+                    *index = queues.len() as i32;
+                }
+
+                queues.push(new_queue);
+                let new_count = queues.len();
+                log::trace!("Internal ParameterChanges: Created new queue for parameter {}, total count: {}", param_id, new_count);
+                queue_ptr
+            }
+            Err(_) => {
+                log::error!("Internal ParameterChanges: Failed to lock queues for addParameterData");
+                ptr::null_mut()
             }
         }
-
-        // Create new queue
-        let new_queue = ComWrapper::new(ParameterValueQueue::new(param_id));
-        let queue_ptr = new_queue
-            .to_com_ptr::<IParamValueQueue>()
-            .map(|ptr| ptr.into_raw())
-            .unwrap_or(ptr::null_mut());
-
-        if !index.is_null() {
-            *index = queues.len() as i32;
-        }
-
-        queues.push(new_queue);
-        queue_ptr
     }
 }
 

@@ -6,7 +6,15 @@
       "Bash(git add:*)",
       "Bash(grep:*)",
       "Bash(ls:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:steinbergmedia.github.io)",
+      "Bash(find:*)",
+      "Bash(./target/debug/examples/host \"/Users/helge/code/vst-host/test_plugins/Dexed.vst3\")",
+      "Bash(RUST_LOG=debug cargo run --example test_loading -- \"/Users/helge/code/vst-host/test_plugins/Dexed.vst3\")",
+      "Bash(RUST_LOG=vst3_host=debug cargo run --example test_loading -- \"/Users/helge/code/vst-host/test_plugins/Dexed.vst3\")",
+      "WebSearch",
+      "WebSearch"
     ],
     "deny": []
   }

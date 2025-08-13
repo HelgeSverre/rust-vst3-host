@@ -58,6 +58,16 @@ name = "plugin_scanner"
 name = "plugin_gui"
 required-features = ["cpal-backend"]
 
+[[example]]
+name = "host"
+required-features = ["cpal-backend", "egui-widgets"]
+
+[[example]]
+name = "test_loading"
+
+[[example]]
+name = "debug_loader"
+
 [[bin]]
 name = "vst3-host-helper"
 required-features = ["process-isolation"]
