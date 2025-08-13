@@ -59,8 +59,8 @@ fn is_blacklisted(path: &Path) -> bool {
     if let Some(file_name) = path.file_name() {
         if let Some(name_str) = file_name.to_str() {
             let name_lower = name_str.to_lowercase();
-            // Blacklist plugins known to cause issues
-            return name_lower.contains("wave") || name_lower.contains("ozone");
+            // Blacklist plugins known to cause issues (removed wave blacklisting)
+            return name_lower.contains("ozone"); // Only ozone for now
         }
     }
     false
@@ -101,27 +101,11 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
     use vst3::{ComPtr, Interface, Steinberg::Vst::*, Steinberg::*};
 
     unsafe {
-        // Get the binary path
-        let binary_path = get_vst3_binary_path(path)?;
+        // Load the module using our VST3-compliant module loader
+        let module = crate::internal::module_loader::load_module(path)?;
 
-        // Load the library
-        let library = libloading::Library::new(&binary_path).map_err(|e| {
-            crate::Error::PluginLoadFailed(format!("Failed to load library: {}", e))
-        })?;
-
-        // Get factory function
-        type GetPluginFactoryFunc = unsafe extern "C" fn() -> *mut IPluginFactory;
-        let get_factory: libloading::Symbol<GetPluginFactoryFunc> =
-            library.get(b"GetPluginFactory\0").map_err(|e| {
-                crate::Error::PluginLoadFailed(format!("Failed to find GetPluginFactory: {}", e))
-            })?;
-
-        let factory_ptr = get_factory();
-        if factory_ptr.is_null() {
-            return Err(crate::Error::PluginLoadFailed(
-                "GetPluginFactory returned null".to_string(),
-            ));
-        }
+        // Get factory using the proper VST3 loading sequence
+        let factory_ptr = module.get_factory()?;
 
         let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or_else(|| {
             crate::Error::PluginLoadFailed("Failed to create factory ComPtr".to_string())

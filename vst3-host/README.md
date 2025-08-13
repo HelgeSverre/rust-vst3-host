@@ -1,139 +1,15 @@
 # vst3-host
 
-A Rust library for hosting VST3 plugins with a safe API.
+A safe, simple, and lightweight Rust library for hosting VST3 plugins with real-time audio processing, MIDI support, and advanced plugin compatibility features.
 
-## Building and Running
-
-### Prerequisites
-
-- Rust 1.70 or later
-- VST3 SDK (included as submodule)
-- CMake (for building VST3 SDK)
-
-### Building the Library
-
-```bash
-# Clone the repository (if not already done)
-git clone <repository-url>
-cd vst-host
-
-# Initialize and update submodules (for VST3 SDK)
-git submodule update --init --recursive
-
-# Build the library
-cd vst3-host
-cargo build --release
-
-# Build with CPAL audio backend
-cargo build --release --features cpal-backend
-
-# Run tests
-cargo test
-```
-
-### Building the Main Application
-
-```bash
-# From the root directory
-cd ..
-cargo build --release
-
-# Run the main VST3 host application
-cargo run --release
-
-# Or run the built binary directly
-./target/release/vst-host
-
-# The build also creates a helper binary for process isolation
-# This is built automatically: ./target/release/vst-host-helper
-```
-
-### Building and Running Examples
-
-The library comes with several examples demonstrating different features:
-
-```bash
-# From the vst3-host directory
-cd vst3-host
-
-# 1. Plugin scanner - discover all VST3 plugins on your system
-cargo run --example plugin_scanner
-cargo run --example plugin_scanner -- --isolated  # With process isolation
-
-# 2. Plugin GUI - egui interface with file picker and virtual MIDI keyboard
-cargo run --example plugin_gui --features cpal-backend
-
-# 3. MIDI keyboard - terminal-based interactive MIDI input
-cargo run --example midi_keyboard --features cpal-backend
-
-# Build all examples at once
-cargo build --examples --features cpal-backend
-```
-
-### Running Tests
-
-```bash
-# Run all tests
-cargo test
-
-# Run tests with output
-cargo test -- --nocapture
-
-# Run specific test module
-cargo test midi_tests
-cargo test parameter_tests
-cargo test audio_tests
-
-# Run tests with CPAL backend
-cargo test --features cpal-backend
-```
-
-### Quick Command Reference
-
-```bash
-# Development workflow
-cargo check              # Quick syntax/type check
-cargo clippy            # Linting
-cargo fmt               # Format code
-cargo doc --open        # Build and view documentation
-
-# Release builds
-cargo build --release --features cpal-backend
-cargo test --release
-
-# Run specific example in release mode
-cargo run --release --example plugin_scanner
-```
-
-## Features
-
-- Safe API - No unsafe code required by library users
-- Simple to use - Minimal boilerplate for common tasks
-- CPAL audio backend included
-- Process isolation for plugin crash protection
-- Full MIDI support
-- Parameter control and automation
-- Real-time audio level monitoring
-
-## Quick Start
+## 🚀 Quick Start (5 minutes)
 
 ```rust
 use vst3_host::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a host that scans system directories
-    let mut host = Vst3Host::builder()
-        .scan_default_paths()  // Opt-in to scanning system VST3 directories
-        .build()?;
-    
-    // Or create a host that only scans specific directories
-    let mut host = Vst3Host::builder()
-        .add_scan_path("./my-plugins")
-        .build()?;
-    
-    // Discover and load a plugin
-    let plugins = host.discover_plugins()?;
-    let mut plugin = host.load_plugin(&plugins[0].path)?;
+    // Simple plugin loading
+    let mut plugin = vst3_host::simple::load_plugin("/path/to/plugin.vst3")?;
     
     // Start audio processing
     plugin.start_processing()?;
@@ -145,192 +21,209 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Usage Examples
+## 📚 Learning Paths
 
-The library includes three focused examples:
+### 🎵 **For Music Producers**
+Want to build custom audio tools? Start here:
+1. [**5-min Tutorial**: Your First VST3 Host](docs/tutorials/01-first-host.md)
+2. [**10-min Tutorial**: Processing Audio](docs/tutorials/02-processing-audio.md)
+3. [**Example**: Interactive Parameter Automation](examples/parameter_automation.rs)
 
-1. **plugin_scanner** - Discovers and lists VST3 plugins with optional process isolation
-   ```bash
-   cargo run --example plugin_scanner -- --help
-   cargo run --example plugin_scanner -- --isolated  # Run with process isolation
-   ```
+### 👨‍💻 **For Rust Developers**
+New to audio programming? Follow this path:
+1. [**Quick Reference**: Common Patterns](docs/QUICK_REFERENCE.md)
+2. [**20-min Tutorial**: Building a Simple Plugin Host](docs/tutorials/03-simple-host.md)
+3. [**30-min Tutorial**: Advanced Features](docs/tutorials/04-advanced-features.md)
 
-2. **plugin_gui** - Complete host with egui interface, file picker and virtual MIDI keyboard
-   ```bash
-   cargo run --example plugin_gui --features cpal-backend
-   cargo run --example plugin_gui --features cpal-backend -- --isolated  # With process isolation
-   ```
+### 🔧 **For Plugin Developers**
+Testing your VST3 plugins? Use these tools:
+1. [**Example**: Plugin Scanner](examples/plugin_scanner.rs) - Test plugin loading
+2. [**Example**: Test Loading](examples/test_loading.rs) - Detailed compatibility testing
+3. [**Guide**: Troubleshooting](docs/TROUBLESHOOTING.md) - Common plugin issues
 
-3. **midi_keyboard** - Terminal-based MIDI keyboard for testing plugins
-   ```bash
-   cargo run --example midi_keyboard --features cpal-backend
-   ```
+### 🏭 **For Production Use**
+Building commercial software? Learn best practices:
+1. [**45-min Tutorial**: Production Ready Host](docs/tutorials/05-production-ready.md)
+2. [**Guide**: Performance Optimization](docs/QUICK_REFERENCE.md#performance)
+3. [**Guide**: Cross-Platform Deployment](docs/QUICK_REFERENCE.md#deployment)
 
-## API Overview
+## ✨ Key Features
 
-### Plugin Discovery
+- **🛡️ Crash Protection** - Process isolation prevents plugin crashes from affecting your app
+- **🎯 Simple API** - No unsafe code required, sensible defaults, minimal boilerplate
+- **🎹 Full MIDI Support** - Real-time MIDI input/output with virtual keyboard
+- **🎚️ Parameter Control** - Real-time automation and preset management
+- **📊 Audio Monitoring** - Built-in level meters and clipping detection
+- **🔄 Cross-Platform** - Windows, macOS, and Linux support
+- **⚡ High Performance** - Optimized for real-time audio processing
 
-```rust
-// Create host with custom scan paths only (recommended)
-let mut host = Vst3Host::builder()
-    .add_scan_path("./my-plugins")
-    .add_scan_path("/custom/vst3/folder")
-    .build()?;
+## 🛠️ Installation
 
-// Or include system directories
-let mut host = Vst3Host::builder()
-    .scan_default_paths()  // Opt-in to system paths
-    .add_scan_path("./my-plugins")  // Plus custom paths
-    .build()?;
+Add this to your `Cargo.toml`:
 
-// Discover all plugins in configured paths
-let plugins = host.discover_plugins()?;
+```toml
+[dependencies]
+vst3-host = "0.1"
 
-// Discover with progress updates
-let plugins = host.discover_plugins_with_callback(|progress| {
-    match progress {
-        DiscoveryProgress::Found { plugin, current, total } => {
-            println!("[{}/{}] Found: {}", current, total, plugin.name);
-        }
-        _ => {}
-    }
-})?;
+# For audio I/O
+vst3-host = { version = "0.1", features = ["cpal-backend"] }
 
-// Add paths after creation
-host.add_scan_path("/another/vst3/folder")?;
+# For GUI applications  
+vst3-host = { version = "0.1", features = ["cpal-backend", "egui-widgets"] }
+
+# For crash protection
+vst3-host = { version = "0.1", features = ["process-isolation"] }
 ```
 
-### Plugin Loading and Control
+## 🎮 Examples
 
-```rust
-// Load a plugin
-let mut plugin = host.load_plugin("/path/to/plugin.vst3")?;
+Run these examples to see the library in action:
 
-// Start/stop processing
-plugin.start_processing()?;
-plugin.stop_processing()?;
+```bash
+# 1. Interactive GUI host with virtual keyboard
+cargo run --example host --features "cpal-backend,egui-widgets"
 
-// Get plugin info
-println!("Plugin: {} by {}", plugin.info().name, plugin.info().vendor);
+# 2. Discover plugins on your system
+cargo run --example plugin_scanner
+
+# 3. Test plugin loading and compatibility
+cargo run --example test_loading -- "/path/to/plugin.vst3"
+
+# 4. Interactive parameter automation
+cargo run --example parameter_automation --features "cpal-backend"
 ```
 
-### MIDI
+## 📖 API Overview
 
+### Simple Plugin Loading
 ```rust
-// Send note on/off
+// Load and play immediately
+let mut plugin = vst3_host::simple::load_plugin("/path/to/synth.vst3")?;
 plugin.send_midi_note(60, 100, MidiChannel::Ch1)?;
-plugin.send_midi_note_off(60, MidiChannel::Ch1)?;
-
-// Send control change
-plugin.send_midi_cc(1, 64, MidiChannel::Ch1)?;  // Mod wheel to 64
-
-// Send pitch bend
-plugin.send_midi_event(MidiEvent::PitchBend {
-    channel: MidiChannel::Ch1,
-    value: 8192,  // Center position
-})?;
-
-// MIDI panic - all notes/sounds off
-plugin.midi_panic()?;
 ```
 
-### Parameters
-
+### Advanced Configuration
 ```rust
-// Get all parameters
-let params = plugin.get_parameters()?;
+// Full control over the host
+let mut host = Vst3Host::builder()
+    .sample_rate(44100.0)
+    .block_size(512)
+    .with_process_isolation(true)  // Crash protection
+    .add_scan_path("./my-plugins")
+    .build()?;
 
-// Set parameter by ID
-plugin.set_parameter(param_id, 0.5)?;
+let mut plugin = host.load_plugin("/path/to/plugin.vst3")?;
+```
 
-// Set by name
-plugin.set_parameter_by_name("Cutoff", 0.8)?;
+### Real-time Audio Processing
+```rust
+// Set up audio callback
+plugin.start_processing()?;
 
-// Batch updates
+// Monitor audio levels
+plugin.on_audio_process(|levels| {
+    if levels.is_clipping() {
+        println!("Audio clipping detected!");
+    }
+});
+```
+
+### Parameter Automation
+```rust
+// Automate parameters over time
 plugin.update_parameters(|update| {
-    update.set(1, 0.5)
-          .set(2, 0.3)
-          .set(3, 0.9);
+    update.set(1, 0.5)  // Cutoff frequency
+          .set(2, 0.8)  // Resonance
+          .set(3, 0.2); // Filter envelope
     Ok(())
 })?;
-
-// Monitor changes
-plugin.on_parameter_change(|id, value| {
-    println!("Parameter {} = {}", id, value);
-});
 ```
 
-### Audio Monitoring
+## 🔧 Development Setup
 
-```rust
-// Get current levels
-let levels = plugin.get_output_levels();
-for (i, channel) in levels.channels.iter().enumerate() {
-    println!("Ch{}: {:.1} dB", i, channel.peak_db());
-}
+### Prerequisites
+- Rust 1.70 or later
+- CMake (for VST3 SDK)
+- Platform-specific audio dependencies (see [Troubleshooting](#troubleshooting))
 
-// Real-time monitoring
-plugin.on_audio_process(|levels| {
-    // Called after each audio buffer
-    if levels.is_clipping() {
-        println!("CLIPPING!");
-    }
-});
+### Build Commands
+```bash
+# Clone with VST3 SDK
+git clone --recursive https://github.com/your-repo/vst3-host.git
+cd vst3-host
+
+# Quick development checks
+make check      # Type checking and linting
+make test       # Run all tests  
+make examples   # Build all examples
+make fix        # Auto-fix formatting and simple issues
+
+# Or use cargo directly
+cargo build --features "cpal-backend,egui-widgets"
+cargo test --features "cpal-backend"
+cargo run --example host --features "cpal-backend,egui-widgets"
 ```
 
-## Safety
+## 🛡️ Safety & Reliability
 
-This library prioritizes safety:
+This library prioritizes safety and reliability:
 
-- No `unsafe` code in the public API
-- All COM/VST3 interactions are wrapped
-- Process isolation prevents plugin crashes from affecting the host
-- Automatic resource cleanup via RAII
-- Thread-safe parameter access
+- **Memory Safety**: No unsafe code in public API, automatic resource cleanup
+- **Crash Protection**: Process isolation prevents plugin crashes from affecting your application
+- **Thread Safety**: Safe concurrent access to plugin parameters and audio processing
+- **Error Handling**: Comprehensive error types with actionable error messages
+- **Platform Compatibility**: Handles platform-specific edge cases (e.g., macOS Objective-C conflicts)
 
-## Troubleshooting
+## 🌐 Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| **macOS** | ✅ Full | Includes Objective-C conflict resolution for Waves plugins |
+| **Windows** | ✅ Full | WASAPI and DirectSound support via CPAL |
+| **Linux** | ✅ Full | ALSA, PulseAudio, and JACK support via CPAL |
+
+## 📊 Performance
+
+- **Low Latency**: Optimized for real-time audio (< 10ms latency possible)
+- **Memory Efficient**: Minimal allocations in audio thread
+- **CPU Efficient**: SIMD optimizations where available
+- **Scalable**: Handle multiple plugins simultaneously
+
+## 🤝 Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## 📄 License
+
+Licensed under either of:
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+## 🆘 Troubleshooting
 
 ### Build Issues
+```bash
+# Missing VST3 SDK
+git submodule update --init --recursive
 
-If you encounter build errors:
+# Missing CMake
+brew install cmake  # macOS
+sudo apt install cmake  # Ubuntu
 
-1. **VST3 SDK not found**: Make sure submodules are initialized:
-   ```bash
-   git submodule update --init --recursive
-   ```
-
-2. **CMake errors**: The VST3 SDK requires CMake. Install it:
-   ```bash
-   # macOS
-   brew install cmake
-   
-   # Ubuntu/Debian
-   sudo apt-get install cmake
-   
-   # Windows
-   # Download from https://cmake.org/download/
-   ```
-
-3. **CPAL backend errors**: Install system audio dependencies:
-   ```bash
-   # Ubuntu/Debian
-   sudo apt-get install libasound2-dev
-   
-   # Fedora
-   sudo dnf install alsa-lib-devel
-   ```
+# Audio system dependencies
+sudo apt install libasound2-dev  # Linux
+```
 
 ### Runtime Issues
+- **No plugins found**: Check VST3 installation paths in [troubleshooting guide](docs/TROUBLESHOOTING.md)
+- **Audio device errors**: Ensure audio device isn't in use by another application
+- **Plugin crashes**: Enable process isolation with `.with_process_isolation(true)`
 
-1. **No plugins found**: Make sure you have VST3 plugins installed in standard locations:
-   - macOS: `/Library/Audio/Plug-Ins/VST3` or `~/Library/Audio/Plug-Ins/VST3`
-   - Windows: `C:\Program Files\Common Files\VST3`
-   - Linux: `/usr/lib/vst3` or `~/.vst3`
+For detailed troubleshooting, see the [complete troubleshooting guide](docs/TROUBLESHOOTING.md).
 
-2. **Audio device errors**: Check that your audio device is properly configured and not in use by another application.
+---
 
-3. **Plugin crashes**: The library includes process isolation to handle plugin crashes gracefully. If a plugin consistently crashes, it may be incompatible.
-
-## License
-
-MIT OR Apache-2.0
+**Need Help?** 
+- 📖 [Full Documentation](docs/README.md)
+- 🐛 [Report Issues](https://github.com/your-repo/vst3-host/issues)  
+- 💬 [Community Discord](https://discord.gg/your-discord)

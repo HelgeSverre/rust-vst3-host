@@ -15,13 +15,10 @@ use vst3::Steinberg::Vst::MediaTypes_::*;
 use vst3::Steinberg::{IPlugView, IPlugViewTrait};
 use vst3::{ComPtr, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use libloading::os::unix::{Library, Symbol};
-#[cfg(target_os = "windows")]
-use libloading::os::windows::{Library, Symbol};
 
-use super::com_implementations::{
-    create_event_list, ComponentHandler, HostEventList, ParameterChanges,
+use super::{
+    com_implementations::{create_event_list, ComponentHandler, HostEventList, ParameterChanges},
+    module_loader::{load_module, VstModule},
 };
 
 /// Internal plugin implementation that handles all VST3 COM interactions
@@ -51,8 +48,8 @@ pub struct PluginImpl {
     // Plugin view
     plugin_view: Option<ComPtr<IPlugView>>,
 
-    // Library handle (kept alive)
-    _library: Library,
+    // VST3 module handle (kept alive)
+    _module: Box<dyn VstModule>,
 }
 
 // Processing data structure
@@ -90,93 +87,88 @@ impl PluginImpl {
     }
 
     /// Load a VST3 plugin from the given path
-    pub fn load(path: &std::path::Path, info: PluginInfo) -> Result<Self> {
+    pub fn load(path: &std::path::Path) -> Result<Self> {
         unsafe {
             log::info!("=== PLUGIN LOADING START ===");
             log::info!("Loading plugin from: {}", path.display());
-            
-            // Load the library
-            log::debug!("Step 1: Loading dynamic library...");
-            let library = Library::new(path)
-                .map_err(|e| Error::PluginLoadFailed(format!("Failed to load library: {}", e)))?;
-            log::debug!("✅ Library loaded successfully");
 
-            // Get factory function
-            log::debug!("Step 2: Getting GetPluginFactory function...");
-            type GetPluginFactoryFunc = unsafe extern "C" fn() -> *mut IPluginFactory;
-            let get_factory: Symbol<GetPluginFactoryFunc> =
-                library.get(b"GetPluginFactory\0").map_err(|e| {
-                    Error::PluginLoadFailed(format!("Failed to find GetPluginFactory: {}", e))
-                })?;
-            log::debug!("✅ GetPluginFactory function found");
+            // Load the VST3 module using platform-specific loader
+            log::debug!("Step 1: Loading VST3 module...");
+            let module = load_module(path)?;
+            log::debug!("✅ VST3 module loaded successfully");
 
-            log::debug!("Step 3: Calling GetPluginFactory...");
-            let factory_ptr = get_factory();
-            log::debug!("✅ GetPluginFactory called, ptr: {:?}", factory_ptr);
+            // Get factory from module
+            log::debug!("Step 2: Getting factory from module...");
+            let factory_ptr = module.get_factory()?;
+            log::debug!("✅ Factory obtained, ptr: {:?}", factory_ptr);
             if factory_ptr.is_null() {
                 return Err(Error::PluginLoadFailed(
                     "GetPluginFactory returned null".to_string(),
                 ));
             }
 
-            log::debug!("Step 4: Wrapping factory in ComPtr...");
+            log::debug!("Step 3: Wrapping factory in ComPtr...");
             let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or_else(|| {
                 Error::PluginLoadFailed("Failed to create factory ComPtr".to_string())
             })?;
             log::debug!("✅ Factory wrapped successfully");
 
             // Find and create the audio component
-            log::debug!("Step 5: Creating audio component...");
+            log::debug!("Step 4: Creating audio component...");
             let component = Self::create_component(&factory)?;
             log::debug!("✅ Component created successfully");
 
             // Initialize component
-            log::debug!("Step 6: Initializing component...");
+            log::debug!("Step 5: Initializing component...");
             let init_result = component.initialize(ptr::null_mut());
             log::debug!("✅ Component initialized with result: {:#x}", init_result);
 
             // CRITICAL: Activate event buses for MIDI processing
-            log::debug!("Step 7: Activating event buses...");
+            log::debug!("Step 6: Activating event buses...");
             Self::activate_event_buses(&component)?;
             log::debug!("✅ Event buses activated");
 
             // Get processor interface
-            log::debug!("Step 8: Getting IAudioProcessor interface...");
+            log::debug!("Step 7: Getting IAudioProcessor interface...");
             let processor = component.cast::<IAudioProcessor>().ok_or_else(|| {
                 Error::InterfaceError("Component does not implement IAudioProcessor".to_string())
             })?;
             log::debug!("✅ IAudioProcessor interface obtained");
 
-            // Create component handler for parameter change notifications  
-            log::debug!("Step 9: Creating component handler...");
+            // Create component handler for parameter change notifications
+            log::debug!("Step 8: Creating component handler...");
             let parameter_changes = Arc::new(Mutex::new(Vec::new()));
-            let component_handler = ComWrapper::new(ComponentHandler::new(parameter_changes.clone()));
+            let component_handler =
+                ComWrapper::new(ComponentHandler::new(parameter_changes.clone()));
             log::debug!("✅ Component handler created");
 
             // Get or create controller (handles both single-component and separate controller)
-            log::debug!("Step 10: Getting or creating controller...");
+            log::debug!("Step 9: Getting or creating controller...");
             let controller = Self::get_or_create_controller(&component, &factory)?;
             log::debug!("✅ Controller obtained: {}", controller.is_some());
 
             // Connect component and controller if they are separate
             if let Some(ref ctrl) = controller {
-                log::debug!("Step 11: Connecting component and controller...");
+                log::debug!("Step 10: Connecting component and controller...");
                 Self::connect_component_and_controller(&component, ctrl)?;
                 log::debug!("✅ Component and controller connected");
-                
+
                 // Set component handler on controller for parameter change notifications
-                log::debug!("Step 12: Setting component handler on controller...");
+                log::debug!("Step 11: Setting component handler on controller...");
                 if let Some(handler_ptr) = component_handler.to_com_ptr::<IComponentHandler>() {
                     let result = ctrl.setComponentHandler(handler_ptr.into_raw());
                     if result == kResultOk {
                         log::debug!("✅ Component handler set on controller successfully");
                     } else {
-                        log::warn!("Failed to set component handler on controller: {:#x}", result);
+                        log::warn!(
+                            "Failed to set component handler on controller: {:#x}",
+                            result
+                        );
                     }
                 } else {
                     log::error!("Failed to get IComponentHandler COM pointer");
                 }
-                
+
                 // TEMPORARILY DISABLED: Transfer component state to controller
                 // This was causing hangs with some plugins like Dexed
                 // Self::transfer_component_state(&component, ctrl)?;
@@ -184,26 +176,30 @@ impl PluginImpl {
             }
 
             // Activate component (important for parameter access)
-            log::debug!("Step 13: Activating component...");
+            log::debug!("Step 12: Activating component...");
             let activate_result = component.setActive(1);
             log::debug!("Component activation result: {:#x}", activate_result);
             let is_active = if activate_result == kResultOk {
                 log::debug!("Component activated successfully during initialization");
                 true
             } else {
-                log::warn!("Component activation failed during initialization: {:#x}", activate_result);
+                log::warn!(
+                    "Component activation failed during initialization: {:#x}",
+                    activate_result
+                );
                 false
             };
 
             // Create event lists
-            log::debug!("Step 14: Creating event lists...");
+            log::debug!("Step 13: Creating event lists...");
             let input_events = create_event_list();
             let output_events = create_event_list();
             log::debug!("✅ Event lists created");
 
-            // Update has_gui based on actual capability
-            let mut updated_info = info;
-            updated_info.has_gui = controller.is_some() && {
+            // Extract plugin info from the factory and component
+            let info = Self::extract_plugin_info(path, &factory, &component, &controller)?;
+
+            let has_gui = controller.is_some() && {
                 if let Some(ref ctrl) = controller {
                     unsafe {
                         let view_type = b"editor\0".as_ptr() as *const i8;
@@ -222,10 +218,17 @@ impl PluginImpl {
                 }
             };
 
+            let mut updated_info = info;
+            updated_info.has_gui = has_gui;
+
             log::info!("=== PLUGIN LOADING COMPLETE ===");
-            log::info!("Plugin info: {} by {}", updated_info.name, updated_info.vendor);
+            log::info!(
+                "Plugin info: {} by {}",
+                updated_info.name,
+                updated_info.vendor
+            );
             log::info!("Has GUI: {}, Active: {}", updated_info.has_gui, is_active);
-            
+
             Ok(Self {
                 component,
                 processor,
@@ -240,8 +243,63 @@ impl PluginImpl {
                 input_events,
                 output_events,
                 plugin_view: None,
-                _library: library,
+                _module: module,
             })
+        }
+    }
+
+    /// Extract plugin info from factory and component
+    fn extract_plugin_info(
+        path: &std::path::Path,
+        factory: &ComPtr<IPluginFactory>,
+        component: &ComPtr<IComponent>,
+        _controller: &Option<ComPtr<IEditController>>,
+    ) -> Result<PluginInfo> {
+        unsafe {
+            // Get factory info
+            let mut factory_info: PFactoryInfo = std::mem::zeroed();
+            factory.getFactoryInfo(&mut factory_info);
+            let vendor = crate::internal::utils::c_str_to_string(&factory_info.vendor);
+
+            // Find audio component class info
+            let num_classes = factory.countClasses();
+            for i in 0..num_classes {
+                let mut class_info: PClassInfo = std::mem::zeroed();
+                if factory.getClassInfo(i, &mut class_info) == kResultOk {
+                    let category = crate::internal::utils::c_str_to_string(&class_info.category);
+                    
+                    if category.contains("Audio Module Class") {
+                        let name = crate::internal::utils::c_str_to_string(&class_info.name);
+                        let cid = class_info.cid;
+                        let uid = format!("{:08X}{:08X}{:08X}{:08X}", 
+                            u32::from_be_bytes([cid[0] as u8, cid[1] as u8, cid[2] as u8, cid[3] as u8]),
+                            u32::from_be_bytes([cid[4] as u8, cid[5] as u8, cid[6] as u8, cid[7] as u8]),
+                            u32::from_be_bytes([cid[8] as u8, cid[9] as u8, cid[10] as u8, cid[11] as u8]),
+                            u32::from_be_bytes([cid[12] as u8, cid[13] as u8, cid[14] as u8, cid[15] as u8])
+                        );
+
+                        // Count audio buses
+                        let audio_inputs = component.getBusCount(kAudio as i32, kInput as i32) as u32;
+                        let audio_outputs = component.getBusCount(kAudio as i32, kOutput as i32) as u32;
+                        
+                        return Ok(PluginInfo {
+                            path: path.to_path_buf(),
+                            name,
+                            vendor,
+                            version: "1.0.0".to_string(), // Default version
+                            category: "Audio Effect".to_string(), // Default, could be refined
+                            uid,
+                            audio_inputs,
+                            audio_outputs,
+                            has_gui: false, // Will be updated by caller
+                            has_midi_input: true, // Default - could be refined
+                            has_midi_output: false, // Default - could be refined
+                        });
+                    }
+                }
+            }
+            
+            Err(Error::PluginLoadFailed("No audio component found".to_string()))
         }
     }
 
@@ -888,11 +946,13 @@ impl PluginImpl {
             } else {
                 format!("#{}", i)
             };
-            
+
             let activate_result = component.activateBus(kEvent as i32, kInput as i32, i, 1);
             log::debug!(
                 "Event Input Bus {} (index {}): activation result = {:#x}",
-                name, i, activate_result
+                name,
+                i,
+                activate_result
             );
         }
 
@@ -906,11 +966,13 @@ impl PluginImpl {
             } else {
                 format!("#{}", i)
             };
-            
+
             let activate_result = component.activateBus(kEvent as i32, kOutput as i32, i, 1);
             log::debug!(
                 "Event Output Bus {} (index {}): activation result = {:#x}",
-                name, i, activate_result
+                name,
+                i,
+                activate_result
             );
         }
 
@@ -990,9 +1052,12 @@ impl PluginImpl {
             } else {
                 log::warn!(
                     "Component connection failed: comp->ctrl={:#x}, ctrl->comp={:#x}",
-                    result1, result2
+                    result1,
+                    result2
                 );
-                Err(Error::InterfaceError("Failed to connect components".to_string()))
+                Err(Error::InterfaceError(
+                    "Failed to connect components".to_string(),
+                ))
             }
         } else {
             log::debug!("Components do not support IConnectionPoint - might be single component");
@@ -1007,10 +1072,10 @@ impl PluginImpl {
     ) -> Result<()> {
         // Get state from component
         let mut state_ptr: *mut vst3::Steinberg::IBStream = ptr::null_mut();
-        
+
         // First check if component supports state saving
         let save_result = component.getState(&mut state_ptr as *mut _ as *mut _);
-        
+
         if save_result != kResultOk || state_ptr.is_null() {
             log::debug!("Component does not provide state or state is empty");
             return Ok(()); // Not an error - some plugins don't have state
@@ -1022,11 +1087,14 @@ impl PluginImpl {
 
         // Set state on controller
         let set_result = controller.setComponentState(state_stream.as_ptr());
-        
+
         if set_result == kResultOk {
             log::debug!("Component state transferred to controller successfully");
         } else {
-            log::warn!("Failed to set component state on controller: {:#x}", set_result);
+            log::warn!(
+                "Failed to set component state on controller: {:#x}",
+                set_result
+            );
         }
 
         Ok(())

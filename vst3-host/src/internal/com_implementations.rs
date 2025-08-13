@@ -55,17 +55,17 @@ impl IComponentHandler2Trait for ComponentHandler {
         log::debug!("Host: Plugin marked state as dirty (state: {})", _state);
         kResultOk
     }
-    
+
     unsafe fn requestOpenEditor(&self, _name: *const i8) -> i32 {
         log::debug!("Host: Plugin requested editor open");
         kResultOk
     }
-    
+
     unsafe fn startGroupEdit(&self) -> i32 {
         log::debug!("Host: Plugin started group edit");
         kResultOk
     }
-    
+
     unsafe fn finishGroupEdit(&self) -> i32 {
         log::debug!("Host: Plugin finished group edit");
         kResultOk
@@ -100,7 +100,10 @@ impl HostEventList {
         match self.events.lock() {
             Ok(mut events) => {
                 events.push(event);
-                log::trace!("HostEventList: Added event via add_event, total count: {}", events.len());
+                log::trace!(
+                    "HostEventList: Added event via add_event, total count: {}",
+                    events.len()
+                );
             }
             Err(_) => {
                 log::error!("HostEventList: Failed to lock events for add_event");
@@ -135,19 +138,26 @@ impl IEventListTrait for HostEventList {
             log::warn!("HostEventList: getEvent called with null event pointer");
             return kResultFalse;
         }
-        
+
         if index < 0 {
-            log::warn!("HostEventList: getEvent called with negative index: {}", index);
+            log::warn!(
+                "HostEventList: getEvent called with negative index: {}",
+                index
+            );
             return kResultFalse;
         }
-        
+
         match self.events.lock() {
             Ok(events) => {
                 if let Some(e) = events.get(index as usize) {
                     *event = *e;
                     kResultOk
                 } else {
-                    log::warn!("HostEventList: getEvent index {} out of bounds (count: {})", index, events.len());
+                    log::warn!(
+                        "HostEventList: getEvent index {} out of bounds (count: {})",
+                        index,
+                        events.len()
+                    );
                     kResultFalse
                 }
             }
@@ -163,7 +173,7 @@ impl IEventListTrait for HostEventList {
             log::warn!("HostEventList: addEvent called with null event pointer");
             return kResultFalse;
         }
-        
+
         match self.events.lock() {
             Ok(mut events) => {
                 events.push(*event);
@@ -204,11 +214,16 @@ impl IParameterChangesTrait for ParameterChanges {
         match self.queues.lock() {
             Ok(queues) => {
                 let count = queues.len() as i32;
-                log::trace!("Internal ParameterChanges: getParameterCount returning {}", count);
+                log::trace!(
+                    "Internal ParameterChanges: getParameterCount returning {}",
+                    count
+                );
                 count
             }
             Err(_) => {
-                log::error!("Internal ParameterChanges: Failed to lock queues for getParameterCount");
+                log::error!(
+                    "Internal ParameterChanges: Failed to lock queues for getParameterCount"
+                );
                 0
             }
         }
@@ -216,10 +231,13 @@ impl IParameterChangesTrait for ParameterChanges {
 
     unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
         if index < 0 {
-            log::warn!("Internal ParameterChanges: getParameterData called with negative index: {}", index);
+            log::warn!(
+                "Internal ParameterChanges: getParameterData called with negative index: {}",
+                index
+            );
             return ptr::null_mut();
         }
-        
+
         match self.queues.lock() {
             Ok(queues) => {
                 if let Some(queue) = queues.get(index as usize) {
@@ -239,7 +257,9 @@ impl IParameterChangesTrait for ParameterChanges {
                 }
             }
             Err(_) => {
-                log::error!("Internal ParameterChanges: Failed to lock queues for getParameterData");
+                log::error!(
+                    "Internal ParameterChanges: Failed to lock queues for getParameterData"
+                );
                 ptr::null_mut()
             }
         }
@@ -252,7 +272,7 @@ impl IParameterChangesTrait for ParameterChanges {
         }
 
         let param_id = *id;
-        
+
         match self.queues.lock() {
             Ok(mut queues) => {
                 // Check if queue for this parameter already exists
@@ -261,7 +281,10 @@ impl IParameterChangesTrait for ParameterChanges {
                         if !index.is_null() {
                             *index = i as i32;
                         }
-                        log::trace!("Internal ParameterChanges: Found existing queue for parameter {}", param_id);
+                        log::trace!(
+                            "Internal ParameterChanges: Found existing queue for parameter {}",
+                            param_id
+                        );
                         return queue
                             .to_com_ptr::<IParamValueQueue>()
                             .map(|ptr| ptr.into_raw())
@@ -278,7 +301,9 @@ impl IParameterChangesTrait for ParameterChanges {
                     .to_com_ptr::<IParamValueQueue>()
                     .map(|ptr| ptr.into_raw())
                     .unwrap_or_else(|| {
-                        log::error!("Internal ParameterChanges: Failed to convert new queue to COM pointer");
+                        log::error!(
+                            "Internal ParameterChanges: Failed to convert new queue to COM pointer"
+                        );
                         ptr::null_mut()
                     });
 
@@ -292,7 +317,9 @@ impl IParameterChangesTrait for ParameterChanges {
                 queue_ptr
             }
             Err(_) => {
-                log::error!("Internal ParameterChanges: Failed to lock queues for addParameterData");
+                log::error!(
+                    "Internal ParameterChanges: Failed to lock queues for addParameterData"
+                );
                 ptr::null_mut()
             }
         }

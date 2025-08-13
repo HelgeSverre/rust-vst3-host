@@ -42,7 +42,7 @@ impl App {
             eprintln!("Failed to create VST3 host: {}", e);
             std::process::exit(1);
         });
-        
+
         let mut app = Self {
             host: Arc::new(Mutex::new(host)),
             plugin: None,
@@ -81,15 +81,30 @@ impl App {
         if let Some(ref mut plugin) = self.plugin {
             if let Ok(mut plugin_lock) = plugin.lock() {
                 let channel = match self.midi_channel {
-                    0 => MidiChannel::Ch1, 1 => MidiChannel::Ch2, 2 => MidiChannel::Ch3, 3 => MidiChannel::Ch4,
-                    4 => MidiChannel::Ch5, 5 => MidiChannel::Ch6, 6 => MidiChannel::Ch7, 7 => MidiChannel::Ch8,
-                    8 => MidiChannel::Ch9, 9 => MidiChannel::Ch10, 10 => MidiChannel::Ch11, 11 => MidiChannel::Ch12,
-                    12 => MidiChannel::Ch13, 13 => MidiChannel::Ch14, 14 => MidiChannel::Ch15, 15 => MidiChannel::Ch16,
+                    0 => MidiChannel::Ch1,
+                    1 => MidiChannel::Ch2,
+                    2 => MidiChannel::Ch3,
+                    3 => MidiChannel::Ch4,
+                    4 => MidiChannel::Ch5,
+                    5 => MidiChannel::Ch6,
+                    6 => MidiChannel::Ch7,
+                    7 => MidiChannel::Ch8,
+                    8 => MidiChannel::Ch9,
+                    9 => MidiChannel::Ch10,
+                    10 => MidiChannel::Ch11,
+                    11 => MidiChannel::Ch12,
+                    12 => MidiChannel::Ch13,
+                    13 => MidiChannel::Ch14,
+                    14 => MidiChannel::Ch15,
+                    15 => MidiChannel::Ch16,
                     _ => MidiChannel::Ch1,
                 };
                 match plugin_lock.send_midi_note(note, velocity, channel) {
                     Ok(()) => {
-                        eprintln!("MIDI Note ON sent: note={}, velocity={}, channel={:?}", note, velocity, channel);
+                        eprintln!(
+                            "MIDI Note ON sent: note={}, velocity={}, channel={:?}",
+                            note, velocity, channel
+                        );
                     }
                     Err(e) => {
                         eprintln!("Failed to send MIDI note: {}", e);
@@ -104,10 +119,22 @@ impl App {
         if let Some(ref mut plugin) = self.plugin {
             if let Ok(mut plugin_lock) = plugin.lock() {
                 let channel = match self.midi_channel {
-                    0 => MidiChannel::Ch1, 1 => MidiChannel::Ch2, 2 => MidiChannel::Ch3, 3 => MidiChannel::Ch4,
-                    4 => MidiChannel::Ch5, 5 => MidiChannel::Ch6, 6 => MidiChannel::Ch7, 7 => MidiChannel::Ch8,
-                    8 => MidiChannel::Ch9, 9 => MidiChannel::Ch10, 10 => MidiChannel::Ch11, 11 => MidiChannel::Ch12,
-                    12 => MidiChannel::Ch13, 13 => MidiChannel::Ch14, 14 => MidiChannel::Ch15, 15 => MidiChannel::Ch16,
+                    0 => MidiChannel::Ch1,
+                    1 => MidiChannel::Ch2,
+                    2 => MidiChannel::Ch3,
+                    3 => MidiChannel::Ch4,
+                    4 => MidiChannel::Ch5,
+                    5 => MidiChannel::Ch6,
+                    6 => MidiChannel::Ch7,
+                    7 => MidiChannel::Ch8,
+                    8 => MidiChannel::Ch9,
+                    9 => MidiChannel::Ch10,
+                    10 => MidiChannel::Ch11,
+                    11 => MidiChannel::Ch12,
+                    12 => MidiChannel::Ch13,
+                    13 => MidiChannel::Ch14,
+                    14 => MidiChannel::Ch15,
+                    15 => MidiChannel::Ch16,
                     _ => MidiChannel::Ch1,
                 };
                 match plugin_lock.send_midi_note_off(note, channel) {
@@ -131,11 +158,11 @@ impl App {
                 return;
             }
         };
-        
+
         match plugin_result {
             Ok(plugin) => {
                 self.plugin_info = Some(plugin.info().clone());
-                
+
                 // Start processing if plugin was loaded successfully
                 let plugin_wrapped = Arc::new(Mutex::new(plugin));
                 if let Ok(mut plugin_lock) = plugin_wrapped.lock() {
@@ -147,7 +174,7 @@ impl App {
                 }
                 self.plugin = Some(plugin_wrapped);
                 self.plugin_path = Some(path.to_path_buf());
-                
+
                 // Start audio stream for real-time processing
                 self.start_audio_processing();
             }
@@ -157,16 +184,7 @@ impl App {
         }
     }
 
-    fn get_available_plugins(&self) -> Vec<PluginInfo> {
-        if let Ok(host) = self.host.lock() {
-            host.discover_plugins().unwrap_or_else(|e| {
-                eprintln!("Failed to discover plugins: {}", e);
-                Vec::new()
-            })
-        } else {
-            Vec::new()
-        }
-    }
+    // Removed plugin discovery functionality - not used
 
     fn open_plugin_gui(&mut self) {
         if let Some(ref plugin) = self.plugin {
@@ -174,7 +192,7 @@ impl App {
             if self.plugin_window.is_some() {
                 self.plugin_window = None;
             }
-            
+
             // Create new plugin window
             let mut window = PluginWindow::new(plugin.clone());
             match window.open() {
@@ -220,13 +238,17 @@ impl App {
             }
 
             let cpal_host = cpal::default_host();
-            let device = cpal_host.default_output_device().expect("no output device available");
-            let config = device.default_output_config().expect("Failed to get default output config");
-            
+            let device = cpal_host
+                .default_output_device()
+                .expect("no output device available");
+            let config = device
+                .default_output_config()
+                .expect("Failed to get default output config");
+
             let plugin_clone = self.plugin.clone();
             let sample_rate = config.sample_rate().0 as f64;
             let channels = config.channels() as usize;
-            
+
             let stream_config = cpal::StreamConfig {
                 channels: config.channels(),
                 sample_rate: config.sample_rate(),
@@ -310,7 +332,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Update parameter values from plugin GUI
         self.update_parameter_values();
-        
+
         // Release all notes if mouse button is released globally
         if ctx.input(|i| i.pointer.primary_released()) && !self.pressed_notes.is_empty() {
             for &note in self.pressed_notes.clone().iter() {
@@ -318,15 +340,15 @@ impl eframe::App for App {
             }
             self.pressed_notes.clear();
         }
-        
+
         // Request repaint periodically
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("VST3 Host");
-            
+
             ui.separator();
-            
+
             // Error display
             if let Some(ref error) = self.last_error {
                 ui.colored_label(egui::Color32::RED, format!("Error: {}", error));
@@ -335,7 +357,7 @@ impl eframe::App for App {
                 }
                 ui.separator();
             }
-            
+
             // Plugin selection
             ui.horizontal(|ui| {
                 ui.label("Plugin:");
@@ -347,30 +369,19 @@ impl eframe::App for App {
                         self.load_plugin(&path);
                     }
                 }
-                
+
                 if ui.button("Discover Plugins").clicked() {
                     // Just update to trigger discovery
                     ctx.request_repaint();
                 }
-                
+
                 if let Some(path) = &self.plugin_path {
                     ui.label(path.file_name().unwrap_or_default().to_string_lossy());
                 }
             });
-            
-            // Available plugins list
-            let available_plugins = self.get_available_plugins();
-            if !available_plugins.is_empty() {
-                ui.collapsing("Available Plugins", |ui| {
-                    for plugin_info in available_plugins.iter().take(10) { // Show first 10
-                        if ui.button(&plugin_info.name).clicked() {
-                            self.load_plugin(&plugin_info.path);
-                        }
-                        ui.small(format!("by {}", plugin_info.vendor));
-                    }
-                });
-            }
-            
+
+            // Available plugins list removed - discovery functionality not used
+
             // Plugin info
             if let Some(ref info) = self.plugin_info {
                 ui.horizontal(|ui| {
@@ -381,9 +392,9 @@ impl eframe::App for App {
                     ui.label(format!("I/O: {}/{}", info.audio_inputs, info.audio_outputs));
                 });
             }
-            
+
             ui.separator();
-            
+
             // Transport controls
             ui.horizontal(|ui| {
                 if self.is_processing {
@@ -406,9 +417,9 @@ impl eframe::App for App {
                     }
                     ui.colored_label(egui::Color32::RED, "Stopped");
                 }
-                
+
                 ui.separator();
-                
+
                 // Plugin GUI controls
                 if let Some(ref plugin) = self.plugin {
                     let has_gui = plugin.lock().map(|p| p.has_editor()).unwrap_or(false);
@@ -429,20 +440,20 @@ impl eframe::App for App {
                     }
                 }
             });
-            
+
             ui.separator();
-            
+
             // Main content area
             ui.columns(2, |columns| {
                 // Left column - Virtual keyboard
                 columns[0].group(|ui| {
                     ui.heading("Virtual Keyboard");
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("MIDI Channel:");
                         ui.add(egui::Slider::new(&mut self.midi_channel, 0..=15));
                     });
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("Octave:");
                         if ui.button("-").clicked() && self.keyboard_octave > 0 {
@@ -453,9 +464,9 @@ impl eframe::App for App {
                             self.keyboard_octave += 1;
                         }
                     });
-                    
+
                     ui.separator();
-                    
+
                     // Piano keys
                     let base_note = (self.keyboard_octave + 1) * 12; // C
                     let notes = [
@@ -472,35 +483,43 @@ impl eframe::App for App {
                         ("A#", 10, true),
                         ("B", 11, false),
                     ];
-                    
+
                     // White keys
                     ui.horizontal(|ui| {
                         for (name, offset, is_black) in notes.iter() {
                             if !is_black {
                                 let note = base_note + offset;
                                 let is_pressed = self.pressed_notes.contains(&note);
-                                
+
                                 let button = egui::Button::new(*name)
                                     .min_size(egui::vec2(40.0, 100.0))
                                     .selected(is_pressed);
-                                
+
                                 let response = ui.add(button);
-                                
+
                                 // Handle mouse down - only send if not already pressed
-                                if (response.drag_started() || (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))) && !is_pressed {
+                                if (response.drag_started()
+                                    || (response.hovered()
+                                        && ui.input(|i| i.pointer.primary_pressed())))
+                                    && !is_pressed
+                                {
                                     self.send_note_on(note, 100);
                                     self.pressed_notes.insert(note);
                                 }
-                                
+
                                 // Handle mouse up - only send if currently pressed
-                                if is_pressed && (response.drag_stopped() || !response.hovered() || ui.input(|i| i.pointer.primary_released())) {
+                                if is_pressed
+                                    && (response.drag_stopped()
+                                        || !response.hovered()
+                                        || ui.input(|i| i.pointer.primary_released()))
+                                {
                                     self.send_note_off(note);
                                     self.pressed_notes.remove(&note);
                                 }
                             }
                         }
                     });
-                    
+
                     // Black keys (simplified)
                     ui.horizontal(|ui| {
                         ui.add_space(20.0);
@@ -508,25 +527,33 @@ impl eframe::App for App {
                             if *is_black {
                                 let note = base_note + offset;
                                 let is_pressed = self.pressed_notes.contains(&note);
-                                
+
                                 let button = egui::Button::new(*name)
                                     .min_size(egui::vec2(30.0, 60.0))
-                                    .fill(if is_pressed { 
-                                        egui::Color32::from_gray(80) 
-                                    } else { 
-                                        egui::Color32::from_gray(40) 
+                                    .fill(if is_pressed {
+                                        egui::Color32::from_gray(80)
+                                    } else {
+                                        egui::Color32::from_gray(40)
                                     });
-                                
+
                                 let response = ui.add(button);
-                                
+
                                 // Handle mouse down - only send if not already pressed
-                                if (response.drag_started() || (response.hovered() && ui.input(|i| i.pointer.primary_pressed()))) && !is_pressed {
+                                if (response.drag_started()
+                                    || (response.hovered()
+                                        && ui.input(|i| i.pointer.primary_pressed())))
+                                    && !is_pressed
+                                {
                                     self.send_note_on(note, 100);
                                     self.pressed_notes.insert(note);
                                 }
-                                
+
                                 // Handle mouse up - only send if currently pressed
-                                if is_pressed && (response.drag_stopped() || !response.hovered() || ui.input(|i| i.pointer.primary_released())) {
+                                if is_pressed
+                                    && (response.drag_stopped()
+                                        || !response.hovered()
+                                        || ui.input(|i| i.pointer.primary_released()))
+                                {
                                     self.send_note_off(note);
                                     self.pressed_notes.remove(&note);
                                 }
@@ -535,11 +562,11 @@ impl eframe::App for App {
                         }
                     });
                 });
-                
+
                 // Right column - Meters and parameters
                 columns[1].group(|ui| {
                     ui.heading("Audio Meters");
-                    
+
                     // Peak meters
                     for (i, channel) in self.audio_levels.channels.iter().enumerate() {
                         ui.horizontal(|ui| {
@@ -551,17 +578,16 @@ impl eframe::App for App {
                                 -80.0
                             };
                             ui.add(
-                                egui::ProgressBar::new(peak.min(1.0))
-                                    .text(format!("{:.1} dB", db))
+                                egui::ProgressBar::new(peak.min(1.0)).text(format!("{:.1} dB", db)),
                             );
                         });
                     }
-                    
+
                     ui.separator();
-                    
+
                     // Parameters toggle
                     ui.checkbox(&mut self.show_parameters, "Show Parameters");
-                    
+
                     if self.show_parameters {
                         egui::ScrollArea::vertical()
                             .max_height(200.0)
@@ -574,21 +600,24 @@ impl eframe::App for App {
                                                 ui.horizontal(|ui| {
                                                     ui.label(&param.name);
                                                     // Use current value from GUI changes if available, otherwise use plugin's value
-                                                    let mut value = self.current_parameter_values
+                                                    let mut value = self
+                                                        .current_parameter_values
                                                         .get(&param.id)
                                                         .copied()
                                                         .unwrap_or(param.value);
                                                     let value_text = format!("{:.3}", value);
                                                     let response = ui.add(
                                                         egui::Slider::new(&mut value, 0.0..=1.0)
-                                                            .text(value_text)
+                                                            .text(value_text),
                                                     );
                                                     if response.changed() {
                                                         // Update local cache
-                                                        self.current_parameter_values.insert(param.id, value);
+                                                        self.current_parameter_values
+                                                            .insert(param.id, value);
                                                         // Send to plugin (this is host -> plugin direction)
                                                         if let Ok(mut plugin_lock) = plugin.lock() {
-                                                            let _ = plugin_lock.set_parameter(param.id, value);
+                                                            let _ = plugin_lock
+                                                                .set_parameter(param.id, value);
                                                         }
                                                     }
                                                 });
@@ -600,9 +629,9 @@ impl eframe::App for App {
                     }
                 });
             });
-            
+
             ui.separator();
-            
+
             // Status bar
             ui.horizontal(|ui| {
                 ui.label("Status:");
@@ -647,7 +676,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
 
     let app = App::new(plugin_path);
-    
+
     // Run GUI
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -655,12 +684,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .with_title("VST3 Host"),
         ..Default::default()
     };
-    
-    eframe::run_native(
-        "vst3_host",
-        options,
-        Box::new(|_| Ok(Box::new(app))),
-    ).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-    
+
+    eframe::run_native("vst3_host", options, Box::new(|_| Ok(Box::new(app))))
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
     Ok(())
 }

@@ -1,25 +1,50 @@
 //! # vst3-host
 //!
-//! A safe, simple, and lightweight Rust library for hosting VST3 plugins.
+//! A safe, simple, and lightweight Rust library for hosting VST3 plugins with
+//! real-time audio processing, MIDI support, and advanced plugin compatibility features.
 //!
-//! ## Quick Start
+//! ## Quick Start (Simple API)
+//!
+//! ```no_run
+//! use vst3_host::simple;
+//! use vst3_host::midi::MidiChannel;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Load a plugin with sensible defaults
+//! let mut plugin = simple::load_plugin("/path/to/synth.vst3")?;
+//!
+//! // Start processing audio
+//! plugin.start_processing()?;
+//!
+//! // Send a MIDI note
+//! plugin.send_midi_note(60, 127, MidiChannel::Ch1)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Advanced Usage (Full Control)
 //!
 //! ```no_run
 //! use vst3_host::prelude::*;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Create a host with default settings
-//! let mut host = Vst3Host::new()?;
+//! // Create a host with custom settings
+//! let mut host = Vst3Host::builder()
+//!     .sample_rate(48000.0)
+//!     .block_size(256)
+//!     .with_process_isolation(true)  // Crash protection
+//!     .add_scan_path("./my-plugins")
+//!     .build()?;
 //!
-//! // Discover and load a plugin  
-//! let plugins = host.discover_plugins()?;
-//! let mut plugin = host.load_plugin(&plugins[0].path)?;
-//!
-//! // Start audio processing
+//! // Load and configure plugin
+//! let mut plugin = host.load_plugin("/path/to/plugin.vst3")?;
 //! plugin.start_processing()?;
 //!
-//! // Send a MIDI note
-//! plugin.send_midi_note(60, 127, MidiChannel::Ch1)?;
+//! // Real-time parameter automation
+//! plugin.update_parameters(|update| {
+//!     update.set(1, 0.5).set(2, 0.8);
+//!     Ok(())
+//! })?;
 //! # Ok(())
 //! # }
 //! ```
@@ -32,6 +57,7 @@ pub mod host;
 pub mod midi;
 pub mod parameters;
 pub mod plugin;
+pub mod simple;
 pub mod window;
 
 pub(crate) mod discovery;

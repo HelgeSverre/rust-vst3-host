@@ -44,63 +44,7 @@ impl Vst3Host {
         Ok(())
     }
 
-    /// Discover all VST3 plugins on the system
-    pub fn discover_plugins(&self) -> Result<Vec<PluginInfo>> {
-        self.discover_plugins_with_callback(|_| {})
-    }
-
-    /// Discover VST3 plugins with progress callback
-    pub fn discover_plugins_with_callback<F>(&self, mut callback: F) -> Result<Vec<PluginInfo>>
-    where
-        F: FnMut(DiscoveryProgress),
-    {
-        // Get all paths to scan
-        let mut all_paths = Vec::new();
-
-        // Only include standard paths if requested
-        if self.scan_default_paths {
-            all_paths.extend(crate::discovery::scan_standard_paths());
-        }
-
-        all_paths.extend(self.custom_paths.clone());
-
-        // Find all VST3 files
-        let plugin_paths = crate::discovery::scan_directories(&all_paths)?;
-        let total = plugin_paths.len();
-
-        // Notify start
-        callback(DiscoveryProgress::Started {
-            total_plugins: total,
-        });
-
-        // Get info for each plugin
-        let mut plugins = Vec::new();
-        for (index, path) in plugin_paths.iter().enumerate() {
-            match crate::discovery::get_plugin_info(path) {
-                Ok(info) => {
-                    callback(DiscoveryProgress::Found {
-                        plugin: info.clone(),
-                        current: index + 1,
-                        total,
-                    });
-                    plugins.push(info);
-                }
-                Err(e) => {
-                    callback(DiscoveryProgress::Error {
-                        path: path.display().to_string(),
-                        error: e.to_string(),
-                    });
-                }
-            }
-        }
-
-        // Notify completion
-        callback(DiscoveryProgress::Completed {
-            total_found: plugins.len(),
-        });
-
-        Ok(plugins)
-    }
+    // Discovery functionality removed - not used
 
     /// Load a VST3 plugin
     pub fn load_plugin<P: AsRef<Path>>(&mut self, path: P) -> Result<Plugin> {
@@ -110,25 +54,18 @@ impl Vst3Host {
             return Err(Error::PluginNotFound(path.display().to_string()));
         }
 
-        // Get plugin info first
-        let info = crate::discovery::get_plugin_info(path)?;
-
-        // Use process isolation if enabled
+        // Use process isolation only if explicitly enabled
         if self.use_process_isolation {
-            self.load_plugin_isolated(path, info)
+            self.load_plugin_isolated(path)
         } else {
-            self.load_plugin_internal(path, info)
+            self.load_plugin_internal(path)
         }
     }
 
     /// Load a plugin in-process
-    fn load_plugin_internal(&mut self, path: &Path, info: PluginInfo) -> Result<Plugin> {
-        // Get the binary path
-        let binary_path = crate::discovery::get_vst3_binary_path(path)?;
-
-        // Load the plugin implementation
-        let plugin_impl =
-            crate::internal::plugin_impl::PluginImpl::load(&binary_path, info.clone())?;
+    fn load_plugin_internal(&mut self, path: &Path) -> Result<Plugin> {
+        // Load the plugin implementation directly - it will handle path resolution
+        let plugin_impl = crate::internal::plugin_impl::PluginImpl::load(path)?;
 
         // Get the updated info from the plugin implementation (has_gui might have been updated)
         let updated_info = plugin_impl.info.clone();
@@ -158,7 +95,7 @@ impl Vst3Host {
     }
 
     /// Load a plugin in an isolated process
-    fn load_plugin_isolated(&mut self, path: &Path, info: PluginInfo) -> Result<Plugin> {
+    fn load_plugin_isolated(&mut self, path: &Path) -> Result<Plugin> {
         use crate::process_isolation::{HostCommand, HostResponse, PluginHostProcess};
 
         // Create and start the isolated plugin process
@@ -187,13 +124,13 @@ impl Vst3Host {
                     name,
                     vendor,
                     version,
-                    category: info.category.clone(), // Use the original category
-                    uid: info.uid.clone(),           // Use the original UID
+                    category: "Audio Effect".to_string(), // Default category
+                    uid: "unknown".to_string(),            // Default UID
                     has_gui,
                     audio_inputs: audio_inputs as u32,
                     audio_outputs: audio_outputs as u32,
-                    has_midi_input: info.has_midi_input, // Use the original MIDI info
-                    has_midi_output: info.has_midi_output,
+                    has_midi_input: true,  // Default MIDI info
+                    has_midi_output: false,
                 }
             }
             HostResponse::Error { message } => {
