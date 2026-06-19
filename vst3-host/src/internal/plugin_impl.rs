@@ -16,7 +16,10 @@ use vst3::Steinberg::{IPlugView, IPlugViewTrait};
 use vst3::{ComPtr, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 
 use super::{
-    com_implementations::{create_event_list, ComponentHandler, HostEventList, ParameterChanges},
+    com_implementations::{
+        create_event_list, create_host_application, ComponentHandler, HostApplication,
+        HostEventList, ParameterChanges,
+    },
     module_loader::{load_module, VstModule},
 };
 
@@ -50,6 +53,10 @@ pub struct PluginImpl {
 
     // Plugin view
     plugin_view: Option<ComPtr<IPlugView>>,
+
+    // Host application context passed to initialize() — kept alive for the plugin's
+    // lifetime because the plugin may retain a reference to it.
+    _host_app: ComWrapper<HostApplication>,
 
     // VST3 module handle (kept alive)
     _module: Box<dyn VstModule>,
@@ -121,9 +128,16 @@ impl PluginImpl {
             let component = Self::create_component(&factory)?;
             log::debug!("✅ Component created successfully");
 
-            // Initialize component
+            // Initialize component with a host-application context. Passing null here
+            // crashes plugins that query the host (u-he, Waves, ...); see HostApplication.
             log::debug!("Step 5: Initializing component...");
-            let init_result = component.initialize(ptr::null_mut());
+            let host_app = create_host_application();
+            let host_ctx = host_app.to_com_ptr::<IHostApplication>();
+            let context = host_ctx
+                .as_ref()
+                .map(|p| p.as_ptr() as *mut FUnknown)
+                .unwrap_or(ptr::null_mut());
+            let init_result = component.initialize(context);
             log::debug!("✅ Component initialized with result: {:#x}", init_result);
 
             // CRITICAL: Activate event buses for MIDI processing
@@ -147,7 +161,7 @@ impl PluginImpl {
 
             // Get or create controller (handles both single-component and separate controller)
             log::debug!("Step 9: Getting or creating controller...");
-            let controller = Self::get_or_create_controller(&component, &factory)?;
+            let controller = Self::get_or_create_controller(&component, &factory, context)?;
             log::debug!("✅ Controller obtained: {}", controller.is_some());
 
             // Connect component and controller if they are separate
@@ -245,6 +259,7 @@ impl PluginImpl {
                 output_events,
                 output_midi: Arc::new(Mutex::new(Vec::new())),
                 plugin_view: None,
+                _host_app: host_app,
                 _module: module,
             })
         }
@@ -1242,6 +1257,7 @@ impl PluginImpl {
     unsafe fn get_or_create_controller(
         component: &ComPtr<IComponent>,
         factory: &ComPtr<IPluginFactory>,
+        context: *mut FUnknown,
     ) -> Result<Option<ComPtr<IEditController>>> {
         // First, try to cast component to IEditController (single component)
         if let Some(controller) = component.cast::<IEditController>() {
@@ -1279,9 +1295,9 @@ impl PluginImpl {
         let controller = ComPtr::<IEditController>::from_raw(controller_ptr)
             .ok_or_else(|| Error::InterfaceError("Failed to wrap controller".to_string()))?;
 
-        // Initialize controller
+        // Initialize controller with the same host context as the component.
         log::debug!("Initializing controller...");
-        let init_result = controller.initialize(ptr::null_mut());
+        let init_result = controller.initialize(context);
         if init_result != kResultOk {
             log::warn!("Failed to initialize controller: {:#x}", init_result);
             return Ok(None);
@@ -1307,17 +1323,18 @@ impl PluginImpl {
 
             if result1 == kResultOk && result2 == kResultOk {
                 log::debug!("Components connected successfully");
-                Ok(())
             } else {
+                // Non-fatal: single-component plugins expose the same object as both
+                // component and controller, so connecting it to itself fails — and the
+                // connection is a best-effort messaging channel, not required for the
+                // plugin to load and run. Log and continue rather than failing the load.
                 log::warn!(
-                    "Component connection failed: comp->ctrl={:#x}, ctrl->comp={:#x}",
+                    "Component connection not established (continuing): comp->ctrl={:#x}, ctrl->comp={:#x}",
                     result1,
                     result2
                 );
-                Err(Error::InterfaceError(
-                    "Failed to connect components".to_string(),
-                ))
             }
+            Ok(())
         } else {
             log::debug!("Components do not support IConnectionPoint - might be single component");
             Ok(()) // Not an error - single components don't need connection

@@ -231,8 +231,15 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
                     if result == kResultOk && !component_ptr.is_null() {
                         let component = ComPtr::<IComponent>::from_raw(component_ptr).unwrap();
 
-                        // Initialize to get bus info
-                        component.initialize(ptr::null_mut());
+                        // Initialize with a host context (null crashes u-he/Waves plugins).
+                        let host_app =
+                            crate::internal::com_implementations::create_host_application();
+                        let host_ctx = host_app.to_com_ptr::<IHostApplication>();
+                        let context = host_ctx
+                            .as_ref()
+                            .map(|p| p.as_ptr() as *mut FUnknown)
+                            .unwrap_or(ptr::null_mut());
+                        component.initialize(context);
 
                         // Get bus counts
                         audio_inputs = component.getBusCount(kAudio as i32, kInput as i32) as u32;
@@ -356,7 +363,14 @@ pub fn get_detailed_plugin_info(path: &Path) -> Result<DetailedPluginInfo> {
             );
             if result == kResultOk && !component_ptr.is_null() {
                 if let Some(component) = ComPtr::<IComponent>::from_raw(component_ptr) {
-                    component.initialize(ptr::null_mut());
+                    // Initialize with a host context (null crashes u-he/Waves plugins).
+                    let host_app = crate::internal::com_implementations::create_host_application();
+                    let host_ctx = host_app.to_com_ptr::<IHostApplication>();
+                    let context = host_ctx
+                        .as_ref()
+                        .map(|p| p.as_ptr() as *mut FUnknown)
+                        .unwrap_or(ptr::null_mut());
+                    component.initialize(context);
 
                     let collect = |media: i32, dir: i32| -> Vec<crate::discovery::BusInfo> {
                         let mut out = Vec::new();

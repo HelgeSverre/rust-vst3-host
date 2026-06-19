@@ -4,6 +4,56 @@ use std::ptr;
 use std::sync::{Arc, Mutex};
 use vst3::{Class, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 
+// Host Application implementation.
+//
+// Many plugins (u-he, Waves, ...) query the context passed to `IComponent::initialize`
+// for `IHostApplication` and dereference it. Passing a null context makes them crash.
+// Providing a real host-application object that at least answers `getName` lets them
+// initialize. (We don't yet vend host-created objects like IMessage/IAttributeList.)
+pub struct HostApplication;
+
+impl Class for HostApplication {
+    type Interfaces = (IHostApplication,);
+}
+
+impl IHostApplicationTrait for HostApplication {
+    unsafe fn getName(&self, name: *mut String128) -> tresult {
+        if name.is_null() {
+            return kResultFalse;
+        }
+        let dst = &mut *name;
+        let mut i = 0;
+        for ch in "vst3-host".encode_utf16() {
+            if i + 1 >= dst.len() {
+                break;
+            }
+            dst[i] = ch as i16;
+            i += 1;
+        }
+        dst[i] = 0;
+        kResultOk
+    }
+
+    unsafe fn createInstance(
+        &self,
+        _cid: *mut TUID,
+        _iid: *mut TUID,
+        obj: *mut *mut std::ffi::c_void,
+    ) -> tresult {
+        // We don't provide host-created objects; fail cleanly instead of crashing on a
+        // null context. Inter-component messaging via the host is simply unavailable.
+        if !obj.is_null() {
+            *obj = ptr::null_mut();
+        }
+        kResultFalse
+    }
+}
+
+/// Create a host-application context to pass to `IComponent::initialize`.
+pub fn create_host_application() -> ComWrapper<HostApplication> {
+    ComWrapper::new(HostApplication)
+}
+
 // Component Handler implementation
 pub struct ComponentHandler {
     // Track parameter changes from the plugin
