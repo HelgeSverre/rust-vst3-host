@@ -71,6 +71,20 @@ impl Vst3Host {
         Ok(plugins)
     }
 
+    /// List VST3 bundle paths in the configured scan locations **without loading them**.
+    ///
+    /// Fast and safe: unlike [`Self::discover_plugins`] (which loads and initializes
+    /// every plugin to read its metadata, and can be slow or crash-prone in-process),
+    /// this only walks the filesystem. Use it when you just need the list of available
+    /// `.vst3` paths (e.g. to populate a picker) and will load on demand.
+    pub fn scan_plugin_paths(&self) -> Vec<std::path::PathBuf> {
+        let mut all_paths = self.custom_paths.clone();
+        if self.scan_default_paths {
+            all_paths.extend(crate::discovery::scan_standard_paths());
+        }
+        crate::discovery::scan_directories(&all_paths).unwrap_or_default()
+    }
+
     /// Discover VST3 plugins, reporting progress through a callback.
     ///
     /// The callback receives [`DiscoveryProgress`] events: one `Started` at the

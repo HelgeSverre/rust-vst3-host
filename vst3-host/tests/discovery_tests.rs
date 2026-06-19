@@ -158,3 +158,28 @@ fn test_instrument_vs_effect() {
     assert_eq!(effect.audio_inputs, 2); // Effects typically process input
     assert_eq!(effect.audio_outputs, 2);
 }
+
+#[test]
+fn test_scan_plugin_paths_is_lightweight_and_finds_bundles() {
+    use vst3_host::Vst3Host;
+
+    // Point at the bundled test plugins dir (no standard paths) and confirm
+    // scan_plugin_paths lists the .vst3 bundle without loading it.
+    let test_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins");
+    let host = Vst3Host::builder()
+        .add_scan_path(test_dir)
+        .build()
+        .expect("build host");
+
+    let paths = host.scan_plugin_paths();
+    if std::path::Path::new(test_dir).join("Dexed.vst3").exists() {
+        assert!(
+            paths.iter().any(|p| p.ends_with("Dexed.vst3")),
+            "expected to find Dexed.vst3 in {paths:?}"
+        );
+    }
+    // Every result must be a .vst3 path.
+    assert!(paths
+        .iter()
+        .all(|p| p.extension().map(|e| e == "vst3").unwrap_or(false)));
+}

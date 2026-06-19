@@ -25,9 +25,30 @@ mod audio_processing;
 mod com_implementations;
 mod crash_protection;
 mod data_structures;
-mod plugin_discovery;
 mod plugin_host_process;
 mod utils;
+
+/// Scan for installed VST3 plugin paths via the `vst3-host` library (lightweight —
+/// lists `.vst3` bundles without loading them). Replaces the former hand-rolled
+/// `plugin_discovery` module so the inspector consumes the library for discovery.
+fn discover_vst3_paths(custom_paths: &[String]) -> Vec<String> {
+    let mut builder = vst3_host::Vst3Host::builder().scan_default_paths();
+    for p in custom_paths {
+        builder = builder.add_scan_path(p);
+    }
+    let host = match builder.build() {
+        Ok(h) => h,
+        Err(_) => return Vec::new(),
+    };
+    let mut paths: Vec<String> = host
+        .scan_plugin_paths()
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
 
 use audio_processing::*;
 use com_implementations::ComponentHandler;
@@ -365,7 +386,7 @@ fn main() {
             // Scan for available plugins
             let prefs = Preferences::load();
             inspector.discovered_plugins =
-                plugin_discovery::scan_vst3_directories_with_custom(&prefs.custom_plugin_paths);
+                discover_vst3_paths(&prefs.custom_plugin_paths);
 
             // Try to load the default plugin
             let binary_path = match get_vst3_binary_path(&inspector.plugin_path) {
@@ -1710,7 +1731,7 @@ impl VST3Inspector {
             ui.horizontal(|ui| {
                 ui.label(format!("Found {} plugins", self.discovered_plugins.len()));
                 if ui.button("Refresh").clicked() {
-                    self.discovered_plugins = plugin_discovery::scan_vst3_directories_with_custom(
+                    self.discovered_plugins = discover_vst3_paths(
                         &self.preferences.custom_plugin_paths,
                     );
                 }
@@ -1729,7 +1750,7 @@ impl VST3Inspector {
                             }
                             // Refresh plugin list
                             self.discovered_plugins =
-                                plugin_discovery::scan_vst3_directories_with_custom(
+                                discover_vst3_paths(
                                     &self.preferences.custom_plugin_paths,
                                 );
                         }
@@ -1761,7 +1782,7 @@ impl VST3Inspector {
                         }
                         // Refresh plugin list
                         self.discovered_plugins =
-                            plugin_discovery::scan_vst3_directories_with_custom(
+                            discover_vst3_paths(
                                 &self.preferences.custom_plugin_paths,
                             );
                     }
