@@ -243,11 +243,15 @@ impl Plugin {
         Ok(())
     }
 
-    /// Get current output levels
+    /// Get current output levels.
+    ///
+    /// Recovers automatically if the audio thread panicked while holding the lock
+    /// (poisoned mutex) rather than propagating the panic to the caller — metering
+    /// must never take down a UI thread polling it.
     pub fn get_output_levels(&self) -> AudioLevels {
         self.audio_levels
             .lock()
-            .unwrap_or_else(|_| panic!("Failed to lock audio levels"))
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 
