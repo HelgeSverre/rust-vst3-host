@@ -17,8 +17,9 @@ use vst3::{ComPtr, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 
 use super::{
     com_implementations::{
-        create_event_list, create_host_application, ComponentHandler, HostApplication,
-        HostEventList, ParameterChanges,
+        create_event_list, create_host_application, create_memory_stream,
+        create_memory_stream_from, ComponentHandler, HostApplication, HostEventList,
+        ParameterChanges,
     },
     module_loader::{load_module, VstModule},
 };
@@ -29,6 +30,10 @@ pub struct PluginImpl {
     component: ComPtr<IComponent>,
     processor: ComPtr<IAudioProcessor>,
     controller: Option<ComPtr<IEditController>>,
+    /// True when the component and controller are the same object (single-component
+    /// plugin). Then `IComponent::setState` already restores the controller, and calling
+    /// `setComponentState` on top of it would double-apply and corrupt parameters.
+    single_component: bool,
 
     // Plugin metadata
     pub(crate) info: PluginInfo,
@@ -155,8 +160,14 @@ impl PluginImpl {
 
             // Get or create controller (handles both single-component and separate controller)
             log::debug!("Step 9: Getting or creating controller...");
+            // A component that directly implements IEditController is a single-component
+            // plugin; this distinction matters for state restore (see `single_component`).
+            let single_component = component.cast::<IEditController>().is_some();
             let controller = Self::get_or_create_controller(&component, &factory, context)?;
-            log::debug!("✅ Controller obtained: {}", controller.is_some());
+            log::debug!(
+                "✅ Controller obtained: {} (single_component: {single_component})",
+                controller.is_some()
+            );
 
             // Connect component and controller if they are separate
             if let Some(ref ctrl) = controller {
@@ -242,6 +253,7 @@ impl PluginImpl {
                 component,
                 processor,
                 controller,
+                single_component,
                 info: updated_info,
                 is_active,
                 is_processing: false,
@@ -1033,6 +1045,57 @@ impl PluginInternal for PluginImpl {
             .lock()
             .map(|mut o| std::mem::take(&mut *o))
             .unwrap_or_default()
+    }
+
+    fn save_state(&self) -> Result<Vec<u8>> {
+        unsafe {
+            // Ask the processor (component) to serialize its state into our stream.
+            let stream = create_memory_stream();
+            let stream_ptr = stream
+                .to_com_ptr::<IBStream>()
+                .ok_or_else(|| Error::InterfaceError("Failed to create state stream".into()))?;
+            let result = self.component.getState(stream_ptr.as_ptr());
+            if result != kResultOk {
+                return Err(Error::Other(format!(
+                    "Plugin does not provide state (getState: {result:#x})"
+                )));
+            }
+            Ok(stream.to_vec())
+        }
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<()> {
+        unsafe {
+            // Restore the processor state.
+            let comp_stream = create_memory_stream_from(data.to_vec());
+            let comp_ptr = comp_stream
+                .to_com_ptr::<IBStream>()
+                .ok_or_else(|| Error::InterfaceError("Failed to create state stream".into()))?;
+            let result = self.component.setState(comp_ptr.as_ptr());
+            // kNotImplemented is acceptable (some plugins keep all state on the controller).
+            if result != kResultOk && result != kNotImplemented {
+                return Err(Error::Other(format!(
+                    "Failed to restore plugin state (setState: {result:#x})"
+                )));
+            }
+
+            // For a *separate* controller, push the same bytes so its parameter cache /
+            // editor reflect the restored state. A fresh stream is used because setState
+            // consumed the first one's cursor. Skipped for single-component plugins, where
+            // setState already restored the one shared object (see `single_component`).
+            if !self.single_component {
+                if let Some(ref controller) = self.controller {
+                    let ctrl_stream = create_memory_stream_from(data.to_vec());
+                    if let Some(ctrl_ptr) = ctrl_stream.to_com_ptr::<IBStream>() {
+                        let r = controller.setComponentState(ctrl_ptr.as_ptr());
+                        if r != kResultOk && r != kNotImplemented {
+                            log::debug!("Controller setComponentState returned {r:#x} (ignored)");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 }
 

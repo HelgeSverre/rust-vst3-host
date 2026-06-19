@@ -75,6 +75,18 @@ pub(crate) trait PluginInternal: Send {
     fn take_output_events(&self) -> Vec<MidiEvent> {
         Vec::new()
     }
+    /// Serialize the plugin's current state to an opaque byte blob.
+    fn save_state(&self) -> Result<Vec<u8>> {
+        Err(Error::Other(
+            "state save/restore is not supported".to_string(),
+        ))
+    }
+    /// Restore the plugin's state from a blob previously returned by [`Self::save_state`].
+    fn load_state(&mut self, _data: &[u8]) -> Result<()> {
+        Err(Error::Other(
+            "state save/restore is not supported".to_string(),
+        ))
+    }
 }
 
 impl Plugin {
@@ -381,6 +393,37 @@ impl Plugin {
             .as_ref()
             .map(|i| i.take_output_events())
             .unwrap_or_default()
+    }
+
+    /// Save the plugin's current state (parameters, internal settings, loaded preset) to
+    /// an opaque byte blob.
+    ///
+    /// The bytes are the plugin's own serialized state — treat them as opaque and pair them
+    /// with the plugin's identity ([`PluginInfo::uid`]); they only mean something to the
+    /// same plugin. Persist them to restore a patch later with [`Self::load_state`], or to
+    /// snapshot a session. Call this on the main thread (see the
+    /// [threading model](https://docs.rs/vst3-host)).
+    ///
+    /// Returns an error for plugins that don't implement state saving, or when running
+    /// under process isolation (not yet bridged across the boundary).
+    pub fn save_state(&self) -> Result<Vec<u8>> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .save_state()
+    }
+
+    /// Restore plugin state from a blob produced by [`Self::save_state`] on the *same*
+    /// plugin. Applies to both the processor and the controller, so parameter values and
+    /// the editor reflect the restored state.
+    ///
+    /// Passing bytes from a different plugin has undefined results (the plugin decides what
+    /// to do with bytes it doesn't recognize). Call this on the main thread.
+    pub fn load_state(&mut self, data: &[u8]) -> Result<()> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .load_state(data)
     }
 }
 

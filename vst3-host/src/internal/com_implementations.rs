@@ -297,6 +297,152 @@ pub fn create_host_message() -> ComWrapper<HostMessage> {
     ComWrapper::new(HostMessage::new())
 }
 
+// Host-side in-memory `IBStream`. Plugins serialize their state into a stream the host
+// provides (`IComponent::getState`) and restore from one the host fills
+// (`IComponent::setState`). This backs both with a growable byte buffer plus a cursor.
+struct MemBuf {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+/// Host implementation of `IBStream` over an in-memory buffer.
+pub struct MemoryStream {
+    inner: Mutex<MemBuf>,
+}
+
+impl MemoryStream {
+    fn new(data: Vec<u8>) -> Self {
+        Self {
+            inner: Mutex::new(MemBuf { data, pos: 0 }),
+        }
+    }
+
+    /// A copy of everything written to the stream (used after `getState`).
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.inner
+            .lock()
+            .map(|b| b.data.clone())
+            .unwrap_or_default()
+    }
+
+    // Safe inner ops — also the unit-test surface for the read/write/seek logic.
+    fn write_at_cursor(&self, src: &[u8]) -> usize {
+        if let Ok(mut b) = self.inner.lock() {
+            let end = b.pos + src.len();
+            if end > b.data.len() {
+                b.data.resize(end, 0);
+            }
+            let pos = b.pos;
+            b.data[pos..end].copy_from_slice(src);
+            b.pos = end;
+            src.len()
+        } else {
+            0
+        }
+    }
+
+    fn read_at_cursor(&self, n: usize) -> Vec<u8> {
+        if let Ok(mut b) = self.inner.lock() {
+            let start = b.pos.min(b.data.len());
+            let end = (start + n).min(b.data.len());
+            let out = b.data[start..end].to_vec();
+            b.pos = end;
+            out
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn seek_to(&self, pos: i64, mode: u32) -> i64 {
+        if let Ok(mut b) = self.inner.lock() {
+            let base = match mode {
+                SEEK_CUR => b.pos as i64,
+                SEEK_END => b.data.len() as i64,
+                _ => 0, // SEEK_SET
+            };
+            let new = (base + pos).max(0);
+            b.pos = new as usize;
+            new
+        } else {
+            0
+        }
+    }
+
+    fn position(&self) -> i64 {
+        self.inner.lock().map(|b| b.pos as i64).unwrap_or(0)
+    }
+}
+
+// IBStream seek modes — fixed by the VST3 ABI. kIBSeekSet (0) is the `_` arm in seek_to.
+const SEEK_CUR: u32 = 1; // kIBSeekCur
+const SEEK_END: u32 = 2; // kIBSeekEnd
+
+impl Class for MemoryStream {
+    type Interfaces = (IBStream,);
+}
+
+impl IBStreamTrait for MemoryStream {
+    unsafe fn read(
+        &self,
+        buffer: *mut std::ffi::c_void,
+        num_bytes: i32,
+        num_bytes_read: *mut i32,
+    ) -> tresult {
+        if buffer.is_null() || num_bytes < 0 {
+            return kResultFalse;
+        }
+        let bytes = self.read_at_cursor(num_bytes as usize);
+        ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, bytes.len());
+        if !num_bytes_read.is_null() {
+            *num_bytes_read = bytes.len() as i32;
+        }
+        kResultOk
+    }
+
+    unsafe fn write(
+        &self,
+        buffer: *mut std::ffi::c_void,
+        num_bytes: i32,
+        num_bytes_written: *mut i32,
+    ) -> tresult {
+        if buffer.is_null() || num_bytes < 0 {
+            return kResultFalse;
+        }
+        let src = std::slice::from_raw_parts(buffer as *const u8, num_bytes as usize);
+        let written = self.write_at_cursor(src);
+        if !num_bytes_written.is_null() {
+            *num_bytes_written = written as i32;
+        }
+        kResultOk
+    }
+
+    unsafe fn seek(&self, pos: i64, mode: i32, result: *mut i64) -> tresult {
+        let new = self.seek_to(pos, mode as u32);
+        if !result.is_null() {
+            *result = new;
+        }
+        kResultOk
+    }
+
+    unsafe fn tell(&self, pos: *mut i64) -> tresult {
+        if pos.is_null() {
+            return kResultFalse;
+        }
+        *pos = self.position();
+        kResultOk
+    }
+}
+
+/// Create an empty stream for the plugin to write its state into (`getState`).
+pub fn create_memory_stream() -> ComWrapper<MemoryStream> {
+    ComWrapper::new(MemoryStream::new(Vec::new()))
+}
+
+/// Create a stream seeded with bytes for the plugin to read its state from (`setState`).
+pub fn create_memory_stream_from(data: Vec<u8>) -> ComWrapper<MemoryStream> {
+    ComWrapper::new(MemoryStream::new(data))
+}
+
 // Component Handler implementation
 pub struct ComponentHandler {
     // Track parameter changes from the plugin
@@ -709,5 +855,45 @@ mod host_attr_tests {
         assert_eq!(list.get_value("s"), Some(AttrValue::Str(vec![72, 105])));
         assert_eq!(list.get_value("b"), Some(AttrValue::Bin(vec![1, 2, 3])));
         assert_eq!(list.get_value("missing"), None);
+    }
+}
+
+#[cfg(test)]
+mod memory_stream_tests {
+    use super::*;
+
+    #[test]
+    fn write_then_read_round_trips_from_start() {
+        let s = MemoryStream::new(Vec::new());
+        assert_eq!(s.write_at_cursor(&[1, 2, 3, 4]), 4);
+        assert_eq!(s.position(), 4);
+        assert_eq!(s.to_vec(), vec![1, 2, 3, 4]);
+
+        // Rewind (mode 0 = SEEK_SET) and read it all back.
+        assert_eq!(s.seek_to(0, 0), 0);
+        assert_eq!(s.read_at_cursor(4), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn read_past_end_is_clamped() {
+        let s = MemoryStream::new(vec![9, 8]);
+        assert_eq!(s.read_at_cursor(10), vec![9, 8]);
+        // Cursor now at end; further reads yield nothing.
+        assert_eq!(s.read_at_cursor(10), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn seek_modes_and_overwrite() {
+        let s = MemoryStream::new(vec![0, 0, 0, 0]);
+        // SEEK_END then write appends.
+        assert_eq!(s.seek_to(0, SEEK_END), 4);
+        s.write_at_cursor(&[5]);
+        assert_eq!(s.to_vec(), vec![0, 0, 0, 0, 5]);
+        // SEEK_SET to 1 then overwrite in place.
+        assert_eq!(s.seek_to(1, 0), 1);
+        s.write_at_cursor(&[7, 7]);
+        assert_eq!(s.to_vec(), vec![0, 7, 7, 0, 5]);
+        // SEEK_CUR is relative.
+        assert_eq!(s.seek_to(-3, SEEK_CUR), 0);
     }
 }

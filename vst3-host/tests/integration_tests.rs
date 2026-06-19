@@ -227,61 +227,63 @@ fn test_audio_processing() {
     );
 }
 
+/// Track D: real `getState`/`setState` round-trip through the plugin's own serializer,
+/// against the bundled Dexed plugin (so it doesn't depend on the host's plugin install).
 #[test]
-#[ignore = "Requires VST3 plugins to be installed"]
+#[ignore = "Requires the bundled test plugin"]
 fn test_plugin_state_save_restore() {
-    let Some(plugin_info) = find_test_plugin() else {
-        println!("No VST3 plugins found, skipping test");
+    let plugin_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(plugin_path).exists() {
+        println!("Test plugin not found at {plugin_path}, skipping");
         return;
-    };
+    }
 
     let mut host = Vst3Host::new().expect("Failed to create host");
     let mut plugin = host
-        .load_plugin(&plugin_info.path)
+        .load_plugin(plugin_path)
         .expect("Failed to load plugin");
 
-    // Get initial parameters
-    let initial_params = plugin
-        .get_parameters()
-        .expect("Failed to get initial parameters");
+    // Pick an automatable, writable parameter to drive.
+    let params = plugin.get_parameters().expect("get_parameters");
+    let param = params
+        .iter()
+        .find(|p| p.can_automate && !p.is_read_only && !p.is_bypass)
+        .or_else(|| params.first())
+        .expect("plugin has at least one parameter")
+        .clone();
+    let id = param.id;
 
-    // Modify some parameters
-    if let Some(param) = initial_params.first() {
-        let new_value = if param.value > 0.5 { 0.25 } else { 0.75 };
-        plugin
-            .set_parameter(param.id, new_value)
-            .expect("Failed to set parameter");
-    }
+    // Establish a known value, then snapshot it.
+    plugin.set_parameter(id, 0.25).expect("set_parameter v1");
+    let v1 = plugin.get_parameter(id).expect("get v1");
+    let snapshot = plugin.save_state().expect("save_state");
+    assert!(!snapshot.is_empty(), "saved state should not be empty");
 
-    // Get current state by reading parameters
-    let modified_params = plugin
-        .get_parameters()
-        .expect("Failed to get modified parameters");
+    // Move the parameter away and confirm the serialized state actually changed.
+    plugin.set_parameter(id, 0.75).expect("set_parameter v2");
+    let moved = plugin.save_state().expect("save_state after change");
+    assert_ne!(
+        snapshot, moved,
+        "changing a parameter should change the serialized state"
+    );
 
-    // Reset parameters to different values
-    if let Some(param) = initial_params.first() {
-        plugin
-            .set_parameter(param.id, 0.5)
-            .expect("Failed to set parameter");
-    }
-
-    // Restore parameters to modified state
-    for param in &modified_params {
-        plugin
-            .set_parameter(param.id, param.value)
-            .expect("Failed to restore parameter");
-    }
-
-    // Verify parameters were restored
-    let restored_params = plugin
-        .get_parameters()
-        .expect("Failed to get restored parameters");
-    if let (Some(modified), Some(restored)) = (modified_params.first(), restored_params.first()) {
-        assert!(
-            (modified.value - restored.value).abs() < 0.01,
-            "Parameter not restored correctly"
-        );
-    }
+    // Restore the snapshot: bytes must round-trip exactly and the live value must return.
+    plugin.load_state(&snapshot).expect("load_state");
+    let after_restore = plugin.save_state().expect("save_state after restore");
+    let v3 = plugin.get_parameter(id).expect("get after restore");
+    println!(
+        "param '{}' (id {id}): v1={v1} restored={v3}; bytes snapshot={} moved={} after_restore={}",
+        param.name,
+        snapshot.len(),
+        moved.len(),
+        after_restore.len()
+    );
+    assert_eq!(snapshot, after_restore, "state should round-trip exactly");
+    assert!(
+        (v3 - v1).abs() < 0.05,
+        "parameter not restored: {v3} (expected ~{v1})"
+    );
+    println!("State round-trip OK ({} bytes)", snapshot.len());
 }
 
 /// Phase 3 capstone: drive a plugin end-to-end in an isolated process.
