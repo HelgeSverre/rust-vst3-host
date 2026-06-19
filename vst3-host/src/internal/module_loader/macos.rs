@@ -8,7 +8,6 @@
 
 use super::{ModuleLoader, VstModule};
 use crate::error::{Error, Result};
-use crate::internal::objc_conflict_resolver::ObjCConflictResolver;
 use core_foundation::{
     base::{CFRelease, CFRetain, CFTypeRef, TCFType, Boolean},
     bundle::{
@@ -44,8 +43,6 @@ pub struct MacOSModule {
     bundle_exit: Option<BundleExitFunc>,
     /// GetPluginFactory function pointer
     get_factory_fn: Option<GetPluginFactoryFunc>,
-    /// Objective-C conflict resolver (used for cleanup)
-    _resolver: Option<ObjCConflictResolver>,
 }
 
 impl MacOSModule {
@@ -81,11 +78,9 @@ impl MacOSModule {
 
             log::debug!("Using bundle path: {}", bundle_path.display());
 
-            // Step 0: Initialize Objective-C conflict resolver
-            log::debug!("Step 0: Initializing Objective-C conflict resolver...");
-            let mut resolver = ObjCConflictResolver::new()?;
-            resolver.resolve_conflicts_for_plugin(&bundle_path)?;
-            log::debug!("✅ Objective-C conflicts resolved");
+            // Note: plugins with ObjC symbol conflicts (e.g. Waves/WaveShell) are
+            // routed to the private-namespace loader (see module_loader/mod.rs); the
+            // standard path below needs no conflict resolution.
 
             // Step 1: Create CFBundle from bundle path
             log::debug!("Step 1: Creating CFBundle from bundle path...");
@@ -202,7 +197,6 @@ impl MacOSModule {
                 path: bundle_path,
                 bundle_exit: Some(bundle_exit),
                 get_factory_fn: Some(get_factory_fn),
-                _resolver: Some(resolver),
             })
         }
     }

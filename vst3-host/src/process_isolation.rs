@@ -80,11 +80,20 @@ pub enum HostCommand {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HostResponse {
     /// Operation succeeded with message
-    Success { message: String },
+    Success {
+        /// Human-readable success detail.
+        message: String,
+    },
     /// Operation failed with error
-    Error { message: String },
+    Error {
+        /// Error detail.
+        message: String,
+    },
     /// Plugin crashed
-    Crashed { message: String },
+    Crashed {
+        /// Crash detail.
+        message: String,
+    },
     /// Per-channel audio output data (`[channel][frame]`).
     AudioOutput {
         /// Output samples per channel.

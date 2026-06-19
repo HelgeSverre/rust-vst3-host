@@ -83,8 +83,17 @@ examples compile, reached phase by phase.
   REMAINING.
 
 ## Phase 4 — Polish
-- [ ] 4a. Migrate `window.rs` `cocoa`/`objc` → `objc2` (clears ~51 warnings).
-- [ ] 4b. Clear `missing_docs`, escalate to `deny` in CI.
+- [x] Deleted the dead stub `objc_conflict_resolver.rs` + its misleading "conflicts
+  resolved" log (real fix is the private-namespace loader). Cleared ~10 warnings.
+- [x] 4b (partial). Cleared the `missing_docs` warnings on the IPC protocol types.
+  Warnings down 83 → 61. Remaining are mostly the cocoa deprecations (4a) and a few
+  platform-conditional dead-code items.
+- [ ] 4a. Migrate `window.rs` `cocoa`/`objc` → `objc2` (clears the remaining ~50
+  deprecation + `cargo-clippy` cfg warnings). GUI work — verify interactively.
+- [ ] 4b (rest). Escalate `missing_docs` to `deny` in CI once 4a is clean.
 - [ ] 4c. Real COM-level tests (load a bundled `.vst3`, run `process()`, assert cleanup).
-- [ ] Delete stub `objc_conflict_resolver.rs` + its misleading log line (real fix is
-  in `private_namespace.rs`).
+
+## Remaining GUI-heavy slices (need interactive verification, deferred)
+- [ ] 2a. Port `vst3-inspector` onto the library (XL regression net).
+- [ ] 2c. `IPlugFrame` resize + egui embedding helper.
+- [ ] 3e. Plugin GUI across the process boundary; isolation auto-respawn-and-reload.
