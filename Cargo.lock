@@ -3633,21 +3633,13 @@ name = "vst3-inspector"
 version = "0.1.0"
 dependencies = [
  "catppuccin-egui",
- "cocoa",
- "core-foundation 0.10.1",
- "cpal",
  "directories",
  "eframe",
  "egui_extras",
- "libloading",
- "objc",
  "rfd",
  "serde",
  "serde_json",
- "thiserror 2.0.12",
- "vst3",
  "vst3-host",
- "winapi",
 ]
 
 [[package]]
