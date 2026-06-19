@@ -2,15 +2,22 @@
 
 A Rust library for hosting VST3 plugins with a safe API.
 
+> **Status (in active development).** The in-process load path, parameters, MIDI,
+> and discovery work today on macOS. The "batteries-included" audio output
+> (`CpalBackend` → plugin), process isolation by default, lock-free audio, and the
+> egui widgets are **still being built** — see [ROADMAP.md](ROADMAP.md). Bullets
+> below marked _(planned)_ are not implemented yet.
+
 ## Features
 
 - Safe API - No unsafe code required by library users
 - Simple to use - Minimal boilerplate for common tasks
-- CPAL audio backend included
-- Process isolation for plugin crash protection
+- Plugin discovery with metadata (working)
 - Full MIDI support
 - Parameter control and automation
-- Real-time audio level monitoring
+- CPAL audio backend bundled — _(planned: automatic device wiring; today you drive `process_audio` yourself)_
+- Process isolation for plugin crash protection — _(opt-in; load/unload work, full control protocol planned)_
+- Real-time audio level monitoring — _(populated while a stream drives the plugin)_
 
 ## Quick Start
 
@@ -34,6 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+> Note: `start_processing()` arms the plugin, but the library does not yet open an
+> audio device for you — to actually hear sound today you must drive
+> `plugin.process_audio(&mut buffers)` from your own audio callback (see
+> `examples/parameter_automation.rs`). Automatic `CpalBackend` wiring is Phase 1 on
+> the [roadmap](ROADMAP.md).
 
 ## Installation
 
@@ -106,12 +119,11 @@ plugin.on_audio_process(|levels| {
 
 ## GUI Integration
 
-### With egui
-```rust
-use vst3_host_egui::PluginWidget;
+### With egui _(planned)_
 
-ui.add(PluginWidget::new(&mut plugin));
-```
+A dedicated egui widget (`PluginWidget`) under the `egui-widgets` feature is on the
+[roadmap](ROADMAP.md). For now, embed the plugin's native editor and build controls
+from `get_parameters()` / `set_parameter()` yourself (see `examples/plugin_gui.rs`).
 
 ### Native plugin GUI
 ```rust
@@ -125,18 +137,22 @@ if plugin.has_editor() {
 This library prioritizes safety:
 
 - **No unsafe in public API** - You never need to write unsafe code
-- **Process isolation** - Plugins run in separate processes by default
 - **Automatic cleanup** - Resources are properly released via RAII
-- **Thread safe** - Plugin instances can be safely shared between threads
-- **Timeout protection** - Hung plugins are automatically terminated
+- **Process isolation** _(opt-in)_ - Enable with `Vst3Host::builder().with_process_isolation(true)`
+  (requires building the helper binary with the `process-isolation` feature). It is
+  **not** on by default yet, and currently isolates load/unload only — see the
+  [roadmap](ROADMAP.md).
+- **Timeout protection** _(planned)_ - Detecting and terminating hung plugins is not
+  implemented yet.
 
 ## Performance
 
-- Zero-copy audio processing where possible
-- Lock-free operations in audio thread
-- Efficient parameter caching
-- Background plugin scanning
-- Process pooling for multiple plugins
+Current state is correctness-first, not yet real-time-optimized:
+
+- Background plugin scanning (working)
+- _(planned)_ Lock-free audio-thread operations — the audio path currently uses
+  mutexes and per-block allocations
+- _(planned)_ Zero-copy audio processing, parameter-change caching, process pooling
 
 ## License
 

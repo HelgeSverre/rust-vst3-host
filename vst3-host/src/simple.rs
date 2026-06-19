@@ -56,7 +56,7 @@ use std::path::Path;
 /// - Block size: 512 samples
 /// - Input channels: 2 (stereo)
 /// - Output channels: 2 (stereo)
-/// - Process isolation: Automatically enabled for problematic plugins
+/// - Process isolation: disabled (in-process). Use [`load_plugin_isolated`] to opt in.
 ///
 /// # Arguments
 /// * `path` - Path to the VST3 plugin (.vst3 file or directory)
@@ -156,24 +156,20 @@ pub fn load_plugin_isolated<P: AsRef<Path>>(path: P) -> Result<Plugin> {
     host.load_plugin(path)
 }
 
-/// Discover all VST3 plugins on the system.
+/// Discover all VST3 plugins in the standard system locations.
 ///
-/// **Note**: Plugin discovery functionality is not yet implemented in the current version.
-/// This function will be implemented in a future release.
-///
-/// For now, you can manually test plugins using `get_plugin_info()` or `load_plugin()`.
+/// Scans the platform's standard VST3 directories and returns metadata for each
+/// plugin found. For progress reporting during a long scan, use
+/// [`Vst3Host::discover_plugins_with_callback`](crate::Vst3Host::discover_plugins_with_callback).
 ///
 /// # Examples
 /// ```no_run
 /// use vst3_host::simple;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// // This will be implemented in a future version
-/// // let plugins = simple::discover_plugins()?;
-/// 
-/// // For now, test individual plugins:
-/// let info = simple::get_plugin_info("/path/to/plugin.vst3")?;
-/// println!("Found: {} by {}", info.name, info.vendor);
+/// for info in simple::discover_plugins()? {
+///     println!("Found: {} by {}", info.name, info.vendor);
+/// }
 /// # Ok(())
 /// # }
 /// ```
@@ -187,9 +183,6 @@ pub fn discover_plugins() -> Result<Vec<PluginInfo>> {
 
 /// Discover plugins in a specific directory.
 ///
-/// **Note**: Plugin discovery functionality is not yet implemented in the current version.
-/// This function will be implemented in a future release.
-///
 /// # Arguments
 /// * `path` - Directory to scan for VST3 plugins
 ///
@@ -198,8 +191,8 @@ pub fn discover_plugins() -> Result<Vec<PluginInfo>> {
 /// use vst3_host::simple;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// // This will be implemented in a future version
-/// // let plugins = simple::discover_plugins_in("/my/custom/vst3/folder")?;
+/// let plugins = simple::discover_plugins_in("/my/custom/vst3/folder")?;
+/// println!("{} plugins found", plugins.len());
 /// # Ok(())
 /// # }
 /// ```

@@ -19,18 +19,20 @@ clutter the tree.
 **Acceptance gate (overall):** `cargo test --workspace --all-features` green AND all
 examples compile, reached phase by phase.
 
-## Phase 0 — Honest green baseline  ← IN PROGRESS
-- [ ] 0a. Delete orphaned scaffolding: `realtime.rs`, `audio_processing.rs`,
+## Phase 0 — Honest green baseline  ✅ DONE (commits d84ed4a, 948b907, + 0d)
+- [x] 0a. Delete orphaned scaffolding: `realtime.rs`, `audio_processing.rs`,
   `stream.rs`, root `com_implementations.rs`, `api_simplification.rs`,
   `error_improvements.rs`. (RT-safe design ideas in `realtime.rs` are recoverable
   from git commit `d20eec2` if Phase 3 wants them — they reference a missing
   `crossbeam` dep and a stale duplicate COM impl, so they can't be revived as-is.)
-- [ ] 0b. Export `AudioBackend` / `AudioStream` in crate root + prelude (`lib.rs`).
-- [ ] 0c. Fix example/test API drift so everything compiles:
-  `parameter_automation`, `plugin_scanner`, `test_loading`, `debug_loader`,
-  `tests/integration_tests.rs`, `tests/host_tests.rs`.
-- [ ] 0d. Reconcile docs with reality (stop claiming isolation-by-default; fix the
-  `simple.rs` docstrings that wrongly say discovery is unimplemented).
+- [x] 0b. Export `AudioBackend` / `AudioStream` in crate root + prelude; removed the
+  `Result<T>` alias from the prelude glob (it shadowed `std::result::Result`).
+- [x] 0c. Fixed example/test API drift — all examples + tests compile;
+  `discover_plugins_with_callback` implemented. `cargo test --workspace
+  --all-features` green (47 pass, 9 ignored needing real plugins/HW or Phase 1/3).
+- [x] 0d. Reconciled docs: README_LIBRARY.md no longer claims isolation-by-default /
+  timeout / lock-free / pooling (marked _(planned)_ + link ROADMAP); fixed the
+  `simple.rs` docstrings that wrongly said discovery is unimplemented.
 
 ## Phase 1 — Batteries-included sound (core promise)
 - [ ] 1b. Make `Plugin` drivable from the audio thread (sound ownership/Send model).
