@@ -864,9 +864,11 @@ impl PluginInternal for PluginImpl {
             // Setup processing
             self.setup_processing()?;
 
-            // Start processing
+            // Start processing. `setProcessing` is an optional notification — a plugin
+            // may return kNotImplemented (e.g. u-he), which is not an error: it simply
+            // doesn't need the start/stop signal and still processes audio normally.
             let result = self.processor.setProcessing(1);
-            if result != kResultOk {
+            if result != kResultOk && result != kNotImplemented {
                 return Err(Error::Other(format!(
                     "Failed to start processing: {:#x}",
                     result
