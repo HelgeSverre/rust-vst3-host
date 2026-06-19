@@ -35,7 +35,7 @@ test-isolation: helper
 # Launch the VST3 inspector app
 [group('run')]
 inspector:
-    cargo run -p vst3-inspector --release
+    cargo run -p vst3-inspector --release --bin vst3-inspector
 
 # Play a synth through the default audio device (defaults to bundled Dexed)
 [group('run')]
