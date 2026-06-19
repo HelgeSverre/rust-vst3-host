@@ -55,6 +55,7 @@ pub(crate) trait PluginInternal: Send {
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
     fn get_parameter(&self, id: u32) -> Result<f64>;
     fn get_all_parameters(&self) -> Result<Vec<Parameter>>;
+    fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()>;
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()>;
     fn start_processing(&mut self) -> Result<()>;
@@ -108,6 +109,21 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .get_parameter(id)
+    }
+
+    /// Format a parameter value as the plugin itself would display it.
+    ///
+    /// VST3 keeps all parameter values normalized (0.0–1.0) and delegates
+    /// human-readable formatting to the plugin's controller. This asks the plugin to
+    /// render `normalized` for parameter `id`, returning exactly what its own UI would
+    /// show — e.g. `"440.00 Hz"`, `"-6.0 dB"`, `"Sine"`. Prefer this over
+    /// [`Parameter::format_value`], which can only approximate without the plugin's
+    /// internal mapping.
+    pub fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .format_parameter(id, normalized)
     }
 
     /// Set a parameter by name

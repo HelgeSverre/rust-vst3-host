@@ -48,12 +48,15 @@ examples compile, reached phase by phase.
   channel count kept exact so the interleave stays consistent.
 
 ## Phase 2 — Prove consumability + close API gaps
-- [ ] 2a. Port `vst3-inspector` onto the library (regression net).
-- [ ] 2b. Implement `discover_plugins_with_callback` (thread `DiscoveryProgress`).
+- [ ] 2a. Port `vst3-inspector` onto the library (regression net). ← NEXT BIG SLICE (XL)
+- [x] 2b. Implemented `discover_plugins_with_callback` (done in Phase 0c).
 - [ ] 2c. `IPlugFrame` resize + egui embedding helper.
-- [ ] 2d. Fix parameter plain-value correctness (call controller
-  `normalizedParamToPlain`/`getParamStringByValue`).
-- [ ] 2e. Remaining MIDI events; replace `get_output_levels` panic with `Result`.
+- [x] 2d. Parameter display correctness: added `Plugin::format_parameter` which calls
+  the controller's `getParamStringByValue` (verified against Dexed — e.g.
+  `MonoMode = "POLY"`). Documented `Parameter` min/max as normalized and
+  `format_value` as an approximation.
+- [x] 2e (partial). `get_output_levels` recovers a poisoned lock instead of panicking.
+  Remaining: implement ProgramChange/PitchBend/Aftertouch MIDI events.
 
 ## Phase 3 — Make process isolation real (safety pillar)
 - [ ] 3a. Extend IPC protocol with control verbs (share the enum from the lib).

@@ -11,9 +11,11 @@ pub struct Parameter {
     pub name: String,
     /// Current normalized value (0.0 to 1.0)
     pub value: f64,
-    /// Minimum value
+    /// Minimum value in normalized space (VST3 parameters are always 0.0..=1.0;
+    /// the plain/engineering range is private to the plugin — use
+    /// [`crate::Plugin::format_parameter`] for human-readable values).
     pub min: f64,
-    /// Maximum value
+    /// Maximum value in normalized space (always 1.0 for VST3 parameters).
     pub max: f64,
     /// Default value
     pub default: f64,
@@ -54,7 +56,12 @@ impl Parameter {
         }
     }
 
-    /// Format the value as a string with unit
+    /// Approximate a human-readable value string from normalized space.
+    ///
+    /// This cannot know the plugin's internal mapping (VST3 keeps that private), so
+    /// for continuous parameters it just reports the normalized number with the unit.
+    /// For accurate display (e.g. `"440.00 Hz"`), use
+    /// [`crate::Plugin::format_parameter`], which asks the plugin to format it.
     pub fn format_value(&self, normalized: f64) -> String {
         let plain = self.normalized_to_plain(normalized);
 

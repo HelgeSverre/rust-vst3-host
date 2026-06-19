@@ -79,6 +79,13 @@ impl PluginInternal for IsolatedPluginImpl {
         Ok(Vec::new())
     }
 
+    fn format_parameter(&self, _id: u32, _normalized: f64) -> Result<String> {
+        // TODO(Phase 3): add a FormatParameter verb to the isolation protocol.
+        Err(Error::Other(
+            "Parameter formatting is not yet supported across process isolation".to_string(),
+        ))
+    }
+
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
         // Convert input audio to a flat vector
         let input_data: Vec<f32> = buffers

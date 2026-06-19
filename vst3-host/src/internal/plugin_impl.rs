@@ -561,6 +561,22 @@ impl PluginInternal for PluginImpl {
         Ok(params)
     }
 
+    fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
+        if let Some(ref controller) = self.controller {
+            unsafe {
+                let mut buf: String128 = std::mem::zeroed();
+                if controller.getParamStringByValue(id, normalized, &mut buf) == kResultOk {
+                    return Ok(crate::internal::utils::vst_string_to_string(&buf));
+                }
+            }
+            Err(Error::InvalidParameter(format!(
+                "Plugin could not format parameter {id}"
+            )))
+        } else {
+            Err(Error::InterfaceError("No controller available".to_string()))
+        }
+    }
+
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
         if !self.is_active || !self.is_processing {
             return Err(Error::Other("Plugin is not processing".to_string()));

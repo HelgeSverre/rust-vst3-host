@@ -41,6 +41,23 @@ fn main() -> vst3_host::Result<()> {
         plugin.info().has_midi_input,
     );
 
+    // Show how the plugin formats a few of its own parameters (accurate display),
+    // contrasted with the normalized-space approximation.
+    if let Ok(params) = plugin.get_parameters() {
+        println!("First parameters (plugin-formatted vs approximate):");
+        for p in params.iter().take(5) {
+            let accurate = plugin
+                .format_parameter(p.id, p.value)
+                .unwrap_or_else(|_| "<n/a>".into());
+            println!(
+                "  {:<24} {:>12}   (approx: {})",
+                p.name,
+                accurate,
+                p.format_value(p.value)
+            );
+        }
+    }
+
     // Start streaming audio to the default output device.
     let audio = simple::play(plugin)?;
     println!("Audio stream started. Sending middle C...");
