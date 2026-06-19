@@ -96,6 +96,18 @@ impl HostEventList {
         }
     }
 
+    /// Take all events out of the list, leaving it empty. Used to read the events a
+    /// plugin emitted into its output event list during `process()`.
+    pub fn drain(&self) -> Vec<Event> {
+        match self.events.lock() {
+            Ok(mut events) => std::mem::take(&mut *events),
+            Err(_) => {
+                log::error!("HostEventList: Failed to lock events for drain");
+                Vec::new()
+            }
+        }
+    }
+
     pub fn add_event(&self, event: Event) {
         match self.events.lock() {
             Ok(mut events) => {

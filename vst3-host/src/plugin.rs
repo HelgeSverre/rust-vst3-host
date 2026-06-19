@@ -65,6 +65,11 @@ pub(crate) trait PluginInternal: Send {
     fn close_editor(&mut self) -> Result<()>;
     fn get_editor_size(&self) -> Result<(i32, i32)>;
     fn get_parameter_changes(&self) -> Vec<(u32, f64)>;
+    /// Take the MIDI events the plugin has emitted since the last call. Defaults to empty
+    /// for implementations that don't capture output MIDI (e.g. process isolation).
+    fn take_output_events(&self) -> Vec<MidiEvent> {
+        Vec::new()
+    }
 }
 
 impl Plugin {
@@ -357,6 +362,20 @@ impl Plugin {
             .as_ref()
             .map(|i| i.get_parameter_changes())
             .unwrap_or_else(Vec::new)
+    }
+
+    /// Take the MIDI events the plugin has emitted (e.g. from an arpeggiator or MPE
+    /// controller) since the last call, draining the internal buffer.
+    ///
+    /// Output MIDI is captured while the plugin processes audio, so poll this regularly
+    /// (e.g. each UI frame) while the plugin is playing. Returns an empty vector if the
+    /// plugin emits nothing, or for plugins running under process isolation (output MIDI
+    /// across the boundary is not captured yet).
+    pub fn take_output_midi(&self) -> Vec<MidiEvent> {
+        self.internal
+            .as_ref()
+            .map(|i| i.take_output_events())
+            .unwrap_or_default()
     }
 }
 

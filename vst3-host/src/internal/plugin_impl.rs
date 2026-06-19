@@ -43,6 +43,10 @@ pub struct PluginImpl {
     // Event handling
     input_events: ComWrapper<HostEventList>,
     output_events: ComWrapper<HostEventList>,
+    // MIDI the plugin has emitted (captured from output_events after each process block,
+    // converted to MidiEvent), buffered for the host to poll. Capped to avoid unbounded
+    // growth if the host never reads it.
+    output_midi: Arc<Mutex<Vec<MidiEvent>>>,
 
     // Plugin view
     plugin_view: Option<ComPtr<IPlugView>>,
@@ -239,6 +243,7 @@ impl PluginImpl {
                 component_handler: Some(component_handler),
                 input_events,
                 output_events,
+                output_midi: Arc::new(Mutex::new(Vec::new())),
                 plugin_view: None,
                 _module: module,
             })
@@ -705,6 +710,20 @@ impl PluginInternal for PluginImpl {
                 // Clear input events AFTER processing so plugin can see them
                 self.input_events.clear();
 
+                // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
+                let emitted = self.output_events.drain();
+                if !emitted.is_empty() {
+                    if let Ok(mut out) = self.output_midi.lock() {
+                        out.extend(emitted.iter().filter_map(event_to_midi));
+                        // Cap the buffer so a host that never polls can't grow it forever.
+                        const MAX_OUTPUT_MIDI: usize = 4096;
+                        if out.len() > MAX_OUTPUT_MIDI {
+                            let drop = out.len() - MAX_OUTPUT_MIDI;
+                            out.drain(0..drop);
+                        }
+                    }
+                }
+
                 // Copy output to provided buffers (length-clamped to the actual frames).
                 for (ch_idx, channel) in buffers.outputs.iter_mut().enumerate() {
                     if ch_idx < data.output_buffers.len() {
@@ -994,6 +1013,153 @@ impl PluginInternal for PluginImpl {
 
     fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
         self.get_parameter_changes()
+    }
+
+    fn take_output_events(&self) -> Vec<MidiEvent> {
+        self.output_midi
+            .lock()
+            .map(|mut o| std::mem::take(&mut *o))
+            .unwrap_or_default()
+    }
+}
+
+/// Convert a raw VST3 `Event` (as a plugin emits into its output event list) into a safe
+/// [`MidiEvent`]. Returns `None` for event types this library doesn't model.
+pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
+    unsafe {
+        match e.r#type as u32 {
+            kNoteOnEvent => {
+                let n = &e.__field0.noteOn;
+                Some(MidiEvent::NoteOn {
+                    channel: MidiChannel::from_index(n.channel as u8)?,
+                    note: (n.pitch.clamp(0, 127)) as u8,
+                    velocity: (n.velocity * 127.0).round().clamp(0.0, 127.0) as u8,
+                })
+            }
+            kNoteOffEvent => {
+                let n = &e.__field0.noteOff;
+                Some(MidiEvent::NoteOff {
+                    channel: MidiChannel::from_index(n.channel as u8)?,
+                    note: (n.pitch.clamp(0, 127)) as u8,
+                    velocity: (n.velocity * 127.0).round().clamp(0.0, 127.0) as u8,
+                })
+            }
+            kPolyPressureEvent => {
+                let p = &e.__field0.polyPressure;
+                Some(MidiEvent::PolyAftertouch {
+                    channel: MidiChannel::from_index(p.channel as u8)?,
+                    note: (p.pitch.clamp(0, 127)) as u8,
+                    pressure: (p.pressure * 127.0).round().clamp(0.0, 127.0) as u8,
+                })
+            }
+            t if t == kLegacyMIDICCOutEvent => {
+                let c = &e.__field0.midiCCOut;
+                let channel = MidiChannel::from_index(c.channel as u8)?;
+                let value = (c.value as u8) & 0x7F;
+                match c.controlNumber as u32 {
+                    n if n == ControllerNumbers_::kPitchBend => Some(MidiEvent::PitchBend {
+                        channel,
+                        value: (((c.value2 as u16) & 0x7F) << 7) | value as u16,
+                    }),
+                    n if n == ControllerNumbers_::kAfterTouch => {
+                        Some(MidiEvent::ChannelAftertouch {
+                            channel,
+                            pressure: value,
+                        })
+                    }
+                    cc if cc < 128 => Some(MidiEvent::ControlChange {
+                        channel,
+                        controller: cc as u8,
+                        value,
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_midi_tests {
+    use super::*;
+
+    fn blank_event() -> Event {
+        unsafe { std::mem::zeroed() }
+    }
+
+    #[test]
+    fn converts_note_on() {
+        let mut e = blank_event();
+        e.r#type = kNoteOnEvent as u16;
+        e.__field0.noteOn.channel = 0;
+        e.__field0.noteOn.pitch = 60;
+        e.__field0.noteOn.velocity = 1.0;
+        assert_eq!(
+            event_to_midi(&e),
+            Some(MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 127
+            })
+        );
+    }
+
+    #[test]
+    fn converts_note_off() {
+        let mut e = blank_event();
+        e.r#type = kNoteOffEvent as u16;
+        e.__field0.noteOff.channel = 1;
+        e.__field0.noteOff.pitch = 64;
+        e.__field0.noteOff.velocity = 0.0;
+        assert_eq!(
+            event_to_midi(&e),
+            Some(MidiEvent::NoteOff {
+                channel: MidiChannel::Ch2,
+                note: 64,
+                velocity: 0
+            })
+        );
+    }
+
+    #[test]
+    fn converts_legacy_cc_and_pitchbend() {
+        // A plain CC.
+        let mut cc = blank_event();
+        cc.r#type = kLegacyMIDICCOutEvent as u16;
+        cc.__field0.midiCCOut.controlNumber = 1; // mod wheel
+        cc.__field0.midiCCOut.channel = 0;
+        cc.__field0.midiCCOut.value = 64;
+        assert_eq!(
+            event_to_midi(&cc),
+            Some(MidiEvent::ControlChange {
+                channel: MidiChannel::Ch1,
+                controller: 1,
+                value: 64
+            })
+        );
+
+        // Pitch bend round-trips the 14-bit value (LSB in value, MSB in value2).
+        let mut pb = blank_event();
+        pb.r#type = kLegacyMIDICCOutEvent as u16;
+        pb.__field0.midiCCOut.controlNumber = ControllerNumbers_::kPitchBend as u8;
+        pb.__field0.midiCCOut.channel = 0;
+        pb.__field0.midiCCOut.value = (10000 & 0x7F) as i8;
+        pb.__field0.midiCCOut.value2 = ((10000 >> 7) & 0x7F) as i8;
+        assert_eq!(
+            event_to_midi(&pb),
+            Some(MidiEvent::PitchBend {
+                channel: MidiChannel::Ch1,
+                value: 10000
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_unknown_event_types() {
+        let mut e = blank_event();
+        e.r#type = 9999;
+        assert_eq!(event_to_midi(&e), None);
     }
 }
 

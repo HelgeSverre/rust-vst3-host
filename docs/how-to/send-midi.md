@@ -56,10 +56,28 @@ assert_eq!(note_to_name(60), "C3");
 assert_eq!(name_to_note("C3"), Some(60));
 ```
 
+## Read MIDI the plugin emits
+
+Some plugins emit MIDI — arpeggiators, MPE controllers, sequencers. While the plugin is
+processing, poll `take_output_midi` to drain the events it produced:
+
+```rust
+# use vst3_host::simple;
+# fn main() -> vst3_host::Result<()> {
+# let audio = simple::play(simple::load_plugin("/x.vst3")?)?;
+for event in audio.lock().take_output_midi() {
+    println!("plugin emitted: {event:?}");
+}
+# Ok(())
+# }
+```
+
+Call it regularly (e.g. each UI frame). Output MIDI is captured on the audio thread as the
+plugin processes, so it only flows while the plugin is playing. Plugins running under
+[process isolation](isolate-plugin-crashes.md) don't capture output MIDI yet.
+
 ## Caveats
 
 - **Program Change is not supported.** VST3 switches programs through `IUnitInfo` program
   lists, not MIDI events, so `MidiEvent::ProgramChange` returns an error. This is a known
   gap, not a silent no-op.
-- The library does not yet expose MIDI the plugin *emits* (output events). You can send;
-  reading the plugin's MIDI output is planned.
