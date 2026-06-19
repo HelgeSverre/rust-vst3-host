@@ -109,23 +109,21 @@ A multi-agent analysis produced an incremental, compile-at-each-step slice plan.
   crash**: `PluginImpl::process` panicked on any audio block smaller than the configured
   size (routine with `BufferSize::Default`); now sets `numSamples` per call + uses
   length-clamped copies. Affected all playback, not just the inspector.
-- [ ] Slices 2/3/5 (THE BIG COUPLED CHANGE — now harness-verifiable). Replace the
-  inspector's raw COM/audio state with `vst3_host::Plugin` + `AudioHandle`. SIZED: **73
-  `self.{component,controller,processor,plugin_library,host_process_data,
-  shared_audio_state,plugin_view,plugin_host_process}` references** across load, the
-  audio-thread-shared state (16 refs), MIDI, and the editor — one atomic change
-  (the lib hides COM, so the fields can't be removed piecemeal). Deletes
-  `com_implementations.rs`, `audio_processing.rs`. **Verification gap:** the GUI launches
-  and is screenshottable (rendering verified), but egui takes no external input
-  injection, so the *behavior* this change alters (loading, param edits, audio playback,
-  MIDI, editor open) can only be confirmed by a human clicking through it. Do it in an
-  interactive session — or add a startup self-test path that auto-loads Dexed + logs
-  params/audio-peak to make it headlessly verifiable.
-- [ ] Slice 6. Process isolation → library; delete `plugin_host_process.rs` +
-  `vst3-inspector-helper.rs` (parity already proven).
-- [ ] Slice 9 (LAST, interactive-only). Editor window → `Plugin::open_editor`/`PluginWindow`.
+- [x] Slices 2/3/5/6 (THE BIG COUPLED CHANGE) ✅ DONE. The inspector now holds
+  `host: Vst3Host` + `audio: Option<AudioHandle>` and is a pure library consumer — the
+  plugin lives in the AudioHandle; load/params/MIDI/processing/VU all go through it.
+  Removed ~3900 lines: deleted `com_implementations.rs`, `audio_processing.rs`,
+  `plugin_host_process.rs`, `crash_protection.rs`, `utils.rs`, the inspector helper bin,
+  and the raw `vst3`/`cpal`/`libloading`/`cocoa`/`objc`/`winapi` deps. `main.rs` 5492 →
+  2783. **Verified**: workspace builds + tests green, `just selftest` OK (real audio),
+  GUI launches + renders, 0 raw `vst3::`/`ComPtr`/`cpal` refs left, clippy clean.
+- [ ] Slice 9 (interactive-only). Editor window embedding is currently a stubbed no-op
+  (`TODO(port)` in `create_plugin_gui`) — needs `Plugin::open_editor`/`PluginWindow`
+  wiring + a human to see the window. Depends on 2c.
 
-## Other remaining (need interactive verification)
-- [ ] 2c. `IPlugFrame` resize + egui embedding helper.
+## Other remaining (need interactive verification or are GUI-runtime work)
+- [ ] 2c. `IPlugFrame` resize + egui embedding helper (unblocks the inspector editor).
+- [ ] MIDI-input monitor: inspector monitor shows app-sent events only; capturing
+  plugin-EMITTED MIDI needs a library API (GAP-D: `Plugin::on_midi_output`).
 - [ ] 3e. Plugin GUI across the process boundary; isolation auto-respawn-and-reload.
 - [ ] 4a. `window.rs` cocoa → objc2 migration (~50 warnings).
