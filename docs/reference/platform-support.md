@@ -4,10 +4,16 @@
 | --- | --- | --- | --- |
 | macOS | Working, exercised against real plugins | Standalone native window (`PluginWindow`) | Primary development platform. |
 | Windows | Implemented | Implemented, less exercised | Loading uses the Win32 module path. |
-| Linux | Implemented | Editor returns an error | Audio/loading present; native editor embedding not implemented. |
+| Linux | Implemented | X11 via XCB (`PluginWindow`) | Editor support ported from the [khremeviuc1004 fork](https://github.com/khremeviuc1004/rust-vst3-host); see note below. |
 
 This reflects where each path has been run, not a guarantee. macOS is the most exercised;
 contributions and reports for Windows/Linux are welcome.
+
+> **Linux editor — needs verification.** The X11/XCB plugin-editor window
+> (`vst3-host/src/window.rs`) was ported from a fork that ran it on Linux, but it has not
+> been compiled or run in this project's CI/dev environment (which is macOS). It is
+> cfg-gated, so it does not affect the macOS/Windows builds. Building on Linux requires
+> the `libxcb` development headers. If you run it on Linux, reports are very welcome.
 
 ## Default plugin scan directories
 

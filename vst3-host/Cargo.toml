@@ -41,6 +41,11 @@ core-foundation = "0.10"
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# X11 plugin-editor window support (ported from the khremeviuc1004 fork). Requires
+# libxcb dev headers at build time on Linux.
+xcb = "1.7"
+
 [features]
 # process-isolation is on by default so the helper binary is always built and the
 # opt-in `Vst3Host::builder().with_process_isolation(true)` works without extra flags.

@@ -410,3 +410,14 @@ impl WindowHandle {
         Self(hwnd)
     }
 }
+
+#[cfg(target_os = "linux")]
+impl WindowHandle {
+    /// Create from an X11 window id on Linux (for VST3 `X11EmbedWindowID`).
+    ///
+    /// The VST3 X11 platform type expects the window id itself as the handle value,
+    /// not a pointer to it.
+    pub fn from_x11(window_id: u32) -> Self {
+        Self(window_id as usize as *mut std::ffi::c_void)
+    }
+}

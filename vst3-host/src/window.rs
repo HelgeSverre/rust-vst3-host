@@ -28,6 +28,15 @@ use winapi::{
     },
 };
 
+/// An X11 window (connection + window id) backing a plugin editor on Linux.
+///
+/// Ported from the khremeviuc1004 fork's XCB implementation.
+#[cfg(target_os = "linux")]
+struct XcbWindowState {
+    connection: xcb::Connection,
+    window: xcb::x::Window,
+}
+
 /// A plugin window that manages the native window and plugin editor lifecycle
 pub struct PluginWindow {
     plugin: Arc<Mutex<Plugin>>,
@@ -36,7 +45,7 @@ pub struct PluginWindow {
     #[cfg(target_os = "windows")]
     native_window: Option<HWND>,
     #[cfg(target_os = "linux")]
-    native_window: Option<u64>,
+    native_window: Option<XcbWindowState>,
 }
 
 impl PluginWindow {
@@ -209,9 +218,58 @@ impl PluginWindow {
 
         #[cfg(target_os = "linux")]
         {
-            return Err(Error::Other(
-                "Plugin GUI not yet implemented for Linux".to_string(),
-            ));
+            use xcb::Xid;
+
+            // Create an X11 window via XCB and embed the plugin editor into it using the
+            // VST3 X11EmbedWindowID platform type (handled in plugin_impl::open_editor).
+            let (connection, screen_number) = xcb::Connection::connect(None)
+                .map_err(|e| Error::Other(format!("Failed to connect to X server: {e}")))?;
+            let setup = connection.get_setup();
+            let screen = setup
+                .roots()
+                .nth(screen_number as usize)
+                .ok_or_else(|| Error::Other("No X11 screen found".to_string()))?;
+            let window = connection.generate_id();
+
+            connection
+                .send_and_check_request(&xcb::x::CreateWindow {
+                    depth: xcb::x::COPY_FROM_PARENT as u8,
+                    wid: window,
+                    parent: screen.root(),
+                    x: 0,
+                    y: 0,
+                    width: width as u16,
+                    height: height as u16,
+                    border_width: 0,
+                    class: xcb::x::WindowClass::InputOutput,
+                    visual: screen.root_visual(),
+                    value_list: &[
+                        xcb::x::Cw::BackPixel(screen.white_pixel()),
+                        xcb::x::Cw::EventMask(
+                            xcb::x::EventMask::EXPOSURE | xcb::x::EventMask::KEY_PRESS,
+                        ),
+                    ],
+                })
+                .map_err(|e| Error::Other(format!("Failed to create X11 window: {e}")))?;
+
+            // Window title.
+            let title = format!("{} - VST3", plugin_info.name);
+            connection.send_request(&xcb::x::ChangeProperty {
+                mode: xcb::x::PropMode::Replace,
+                window,
+                property: xcb::x::ATOM_WM_NAME,
+                r#type: xcb::x::ATOM_STRING,
+                data: title.as_bytes(),
+            });
+
+            // Show the window, then attach the plugin editor to its X11 id.
+            connection.send_request(&xcb::x::MapWindow { window });
+            let _ = connection.flush();
+
+            let handle = crate::plugin::WindowHandle::from_x11(window.resource_id());
+            self.plugin.lock().unwrap().open_editor(handle)?;
+
+            self.native_window = Some(XcbWindowState { connection, window });
         }
 
         Ok(())
@@ -240,6 +298,19 @@ impl PluginWindow {
                 unsafe {
                     DestroyWindow(hwnd);
                 }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(state) = self.native_window.take() {
+                state.connection.send_request(&xcb::x::UnmapWindow {
+                    window: state.window,
+                });
+                state.connection.send_request(&xcb::x::DestroyWindow {
+                    window: state.window,
+                });
+                let _ = state.connection.flush();
             }
         }
     }
