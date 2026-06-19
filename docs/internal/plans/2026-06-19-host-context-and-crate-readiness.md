@@ -156,13 +156,16 @@ Rust, so a wrong guess would mislead — the contract is documented instead.
 
 ## Track C — Crate readiness (well-made cargo package)
 
-### C1: CI (the biggest missing piece)
-GitHub Actions at `.github/workflows/ci.yml`: matrix of macOS + Linux (reuse the
-`just linux-check` Docker recipe or a native libxcb/ALSA job) + Windows; run `cargo fmt
---check`, `cargo clippy --workspace --all-features`, `cargo test --workspace
---all-features`, `cargo build --examples`. Cache the VST3 SDK submodule.
-**Acceptance:** green CI on a push; the matrix actually compiles Windows + Linux (catches
-the next c_char-style portability bug automatically).
+### C1: CI (the biggest missing piece) — ✅ DONE (green on all 3 platforms)
+GitHub Actions at `.github/workflows/ci.yml`: macOS (fmt + clippy `-D warnings` + test +
+examples), Linux (libxcb/ALSA build + test + clippy `-D warnings`), Windows (LLVM + build).
+**Acceptance (met):** the run on push **27844853409** is green across macOS, Linux, and
+Windows. Standing CI up immediately paid off — it surfaced and we fixed: (1) a missing
+`.gitmodules` that broke the vst3sdk submodule checkout for every fresh clone, (2) Linux-only
+clippy dead-code + `c_char` cast lints, and (3) the first-ever Windows compile (HWND import,
+`Result` alias misuse, i32/u32 SDK-enum casts) — exactly the portability class CI exists to
+catch. *Minor follow-up:* `actions/checkout@v4` emits a Node 20 deprecation notice (bump to
+v5 when convenient).
 
 ### C2: Warnings to zero — ✅ DONE (runtime GUI check pending)
 `window.rs` migrated to `objc2` + `objc2-app-kit` + `objc2-foundation` (typed AppKit APIs);
