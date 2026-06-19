@@ -42,7 +42,12 @@ core-foundation = "0.10"
 winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi"] }
 
 [features]
-default = ["cpal-backend"]
+# process-isolation is on by default so the helper binary is always built and the
+# opt-in `Vst3Host::builder().with_process_isolation(true)` works without extra flags.
+# Note: isolation is still opt-in at *runtime* (the default load path is in-process) —
+# enabling it by default would require shipping/locating the helper binary in the
+# consumer's environment, which is a deployment concern, not just a flag.
+default = ["cpal-backend", "process-isolation"]
 cpal-backend = ["cpal"]
 process-isolation = []
 egui-widgets = ["egui"]
@@ -55,6 +60,10 @@ eframe = "0.31"
 [[example]]
 name = "play_synth"
 required-features = ["cpal-backend"]
+
+[[example]]
+name = "isolated_host"
+required-features = ["process-isolation"]
 
 [[example]]
 name = "plugin_scanner"

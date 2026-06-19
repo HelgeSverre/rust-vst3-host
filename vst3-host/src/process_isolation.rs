@@ -7,19 +7,65 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-/// Commands that can be sent to the isolated plugin process
+/// Commands that can be sent to the isolated plugin process.
+///
+/// This enum is the single source of truth for the isolation IPC protocol — the
+/// helper binary imports it from here rather than redefining it, so the two halves
+/// can never drift apart.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HostCommand {
-    /// Load a plugin from the specified path
-    LoadPlugin { path: String },
+    /// Load a plugin from the specified path, configured for the given audio settings.
+    LoadPlugin {
+        /// Path to the `.vst3` bundle.
+        path: String,
+        /// Sample rate to configure the plugin for.
+        sample_rate: f64,
+        /// Block size to configure the plugin for.
+        block_size: u32,
+    },
     /// Unload the current plugin
     UnloadPlugin,
     /// Create plugin GUI
     CreateGui,
     /// Close plugin GUI
     CloseGui,
-    /// Process audio buffers
-    Process { audio_data: Vec<f32> },
+    /// Start the plugin's audio processing.
+    StartProcessing,
+    /// Stop the plugin's audio processing.
+    StopProcessing,
+    /// Set a parameter (normalized 0.0..=1.0).
+    SetParameter {
+        /// Parameter id.
+        id: u32,
+        /// Normalized value.
+        value: f64,
+    },
+    /// Read a parameter's current normalized value.
+    GetParameter {
+        /// Parameter id.
+        id: u32,
+    },
+    /// Read all parameters.
+    GetAllParameters,
+    /// Ask the plugin to format a normalized value as a display string.
+    FormatParameter {
+        /// Parameter id.
+        id: u32,
+        /// Normalized value to format.
+        normalized: f64,
+    },
+    /// Send a MIDI event to the plugin.
+    SendMidi {
+        /// The event to deliver.
+        event: crate::midi::MidiEvent,
+    },
+    /// Process one block of audio. `inputs` is per-channel; `frames` is the block length.
+    Process {
+        /// Per-channel input samples (`[channel][frame]`).
+        inputs: Vec<Vec<f32>>,
+        /// Number of frames in this block.
+        frames: u32,
+    },
     /// Shutdown the helper process
     Shutdown,
 }
@@ -33,15 +79,39 @@ pub enum HostResponse {
     Error { message: String },
     /// Plugin crashed
     Crashed { message: String },
-    /// Audio output data
-    AudioOutput { data: Vec<f32> },
+    /// Per-channel audio output data (`[channel][frame]`).
+    AudioOutput {
+        /// Output samples per channel.
+        outputs: Vec<Vec<f32>>,
+    },
+    /// A single parameter value (normalized).
+    ParameterValue {
+        /// Normalized value.
+        value: f64,
+    },
+    /// A formatted parameter display string.
+    ParameterString {
+        /// The plugin-rendered display string.
+        value: String,
+    },
+    /// A list of parameters.
+    Parameters {
+        /// All parameters reported by the plugin.
+        params: Vec<crate::parameters::Parameter>,
+    },
     /// Plugin information
     PluginInfo {
+        /// Vendor / manufacturer.
         vendor: String,
+        /// Plugin name.
         name: String,
+        /// Version string.
         version: String,
+        /// Whether the plugin has an editor.
         has_gui: bool,
+        /// Audio input bus count.
         audio_inputs: i32,
+        /// Audio output bus count.
         audio_outputs: i32,
     },
 }

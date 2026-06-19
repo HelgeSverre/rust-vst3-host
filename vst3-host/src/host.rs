@@ -184,6 +184,8 @@ impl Vst3Host {
         let response = process
             .send_command(HostCommand::LoadPlugin {
                 path: path.display().to_string(),
+                sample_rate: self.config.sample_rate,
+                block_size: self.config.block_size as u32,
             })
             .map_err(|e| Error::Other(format!("Failed to load plugin in isolation: {}", e)))?;
 

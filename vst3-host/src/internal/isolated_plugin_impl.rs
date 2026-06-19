@@ -60,65 +60,77 @@ impl IsolatedPluginImpl {
     }
 }
 
+impl IsolatedPluginImpl {
+    /// Expect a `Success` response, mapping anything else to an error.
+    fn expect_success(&self, command: HostCommand, what: &str) -> Result<()> {
+        match self.send_command(command)? {
+            HostResponse::Success { .. } => Ok(()),
+            HostResponse::Error { message } => Err(Error::Other(format!("{what}: {message}"))),
+            _ => Err(Error::Other(format!("{what}: unexpected response"))),
+        }
+    }
+}
+
 impl PluginInternal for IsolatedPluginImpl {
-    fn set_parameter(&mut self, _id: u32, _value: f64) -> Result<()> {
-        // For now, we'll store parameters locally and apply them during processing
-        // In a full implementation, this would send a SetParameter command
-        // TODO: Implement SetParameter command in the protocol
-        Ok(())
+    fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
+        self.expect_success(HostCommand::SetParameter { id, value }, "SetParameter")
     }
 
-    fn get_parameter(&self, _id: u32) -> Result<f64> {
-        // TODO: Implement GetParameter command in the protocol
-        Ok(0.5) // Default value for now
+    fn get_parameter(&self, id: u32) -> Result<f64> {
+        match self.send_command(HostCommand::GetParameter { id })? {
+            HostResponse::ParameterValue { value } => Ok(value),
+            HostResponse::Error { message } => Err(Error::Other(format!("GetParameter: {message}"))),
+            _ => Err(Error::Other("GetParameter: unexpected response".to_string())),
+        }
     }
 
     fn get_all_parameters(&self) -> Result<Vec<Parameter>> {
-        // TODO: Implement GetAllParameters command in the protocol
-        // For now, return an empty list
-        Ok(Vec::new())
+        match self.send_command(HostCommand::GetAllParameters)? {
+            HostResponse::Parameters { params } => Ok(params),
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("GetAllParameters: {message}")))
+            }
+            _ => Err(Error::Other(
+                "GetAllParameters: unexpected response".to_string(),
+            )),
+        }
     }
 
-    fn format_parameter(&self, _id: u32, _normalized: f64) -> Result<String> {
-        // TODO(Phase 3): add a FormatParameter verb to the isolation protocol.
-        Err(Error::Other(
-            "Parameter formatting is not yet supported across process isolation".to_string(),
-        ))
+    fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
+        match self.send_command(HostCommand::FormatParameter { id, normalized })? {
+            HostResponse::ParameterString { value } => Ok(value),
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("FormatParameter: {message}")))
+            }
+            _ => Err(Error::Other(
+                "FormatParameter: unexpected response".to_string(),
+            )),
+        }
     }
 
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
-        // Convert input audio to a flat vector
-        let input_data: Vec<f32> = buffers
-            .inputs
-            .iter()
-            .flat_map(|channel| channel.iter().copied())
-            .collect();
+        let frames = buffers
+            .outputs
+            .first()
+            .map(|c| c.len())
+            .unwrap_or(self.block_size);
 
-        // Send process command
         let response = self.send_command(HostCommand::Process {
-            audio_data: input_data,
+            inputs: buffers.inputs.clone(),
+            frames: frames as u32,
         })?;
 
-        // Handle the response
         match response {
-            HostResponse::AudioOutput { data } => {
-                // Copy output data back to buffers
-                let samples_per_channel = self.block_size;
-                let num_output_channels = buffers.outputs.len();
-
+            HostResponse::AudioOutput { outputs } => {
                 for (ch_idx, output_channel) in buffers.outputs.iter_mut().enumerate() {
-                    let start_idx = ch_idx * samples_per_channel;
-                    let end_idx = ((ch_idx + 1) * samples_per_channel).min(data.len());
-
-                    if start_idx < data.len() {
-                        for (sample_idx, sample) in output_channel.iter_mut().enumerate() {
-                            let data_idx = start_idx + sample_idx;
-                            if data_idx < end_idx {
-                                *sample = data[data_idx];
-                            } else {
-                                *sample = 0.0;
-                            }
+                    if let Some(src) = outputs.get(ch_idx) {
+                        let n = output_channel.len().min(src.len());
+                        output_channel[..n].copy_from_slice(&src[..n]);
+                        for s in &mut output_channel[n..] {
+                            *s = 0.0;
                         }
+                    } else {
+                        output_channel.fill(0.0);
                     }
                 }
                 Ok(())
@@ -132,19 +144,18 @@ impl PluginInternal for IsolatedPluginImpl {
         }
     }
 
-    fn send_midi_event(&mut self, _event: MidiEvent) -> Result<()> {
-        // TODO: Implement MIDI event sending in the protocol
-        Ok(())
+    fn send_midi_event(&mut self, event: MidiEvent) -> Result<()> {
+        self.expect_success(HostCommand::SendMidi { event }, "SendMidi")
     }
 
     fn start_processing(&mut self) -> Result<()> {
-        // TODO: Implement StartProcessing command in the protocol
+        self.expect_success(HostCommand::StartProcessing, "StartProcessing")?;
         self.is_processing = true;
         Ok(())
     }
 
     fn stop_processing(&mut self) -> Result<()> {
-        // TODO: Implement StopProcessing command in the protocol
+        self.expect_success(HostCommand::StopProcessing, "StopProcessing")?;
         self.is_processing = false;
         Ok(())
     }

@@ -1,9 +1,10 @@
 //! Parameter types and utilities for VST3 host
 
 use crate::Result;
+use serde::{Deserialize, Serialize};
 
 /// Plugin parameter information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Parameter {
     /// Parameter ID
     pub id: u32,

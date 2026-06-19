@@ -61,11 +61,23 @@ examples compile, reached phase by phase.
   returns an honest "needs IUnitInfo program lists" error (deferred — not a MIDI event
   in VST3).
 
-## Phase 3 — Make process isolation real (safety pillar)
-- [ ] 3a. Extend IPC protocol with control verbs (share the enum from the lib).
-- [ ] 3b. Implement verbs in helper + `IsolatedPluginImpl`.
-- [ ] 3c. Real timeout + crash recovery.
-- [ ] 3d. Build helper under default features; make isolation default *after* it works.
+## Phase 3 — Make process isolation real (safety pillar)  ✅ CORE DONE
+- [x] 3a. Extended the IPC protocol with control verbs (LoadPlugin+config, Start/Stop,
+  Set/Get/GetAll/FormatParameter, SendMidi, Process with per-channel buffers). The
+  `HostCommand`/`HostResponse` enums now live ONLY in the lib; the helper imports them
+  (no more duplicate). Added serde derives to `MidiEvent`/`MidiChannel`/`Parameter`.
+- [x] 3b. Rewrote the helper as a thin wrapper over the library's public `Plugin` API
+  (reuses the verified in-process path — no separate VST3 impl). `IsolatedPluginImpl`
+  now forwards every verb. **Verified on hardware**: `isolated_host` loads Dexed in a
+  separate process, marshals 2238 params, round-trips set/get/format, and produces
+  audio across the boundary (peak 0.12, matching in-process).
+- [x] 3d. `process-isolation` is now a default feature so the helper binary always
+  builds and the opt-in works without manual flags. Runtime default stays in-process
+  (defaulting isolation ON needs helper-binary distribution in the consumer env).
+- [ ] 3c. Real timeout + crash recovery (send_command still blocks on read_line; a hung
+  plugin blocks the host, and there is no helper respawn). REMAINING.
+- [ ] 3e. Plugin GUI across the process boundary (CreateGui/CloseGui currently error).
+  REMAINING.
 
 ## Phase 4 — Polish
 - [ ] 4a. Migrate `window.rs` `cocoa`/`objc` → `objc2` (clears ~51 warnings).

@@ -1,9 +1,10 @@
 //! MIDI types and utilities for VST3 host
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// MIDI channel enumeration (1-16)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MidiChannel {
     /// Channel 1
     Ch1,
@@ -93,7 +94,7 @@ impl fmt::Display for MidiChannel {
 }
 
 /// High-level MIDI event types
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum MidiEvent {
     /// Note On event
     NoteOn {

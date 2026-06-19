@@ -1,65 +1,30 @@
 //! VST3 Host Helper Process
 //!
-//! This binary runs VST3 plugins in isolation from the main process.
+//! Runs a single VST3 plugin in isolation from the main process. It is intentionally
+//! a thin wrapper around the library's own (in-process) public API: every command
+//! delegates to a real [`vst3_host::Plugin`], so the isolated path reuses exactly the
+//! same, verified plugin handling as the non-isolated path — there is no separate
+//! VST3 implementation to drift out of sync.
+//!
+//! The protocol enums are imported from the library (`vst3_host::process_isolation`),
+//! so host and helper can never disagree about the wire format.
 
-use libloading::Library;
-use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
-use std::ptr;
-use vst3::Steinberg::Vst::{
-    BusDirections_::*, IAudioProcessor, IComponent, IComponentTrait, IEditController,
-    IEditControllerTrait, MediaTypes_::*,
+
+use vst3_host::{
+    audio::AudioBuffers,
+    process_isolation::{HostCommand, HostResponse},
+    Plugin, Vst3Host,
 };
-use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory, IPluginFactoryTrait};
-use vst3::{ComPtr, Interface};
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum HostCommand {
-    LoadPlugin { path: String },
-    UnloadPlugin,
-    CreateGui,
-    CloseGui,
-    Process { audio_data: Vec<f32> },
-    Shutdown,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum HostResponse {
-    Success {
-        message: String,
-    },
-    Error {
-        message: String,
-    },
-    Crashed {
-        message: String,
-    },
-    AudioOutput {
-        data: Vec<f32>,
-    },
-    PluginInfo {
-        vendor: String,
-        name: String,
-        version: String,
-        has_gui: bool,
-        audio_inputs: i32,
-        audio_outputs: i32,
-    },
-}
-
-#[allow(dead_code)]
-struct PluginState {
-    library: Library,
-    component: ComPtr<IComponent>,
-    processor: ComPtr<IAudioProcessor>,
-}
 
 fn main() {
     eprintln!("VST3 Host Helper Process Started");
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut _plugin_state: Option<PluginState> = None;
+    let mut plugin: Option<Plugin> = None;
+    // Config carried by LoadPlugin so process() can size buffers correctly.
+    let mut sample_rate = 44100.0;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -69,174 +34,162 @@ fn main() {
                 continue;
             }
         };
+        if line.trim().is_empty() {
+            continue;
+        }
 
         let command: HostCommand = match serde_json::from_str(&line) {
             Ok(cmd) => cmd,
             Err(e) => {
-                eprintln!("Failed to parse command: {}", e);
-                let response = HostResponse::Error {
-                    message: format!("Invalid command: {}", e),
-                };
-                let _ = writeln!(stdout, "{}", serde_json::to_string(&response).unwrap());
-                let _ = stdout.flush();
+                respond(
+                    &mut stdout,
+                    &HostResponse::Error {
+                        message: format!("Invalid command: {}", e),
+                    },
+                );
                 continue;
             }
         };
 
-        let response = match command {
-            HostCommand::LoadPlugin { path } => match load_plugin_with_info(&path) {
-                Ok((state, info)) => {
-                    _plugin_state = Some(state);
-                    info
-                }
-                Err(e) => HostResponse::Error {
-                    message: format!("Failed to load plugin: {}", e),
-                },
-            },
-            HostCommand::UnloadPlugin => {
-                _plugin_state = None;
-                HostResponse::Success {
-                    message: "Plugin unloaded".to_string(),
-                }
-            }
-            HostCommand::Shutdown => {
-                eprintln!("Shutting down helper process");
-                break;
-            }
-            _ => HostResponse::Error {
-                message: "Command not implemented".to_string(),
-            },
-        };
+        if matches!(command, HostCommand::Shutdown) {
+            eprintln!("Shutting down helper process");
+            break;
+        }
 
-        let response_json = serde_json::to_string(&response).unwrap();
-        let _ = writeln!(stdout, "{}", response_json);
+        let response = handle(command, &mut plugin, &mut sample_rate);
+        respond(&mut stdout, &response);
+    }
+}
+
+fn respond(stdout: &mut io::Stdout, response: &HostResponse) {
+    if let Ok(json) = serde_json::to_string(response) {
+        let _ = writeln!(stdout, "{}", json);
         let _ = stdout.flush();
     }
 }
 
-fn load_plugin_with_info(path: &str) -> Result<(PluginState, HostResponse), String> {
-    unsafe {
-        eprintln!("Loading plugin from: {}", path);
-
-        // Load the library
-        let library = match Library::new(path) {
-            Ok(lib) => lib,
-            Err(e) => return Err(format!("Failed to load library: {}", e)),
-        };
-
-        // Get factory function
-        type GetPluginFactoryFunc = unsafe extern "C" fn() -> *mut IPluginFactory;
-        let get_factory = match library.get::<GetPluginFactoryFunc>(b"GetPluginFactory\0") {
-            Ok(func) => func,
-            Err(e) => return Err(format!("Failed to find GetPluginFactory: {}", e)),
-        };
-
-        let factory_ptr = get_factory();
-        if factory_ptr.is_null() {
-            return Err("GetPluginFactory returned null".to_string());
-        }
-
-        let factory = match ComPtr::<IPluginFactory>::from_raw(factory_ptr) {
-            Some(f) => f,
-            None => return Err("Failed to create factory ComPtr".to_string()),
-        };
-
-        // Get factory info
-        let mut factory_info = std::mem::zeroed();
-        factory.getFactoryInfo(&mut factory_info);
-
-        let vendor = c_str_to_string(&factory_info.vendor);
-        eprintln!("Plugin vendor: {}", vendor);
-
-        // Find audio component class
-        let num_classes = factory.countClasses();
-        let mut component_ptr: *mut IComponent = ptr::null_mut();
-        let mut plugin_name = String::new();
-        let mut plugin_version = String::new();
-
-        for i in 0..num_classes {
-            let mut class_info = std::mem::zeroed();
-            if factory.getClassInfo(i, &mut class_info) == vst3::Steinberg::kResultOk {
-                let category = c_str_to_string(&class_info.category);
-
-                if category.contains("Audio Module Class") {
-                    plugin_name = c_str_to_string(&class_info.name);
-                    // Version is not available in PClassInfo
-                    plugin_version = "1.0.0".to_string();
-
-                    eprintln!("Found audio module: {}", plugin_name);
-
-                    // Create component
-                    let result = factory.createInstance(
-                        class_info.cid.as_ptr() as *const i8,
-                        IComponent::IID.as_ptr() as *const i8,
-                        &mut component_ptr as *mut _ as *mut _,
-                    );
-
-                    if result == vst3::Steinberg::kResultOk && !component_ptr.is_null() {
-                        break;
-                    }
-                }
-            }
-        }
-
-        if component_ptr.is_null() {
-            return Err("Failed to create component".to_string());
-        }
-
-        let component = match ComPtr::<IComponent>::from_raw(component_ptr) {
-            Some(c) => c,
-            None => return Err("Failed to wrap component".to_string()),
-        };
-
-        // Initialize component
-        let init_result = component.initialize(ptr::null_mut());
-        if init_result != vst3::Steinberg::kResultOk {
-            return Err(format!(
-                "Failed to initialize component: {:#x}",
-                init_result
-            ));
-        }
-
-        // Get processor
-        let processor = match component.cast::<IAudioProcessor>() {
-            Some(p) => p,
-            None => return Err("Component does not implement IAudioProcessor".to_string()),
-        };
-
-        // Get bus information
-        let audio_inputs = component.getBusCount(kAudio as i32, kInput as i32);
-        let audio_outputs = component.getBusCount(kAudio as i32, kOutput as i32);
-
-        // Check for GUI support
-        let has_gui = if let Some(controller) = component.cast::<IEditController>() {
-            controller.createView(c"editor".as_ptr()) != ptr::null_mut()
-        } else {
-            false
-        };
-
-        let info = HostResponse::PluginInfo {
-            vendor,
-            name: plugin_name,
-            version: plugin_version,
-            has_gui,
-            audio_inputs,
-            audio_outputs,
-        };
-
-        Ok((
-            PluginState {
-                library,
-                component,
-                processor,
-            },
-            info,
-        ))
+/// Convenience: run a fallible op against the loaded plugin, mapping `None`/`Err`.
+fn with_plugin<F>(plugin: &mut Option<Plugin>, f: F) -> HostResponse
+where
+    F: FnOnce(&mut Plugin) -> HostResponse,
+{
+    match plugin {
+        Some(p) => f(p),
+        None => HostResponse::Error {
+            message: "No plugin loaded".to_string(),
+        },
     }
 }
 
-fn c_str_to_string(c_str: &[i8]) -> String {
-    let end = c_str.iter().position(|&c| c == 0).unwrap_or(c_str.len());
-    let bytes: Vec<u8> = c_str[..end].iter().map(|&c| c as u8).collect();
-    String::from_utf8_lossy(&bytes).to_string()
+fn err<E: std::fmt::Display>(prefix: &str, e: E) -> HostResponse {
+    HostResponse::Error {
+        message: format!("{prefix}: {e}"),
+    }
+}
+
+fn handle(command: HostCommand, plugin: &mut Option<Plugin>, sample_rate: &mut f64) -> HostResponse {
+    match command {
+        HostCommand::LoadPlugin {
+            path,
+            sample_rate: sr,
+            block_size,
+        } => {
+            *sample_rate = sr;
+            let mut host = match Vst3Host::builder()
+                .sample_rate(sr)
+                .block_size(block_size as usize)
+                .build()
+            {
+                Ok(h) => h,
+                Err(e) => return err("Failed to build host", e),
+            };
+            match host.load_plugin(&path) {
+                Ok(p) => {
+                    let info = p.info().clone();
+                    *plugin = Some(p);
+                    HostResponse::PluginInfo {
+                        vendor: info.vendor,
+                        name: info.name,
+                        version: info.version,
+                        has_gui: info.has_gui,
+                        audio_inputs: info.audio_inputs as i32,
+                        audio_outputs: info.audio_outputs as i32,
+                    }
+                }
+                Err(e) => err("Failed to load plugin", e),
+            }
+        }
+        HostCommand::UnloadPlugin => {
+            *plugin = None;
+            HostResponse::Success {
+                message: "Plugin unloaded".to_string(),
+            }
+        }
+        HostCommand::StartProcessing => with_plugin(plugin, |p| match p.start_processing() {
+            Ok(()) => HostResponse::Success {
+                message: "processing started".to_string(),
+            },
+            Err(e) => err("StartProcessing", e),
+        }),
+        HostCommand::StopProcessing => with_plugin(plugin, |p| match p.stop_processing() {
+            Ok(()) => HostResponse::Success {
+                message: "processing stopped".to_string(),
+            },
+            Err(e) => err("StopProcessing", e),
+        }),
+        HostCommand::SetParameter { id, value } => {
+            with_plugin(plugin, |p| match p.set_parameter(id, value) {
+                Ok(()) => HostResponse::Success {
+                    message: "parameter set".to_string(),
+                },
+                Err(e) => err("SetParameter", e),
+            })
+        }
+        HostCommand::GetParameter { id } => with_plugin(plugin, |p| match p.get_parameter(id) {
+            Ok(value) => HostResponse::ParameterValue { value },
+            Err(e) => err("GetParameter", e),
+        }),
+        HostCommand::GetAllParameters => with_plugin(plugin, |p| match p.get_parameters() {
+            Ok(params) => HostResponse::Parameters { params },
+            Err(e) => err("GetAllParameters", e),
+        }),
+        HostCommand::FormatParameter { id, normalized } => {
+            with_plugin(plugin, |p| match p.format_parameter(id, normalized) {
+                Ok(value) => HostResponse::ParameterString { value },
+                Err(e) => err("FormatParameter", e),
+            })
+        }
+        HostCommand::SendMidi { event } => {
+            with_plugin(plugin, |p| match p.send_midi_event(event) {
+                Ok(()) => HostResponse::Success {
+                    message: "midi sent".to_string(),
+                },
+                Err(e) => err("SendMidi", e),
+            })
+        }
+        HostCommand::Process { inputs, frames } => {
+            let sr = *sample_rate;
+            with_plugin(plugin, |p| {
+                let out_channels = p.info().audio_outputs.max(1) as usize * 2;
+                let mut buffers = AudioBuffers {
+                    inputs,
+                    outputs: vec![vec![0.0; frames as usize]; out_channels],
+                    sample_rate: sr,
+                    block_size: frames as usize,
+                };
+                match p.process_audio(&mut buffers) {
+                    Ok(()) => HostResponse::AudioOutput {
+                        outputs: buffers.outputs,
+                    },
+                    Err(e) => err("Process", e),
+                }
+            })
+        }
+        HostCommand::CreateGui | HostCommand::CloseGui => HostResponse::Error {
+            message: "Plugin GUI is not supported across process isolation yet".to_string(),
+        },
+        HostCommand::Shutdown => HostResponse::Success {
+            message: "shutting down".to_string(),
+        },
+    }
 }
