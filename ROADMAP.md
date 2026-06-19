@@ -93,7 +93,26 @@ examples compile, reached phase by phase.
 - [ ] 4b (rest). Escalate `missing_docs` to `deny` in CI once 4a is clean.
 - [ ] 4c. Real COM-level tests (load a bundled `.vst3`, run `process()`, assert cleanup).
 
-## Remaining GUI-heavy slices (need interactive verification, deferred)
-- [ ] 2a. Port `vst3-inspector` onto the library (XL regression net).
+## Phase 2a — Port `vst3-inspector` onto the library (IN PROGRESS)
+A multi-agent analysis produced an incremental, compile-at-each-step slice plan.
+- [x] Slice 1. Discovery → library. Added `Vst3Host::scan_plugin_paths()` (lightweight
+  path scan; `discover_plugins` loads every plugin so it was wrong for startup). Inspector
+  now uses it; deleted `plugin_discovery.rs`. `grep vst3_host`: 0 → consumer.
+- [x] Slice 4 (partial). MIDI note-name converters delegate to `vst3_host::midi`
+  (deleted ~60 lines of dup; test now guards the library's C3=60 convention).
+- [ ] Slice 0 (lib). `DetailedPluginInfo` (factory/class/bus/param introspection) to feed
+  the inspector's info tabs — unblocks Slice 2.
+- [ ] Slices 2/3/5 (THE BIG COUPLED CHANGE). Replace the inspector's raw COM/audio state
+  (`component`/`controller`/`processor`/`plugin_library`/`AudioProcessingState`) with a
+  `vst3_host::Plugin` + `AudioHandle`, rewiring every GUI reader of params/MIDI/audio.
+  Atomic (the lib hides COM, so the old fields can't coexist) and only build-verifiable
+  headlessly — **best done with interactive (GUI) verification**. Deletes
+  `com_implementations.rs`, `audio_processing.rs`. Plan: workflow output in session notes.
+- [ ] Slice 6. Process isolation → library; delete `plugin_host_process.rs` +
+  `vst3-inspector-helper.rs` (parity already proven).
+- [ ] Slice 9 (LAST, interactive-only). Editor window → `Plugin::open_editor`/`PluginWindow`.
+
+## Other remaining (need interactive verification)
 - [ ] 2c. `IPlugFrame` resize + egui embedding helper.
 - [ ] 3e. Plugin GUI across the process boundary; isolation auto-respawn-and-reload.
+- [ ] 4a. `window.rs` cocoa → objc2 migration (~50 warnings).

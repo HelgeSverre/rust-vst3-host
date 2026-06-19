@@ -86,68 +86,13 @@ use winapi::um::winuser::{
     WS_OVERLAPPEDWINDOW,
 };
 
-// MIDI note conversion helpers
+// MIDI note conversion helpers — delegate to the vst3-host library (C3 = MIDI 60).
 fn midi_note_to_name(note: u8) -> String {
-    let note_names = [
-        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
-    ];
-    // Using the convention where C3 = MIDI 60
-    let octave = (note as i32 / 12) - 2;
-    let note_in_octave = note % 12;
-    format!("{}{}", note_names[note_in_octave as usize], octave)
+    vst3_host::midi::note_to_name(note)
 }
 
 fn note_name_to_midi(name: &str) -> Option<u8> {
-    // Parse note name like "C#4" or "Bb3"
-    let name = name.trim().to_uppercase();
-
-    // Extract the note letter and accidental
-    let (note_part, octave_str) = if name.contains('#') {
-        let parts: Vec<&str> = name.split('#').collect();
-        if parts.len() != 2 {
-            return None;
-        }
-        (format!("{}#", parts[0]), parts[1])
-    } else if name.contains('B') && name.len() > 2 && &name[1..2] == "B" {
-        // Handle Bb notation
-        (format!("{}B", &name[0..1]), &name[2..])
-    } else {
-        // Natural note
-        let mut chars = name.chars();
-        let note = chars.next()?.to_string();
-        let octave = chars.as_str();
-        (note, octave)
-    };
-
-    // Parse octave
-    let octave: i32 = octave_str.parse().ok()?;
-
-    // Convert note to semitone offset within octave
-    let semitone = match note_part.as_str() {
-        "C" => 0,
-        "C#" | "DB" => 1,
-        "D" => 2,
-        "D#" | "EB" => 3,
-        "E" => 4,
-        "F" => 5,
-        "F#" | "GB" => 6,
-        "G" => 7,
-        "G#" | "AB" => 8,
-        "A" => 9,
-        "A#" | "BB" => 10,
-        "B" => 11,
-        _ => return None,
-    };
-
-    // Calculate MIDI note number
-    // Using the convention where C3 = MIDI 60
-    let midi_note = (octave + 1) * 12 + 12 + semitone;
-
-    if (0..=127).contains(&midi_note) {
-        Some(midi_note as u8)
-    } else {
-        None
-    }
+    vst3_host::midi::name_to_note(name)
 }
 
 #[cfg(test)]
