@@ -611,10 +611,26 @@ impl PluginInternal for PluginImpl {
                 // Clear output events only - input events should be preserved for processing
                 self.output_events.clear();
 
-                // Copy input audio to plugin buffers
+                // The device may request a smaller block than the configured maximum
+                // (BufferSize::Default gives variable sizes), so process exactly the
+                // number of frames the caller provided, clamped to our preallocated
+                // buffers. VST3 allows numSamples to vary up to the setup maximum.
+                let frames = buffers
+                    .outputs
+                    .iter()
+                    .chain(buffers.inputs.iter())
+                    .map(|c| c.len())
+                    .next()
+                    .unwrap_or(self.block_size)
+                    .min(self.block_size);
+                data.process_data.numSamples = frames as i32;
+
+                // Copy input audio to plugin buffers (length-clamped — never assume the
+                // caller's block equals the configured block size).
                 for (ch_idx, channel) in buffers.inputs.iter().enumerate() {
                     if ch_idx < data.input_buffers.len() {
-                        data.input_buffers[ch_idx].copy_from_slice(channel);
+                        let n = channel.len().min(data.input_buffers[ch_idx].len());
+                        data.input_buffers[ch_idx][..n].copy_from_slice(&channel[..n]);
                     }
                 }
 
@@ -689,10 +705,11 @@ impl PluginInternal for PluginImpl {
                 // Clear input events AFTER processing so plugin can see them
                 self.input_events.clear();
 
-                // Copy output to provided buffers
+                // Copy output to provided buffers (length-clamped to the actual frames).
                 for (ch_idx, channel) in buffers.outputs.iter_mut().enumerate() {
                     if ch_idx < data.output_buffers.len() {
-                        channel.copy_from_slice(&data.output_buffers[ch_idx]);
+                        let n = channel.len().min(data.output_buffers[ch_idx].len());
+                        channel[..n].copy_from_slice(&data.output_buffers[ch_idx][..n]);
                     }
                 }
 

@@ -310,7 +310,97 @@ impl PlugFrame {
 
 // Removed local ComponentHandler - now using from com_implementations
 
+/// Headless self-test: drive the `vst3-host` library end to end (discover → introspect
+/// → load → parameters → play) and report. Lets the inspector's library integration be
+/// verified without launching the GUI. Returns a process exit code.
+fn run_selftest(path: &str) -> i32 {
+    use vst3_host::{midi::MidiChannel, Vst3Host};
+
+    println!("=== vst3-inspector self-test: {path} ===");
+
+    // 1. Discovery via the library (Slice 1).
+    match Vst3Host::builder().scan_default_paths().build() {
+        Ok(h) => println!(
+            "discovery: {} plugin paths found",
+            h.scan_plugin_paths().len()
+        ),
+        Err(e) => {
+            eprintln!("FAIL: build host: {e}");
+            return 1;
+        }
+    }
+
+    // 2. Deep introspection (Slice 0).
+    match vst3_host::get_detailed_plugin_info(std::path::Path::new(path)) {
+        Ok(d) => println!(
+            "introspect: {} by {} — {} classes, {} audio-out bus(es)",
+            d.info.name,
+            d.factory.vendor,
+            d.classes.len(),
+            d.buses.audio_outputs.len()
+        ),
+        Err(e) => {
+            eprintln!("FAIL: introspect {path}: {e}");
+            return 1;
+        }
+    }
+
+    // 3. Load + parameters + play + observe audio.
+    let mut host = match Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .build()
+    {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("FAIL: build host: {e}");
+            return 1;
+        }
+    };
+    let plugin = match host.load_plugin(path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("FAIL: load {path}: {e}");
+            return 1;
+        }
+    };
+    let param_count = plugin.get_parameters().map(|p| p.len()).unwrap_or(0);
+    println!("load: {} — {param_count} parameters", plugin.info().name);
+
+    let audio = match host.play(plugin) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("FAIL: play: {e}");
+            return 1;
+        }
+    };
+    let _ = audio.lock().send_midi_note(60, 110, MidiChannel::Ch1);
+    let mut peak = 0.0f32;
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        for c in &audio.lock().get_output_levels().channels {
+            peak = peak.max(c.peak);
+        }
+    }
+    let _ = audio.lock().send_midi_note_off(60, MidiChannel::Ch1);
+    println!("play: max output peak {peak:.4}");
+    println!("SELFTEST OK");
+    0
+}
+
 fn main() {
+    // Headless self-test mode: `vst3-inspector --selftest [plugin.vst3]`.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--selftest") {
+        let path = args
+            .iter()
+            .skip_while(|a| a.as_str() != "--selftest")
+            .nth(1)
+            .cloned()
+            .unwrap_or_else(|| "test_plugins/Dexed.vst3".to_string());
+        std::process::exit(run_selftest(&path));
+    }
+
     println!("🚀 Starting VST3 Host...");
 
     let options = eframe::NativeOptions {

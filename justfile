@@ -42,6 +42,11 @@ inspector:
 play PLUGIN_PATH=PLUGIN:
     cargo run -p vst3-host --example play_synth -- "{{ PLUGIN_PATH }}"
 
+# Headless self-test: drive the library through the inspector binary (no GUI)
+[group('test')]
+selftest PLUGIN_PATH=PLUGIN:
+    cargo run -p vst3-inspector --bin vst3-inspector -- --selftest "{{ PLUGIN_PATH }}"
+
 # Load + drive a plugin in an isolated process (defaults to bundled Dexed)
 [group('run')]
 isolated PLUGIN_PATH=PLUGIN: helper
