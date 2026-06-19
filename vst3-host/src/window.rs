@@ -3,23 +3,16 @@
 //! This module provides platform-specific window creation and management
 //! for VST3 plugin GUIs.
 
-// TODO(objc2): migrate macOS window creation off the deprecated cocoa/objc crates to
-// objc2 / objc2-app-kit. Until then, contain the deprecation + macro-cfg warnings here.
-#![allow(deprecated)]
-#![allow(unexpected_cfgs)]
-
 use crate::error::{Error, Result};
 use crate::plugin::Plugin;
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "macos")]
-use cocoa::{
-    appkit::{NSBackingStoreType, NSWindowStyleMask},
-    base::{id, nil, NO},
-    foundation::{NSPoint, NSRect, NSSize, NSString},
-};
+use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
 #[cfg(target_os = "macos")]
-use objc::{class, msg_send, sel, sel_impl};
+use objc2_app_kit::{NSBackingStoreType, NSView, NSWindow, NSWindowStyleMask};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
 #[cfg(target_os = "windows")]
 use winapi::{
@@ -46,7 +39,7 @@ struct XcbWindowState {
 pub struct PluginWindow {
     plugin: Arc<Mutex<Plugin>>,
     #[cfg(target_os = "macos")]
-    native_window: Option<id>,
+    native_window: Option<Retained<NSWindow>>,
     #[cfg(target_os = "windows")]
     native_window: Option<HWND>,
     #[cfg(target_os = "linux")]
@@ -92,56 +85,57 @@ impl PluginWindow {
         // Create native window
         #[cfg(target_os = "macos")]
         {
-            unsafe {
-                // Create window frame
-                let frame = NSRect::new(
-                    NSPoint::new(100.0, 100.0),
-                    NSSize::new(width as f64, height as f64),
-                );
+            // AppKit objects must be created on the main thread.
+            let mtm = MainThreadMarker::new().ok_or_else(|| {
+                Error::Other("plugin editor window must be opened on the main thread".to_string())
+            })?;
 
-                let style = NSWindowStyleMask::NSTitledWindowMask
-                    | NSWindowStyleMask::NSClosableWindowMask
-                    | NSWindowStyleMask::NSMiniaturizableWindowMask;
+            let frame = NSRect::new(
+                NSPoint::new(100.0, 100.0),
+                NSSize::new(width as f64, height as f64),
+            );
+            let style = NSWindowStyleMask::Titled
+                | NSWindowStyleMask::Closable
+                | NSWindowStyleMask::Miniaturizable;
 
-                // Create window
-                let window: id = msg_send![class!(NSWindow), alloc];
-                let window: id = msg_send![window,
-                    initWithContentRect:frame
-                    styleMask:style
-                    backing:NSBackingStoreType::NSBackingStoreBuffered
-                    defer:NO];
+            // SAFETY: standard AppKit window/view construction on the main thread.
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    frame,
+                    style,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
 
-                // Set window title
-                let title = NSString::alloc(nil).init_str(&format!("{} - VST3", plugin_info.name));
-                let _: () = msg_send![window, setTitle:title];
+            let title = NSString::from_str(&format!("{} - VST3", plugin_info.name));
+            window.setTitle(&title);
 
-                // Get content view
-                let content_view: id = msg_send![window, contentView];
-
-                // Create a container view for the plugin with exact size
-                let container_frame = NSRect::new(
-                    NSPoint::new(0.0, 0.0),
-                    NSSize::new(width as f64, height as f64),
-                );
-                let container_view: id = msg_send![class!(NSView), alloc];
-                let container_view: id = msg_send![container_view, initWithFrame:container_frame];
-                let _: () = msg_send![content_view, addSubview:container_view];
-
-                // Try to open plugin editor
-                let window_handle = crate::plugin::WindowHandle::from_nsview(
-                    container_view as *mut std::ffi::c_void,
-                );
-                self.plugin.lock().unwrap().open_editor(window_handle)?;
-
-                // Resize window to match plugin view
-                let _: () = msg_send![window, setContentSize:container_frame.size];
-
-                // Show and center window
-                let _: () = msg_send![window, makeKeyAndOrderFront:nil];
-                let _: () = msg_send![window, center];
-
-                self.native_window = Some(window);
+            // A container view, sized to the editor, that the plugin attaches its view into.
+            let container_frame = NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(width as f64, height as f64),
+            );
+            let container_view =
+                unsafe { NSView::initWithFrame(NSView::alloc(mtm), container_frame) };
+            if let Some(content_view) = window.contentView() {
+                unsafe { content_view.addSubview(&container_view) };
             }
+
+            // Hand the plugin the container NSView to embed its editor in.
+            let window_handle = crate::plugin::WindowHandle::from_nsview(Retained::as_ptr(
+                &container_view,
+            )
+                as *mut std::ffi::c_void);
+            self.plugin.lock().unwrap().open_editor(window_handle)?;
+
+            // Match the window to the editor size, then show and center it.
+            window.setContentSize(container_frame.size);
+            window.makeKeyAndOrderFront(None);
+            window.center();
+
+            self.native_window = Some(window);
         }
 
         #[cfg(target_os = "windows")]
@@ -291,9 +285,7 @@ impl PluginWindow {
         #[cfg(target_os = "macos")]
         {
             if let Some(window) = self.native_window.take() {
-                unsafe {
-                    let _: () = msg_send![window, close];
-                }
+                window.close();
             }
         }
 

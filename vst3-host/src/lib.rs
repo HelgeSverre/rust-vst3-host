@@ -50,11 +50,6 @@
 //! ```
 
 #![warn(missing_docs)]
-// The deprecated cocoa/objc crates used for macOS window creation (see window.rs) expand
-// `cfg(cargo-clippy)` inside the `msg_send!` macro, which trips `unexpected_cfgs`. The lint
-// is attributed to the foreign macro's expansion, so suppressing it requires a crate-root
-// allow rather than a module-level one. TODO(objc2): remove when migrating off cocoa/objc.
-#![allow(unexpected_cfgs)]
 
 pub mod audio;
 pub mod error;
