@@ -7,6 +7,9 @@ PLUGIN := "test_plugins/Dexed.vst3"
 default:
     @just --list
 
+# `just lint` is an alias for `just clippy`
+alias lint := clippy
+
 # Build the whole workspace
 [group('build')]
 build:
