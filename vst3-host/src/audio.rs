@@ -187,6 +187,7 @@ pub trait AudioStream: Send {
 }
 
 /// Audio backend trait for creating audio streams
+#[allow(clippy::type_complexity)] // Box<dyn FnMut...> callbacks are intrinsic to the API
 pub trait AudioBackend: Send + Sync {
     /// The stream type this backend produces
     type Stream: AudioStream + Send + 'static;

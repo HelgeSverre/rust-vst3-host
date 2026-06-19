@@ -33,7 +33,8 @@ type GetPluginFactoryFunc = unsafe extern "C" fn() -> *mut IPluginFactory;
 pub struct MacOSModule {
     /// CoreFoundation bundle reference
     bundle: CFBundleRef,
-    /// Path to the module
+    /// Path to the module (diagnostics / config record)
+    #[allow(dead_code)]
     path: std::path::PathBuf,
     /// bundleExit function pointer (for cleanup)
     bundle_exit: Option<BundleExitFunc>,

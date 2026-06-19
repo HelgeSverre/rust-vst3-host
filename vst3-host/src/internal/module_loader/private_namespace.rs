@@ -39,7 +39,8 @@ pub struct PrivateNamespaceModule {
     dl_handle: *mut c_void,
     /// CFBundle reference (for VST3 compliance)
     bundle: CFBundleRef,
-    /// Path to the module
+    /// Path to the module (diagnostics / config record)
+    #[allow(dead_code)]
     path: std::path::PathBuf,
     /// bundleExit function pointer (for cleanup)
     bundle_exit: Option<BundleExitFunc>,
@@ -140,7 +141,9 @@ impl PrivateNamespaceModule {
                 None
             } else {
                 log::debug!("✅ bundleExit function found");
-                Some(std::mem::transmute(bundle_exit_ptr))
+                Some(std::mem::transmute::<*mut c_void, BundleExitFunc>(
+                    bundle_exit_ptr,
+                ))
             };
 
             // Step 6: Call bundleEntry (MUST be called before GetPluginFactory)
@@ -172,7 +175,9 @@ impl PrivateNamespaceModule {
                 ));
             } else {
                 log::debug!("✅ GetPluginFactory function found");
-                Some(std::mem::transmute(factory_ptr))
+                Some(std::mem::transmute::<*mut c_void, GetPluginFactoryFunc>(
+                    factory_ptr,
+                ))
             };
 
             log::info!("=== PRIVATE NAMESPACE VST3 MODULE LOADING COMPLETE ===");

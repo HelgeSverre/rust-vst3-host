@@ -36,11 +36,16 @@ pub struct PluginInfo {
 }
 
 /// VST3 plugin instance
+#[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
 pub struct Plugin {
     // Internal state is hidden from public API
     pub(crate) info: PluginInfo,
     pub(crate) is_processing: bool,
+    /// Configured sample rate (diagnostics / config record)
+    #[allow(dead_code)]
     pub(crate) sample_rate: f64,
+    /// Configured block size (diagnostics / config record)
+    #[allow(dead_code)]
     pub(crate) block_size: usize,
     pub(crate) audio_levels: Arc<Mutex<AudioLevels>>,
     pub(crate) parameter_change_callback: Option<Box<dyn Fn(u32, f64) + Send + 'static>>,
@@ -361,7 +366,7 @@ impl Plugin {
         self.internal
             .as_ref()
             .map(|i| i.get_parameter_changes())
-            .unwrap_or_else(Vec::new)
+            .unwrap_or_default()
     }
 
     /// Take the MIDI events the plugin has emitted (e.g. from an arpeggiator or MPE

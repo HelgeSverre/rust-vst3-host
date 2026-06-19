@@ -74,12 +74,6 @@ struct HostProcessData {
     output_param_changes: ComWrapper<ParameterChanges>,
 }
 
-// We store the raw pointers separately as they're recreated each process call
-struct AudioBufferPointers {
-    input_channel_pointers: Vec<Vec<*mut f32>>,
-    output_channel_pointers: Vec<Vec<*mut f32>>,
-}
-
 impl PluginImpl {
     /// Get parameter changes captured from the plugin GUI
     pub fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
@@ -218,7 +212,7 @@ impl PluginImpl {
 
             let has_gui = controller.is_some() && {
                 if let Some(ref ctrl) = controller {
-                    let view_type = b"editor\0".as_ptr() as *const std::os::raw::c_char;
+                    let view_type = c"editor".as_ptr();
                     let view_ptr = ctrl.createView(view_type);
                     if !view_ptr.is_null() {
                         // Clean up the test view immediately
@@ -586,13 +580,12 @@ impl PluginInternal for PluginImpl {
                             unit: crate::internal::utils::vst_string_to_string(&info.units),
                             step_count: info.stepCount,
                             can_automate: (info.flags
-                                & ParameterInfo_::ParameterFlags_::kCanAutomate as i32)
+                                & ParameterInfo_::ParameterFlags_::kCanAutomate)
                                 != 0,
                             is_read_only: (info.flags
-                                & ParameterInfo_::ParameterFlags_::kIsReadOnly as i32)
+                                & ParameterInfo_::ParameterFlags_::kIsReadOnly)
                                 != 0,
-                            is_bypass: (info.flags
-                                & ParameterInfo_::ParameterFlags_::kIsBypass as i32)
+                            is_bypass: (info.flags & ParameterInfo_::ParameterFlags_::kIsBypass)
                                 != 0,
                             flags: info.flags as u32,
                         };
@@ -907,7 +900,7 @@ impl PluginInternal for PluginImpl {
         if let Some(ref controller) = self.controller {
             unsafe {
                 // Check if controller can create an editor view
-                let view_type = b"editor\0".as_ptr() as *const std::os::raw::c_char;
+                let view_type = c"editor".as_ptr();
                 let view_ptr = controller.createView(view_type);
                 if !view_ptr.is_null() {
                     // Clean up the test view
@@ -931,7 +924,7 @@ impl PluginInternal for PluginImpl {
         if let Some(ref controller) = self.controller {
             unsafe {
                 // Create editor view
-                let view_type = b"editor\0".as_ptr() as *const std::os::raw::c_char;
+                let view_type = c"editor".as_ptr();
                 let view_ptr = controller.createView(view_type);
                 if view_ptr.is_null() {
                     return Err(Error::Other("Failed to create editor view".to_string()));
@@ -954,11 +947,11 @@ impl PluginInternal for PluginImpl {
 
                 // Platform-specific attachment
                 #[cfg(target_os = "macos")]
-                let platform_type = b"NSView\0".as_ptr() as *const std::os::raw::c_char;
+                let platform_type = c"NSView".as_ptr();
                 #[cfg(target_os = "windows")]
-                let platform_type = b"HWND\0".as_ptr() as *const std::os::raw::c_char;
+                let platform_type = c"HWND".as_ptr();
                 #[cfg(target_os = "linux")]
-                let platform_type = b"X11EmbedWindowID\0".as_ptr() as *const std::os::raw::c_char;
+                let platform_type = c"X11EmbedWindowID".as_ptr();
 
                 // Check platform support
                 if view.isPlatformTypeSupported(platform_type) != kResultOk {
@@ -995,7 +988,7 @@ impl PluginInternal for PluginImpl {
         if let Some(ref controller) = self.controller {
             unsafe {
                 // Create a temporary view to get size
-                let view_type = b"editor\0".as_ptr() as *const std::os::raw::c_char;
+                let view_type = c"editor".as_ptr();
                 let view_ptr = controller.createView(view_type);
                 if view_ptr.is_null() {
                     return Err(Error::Other(
@@ -1045,6 +1038,7 @@ impl PluginInternal for PluginImpl {
 
 /// Convert a raw VST3 `Event` (as a plugin emits into its output event list) into a safe
 /// [`MidiEvent`]. Returns `None` for event types this library doesn't model.
+#[allow(non_upper_case_globals)] // kNoteOnEvent etc. are VST3 SDK constants
 pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
     unsafe {
         match e.r#type as u32 {
@@ -1344,6 +1338,7 @@ impl PluginImpl {
     }
 
     /// Transfer component state to controller
+    #[allow(dead_code)] // kept: re-enabled when state transfer is fixed
     unsafe fn transfer_component_state(
         component: &ComPtr<IComponent>,
         controller: &ComPtr<IEditController>,

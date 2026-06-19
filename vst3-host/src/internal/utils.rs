@@ -26,16 +26,3 @@ pub fn vst_string_to_string(vst_str: &String128) -> String {
 
     String::from_utf16_lossy(&utf16_vec)
 }
-
-/// Convert Rust String to VST3 String128
-pub fn string_to_vst_string(s: &str) -> String128 {
-    let mut result = [0i16; 128];
-    let utf16: Vec<u16> = s.encode_utf16().collect();
-    let len = utf16.len().min(127);
-
-    for (i, &ch) in utf16.iter().take(len).enumerate() {
-        result[i] = ch as i16;
-    }
-
-    result
-}

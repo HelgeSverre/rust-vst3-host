@@ -9,7 +9,8 @@ pub trait VstModule: Send {
     /// Get the plugin factory from the module
     fn get_factory(&self) -> Result<*mut IPluginFactory>;
 
-    /// Get the path to the module
+    /// Get the path to the module (diagnostics / config record)
+    #[allow(dead_code)]
     fn path(&self) -> &Path;
 }
 

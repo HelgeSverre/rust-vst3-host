@@ -323,24 +323,16 @@ impl Default for Vst3Host {
 }
 
 /// Builder for VST3 host configuration
+///
+/// All fields default to their type defaults; notably `scan_default_paths` defaults to
+/// `false`, requiring explicit opt-in (unlike `Vst3Host`, which defaults it to `true`).
+#[derive(Default)]
 pub struct Vst3HostBuilder {
     config: AudioConfig,
     custom_paths: Vec<PathBuf>,
     use_process_isolation: bool,
     auto_isolate_problematic: bool,
     scan_default_paths: bool,
-}
-
-impl Default for Vst3HostBuilder {
-    fn default() -> Self {
-        Self {
-            config: AudioConfig::default(),
-            custom_paths: Vec::new(),
-            use_process_isolation: false,
-            auto_isolate_problematic: false,
-            scan_default_paths: false, // Default to false - require explicit opt-in
-        }
-    }
 }
 
 impl Vst3HostBuilder {

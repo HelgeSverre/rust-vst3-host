@@ -19,7 +19,8 @@ pub struct IsolatedPluginImpl {
     process: Mutex<PluginHostProcess>,
     /// Plugin information
     info: PluginInfo,
-    /// Current sample rate
+    /// Current sample rate (diagnostics / config record)
+    #[allow(dead_code)]
     sample_rate: f64,
     /// Current block size
     block_size: usize,

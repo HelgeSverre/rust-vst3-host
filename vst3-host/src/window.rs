@@ -3,6 +3,11 @@
 //! This module provides platform-specific window creation and management
 //! for VST3 plugin GUIs.
 
+// TODO(objc2): migrate macOS window creation off the deprecated cocoa/objc crates to
+// objc2 / objc2-app-kit. Until then, contain the deprecation + macro-cfg warnings here.
+#![allow(deprecated)]
+#![allow(unexpected_cfgs)]
+
 use crate::error::{Error, Result};
 use crate::plugin::Plugin;
 use std::sync::{Arc, Mutex};

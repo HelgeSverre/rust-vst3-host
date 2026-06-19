@@ -60,10 +60,7 @@ impl AudioStream for CpalStream {
                 .play()
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         } else {
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Stream has been dropped",
-            )))
+            Err(Box::new(std::io::Error::other("Stream has been dropped")))
         }
     }
 
@@ -73,10 +70,7 @@ impl AudioStream for CpalStream {
                 .pause()
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         } else {
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Stream has been dropped",
-            )))
+            Err(Box::new(std::io::Error::other("Stream has been dropped")))
         }
     }
 }
