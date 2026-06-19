@@ -13,7 +13,18 @@ use vst3::{Class, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 pub struct HostApplication;
 
 impl Class for HostApplication {
-    type Interfaces = (IHostApplication,);
+    // The standard SDK host context implements both IHostApplication and
+    // IPlugInterfaceSupport; plugins query the context for either.
+    type Interfaces = (IHostApplication, IPlugInterfaceSupport);
+}
+
+impl IPlugInterfaceSupportTrait for HostApplication {
+    unsafe fn isPlugInterfaceSupported(&self, _iid: *const TUID) -> tresult {
+        // We don't advertise optional host-provided plug interfaces; plugins fall back to
+        // their defaults. Providing the interface at all (rather than failing the
+        // queryInterface) is the point — the context answers standard host queries.
+        kResultFalse
+    }
 }
 
 impl IHostApplicationTrait for HostApplication {
