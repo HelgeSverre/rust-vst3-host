@@ -1,8 +1,10 @@
 //! Internal COM interface implementations for VST3
 
+use std::collections::HashMap;
+use std::ffi::CStr;
 use std::ptr;
 use std::sync::{Arc, Mutex};
-use vst3::{Class, ComWrapper, Steinberg::Vst::*, Steinberg::*};
+use vst3::{Class, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 
 // Host Application implementation.
 //
@@ -19,11 +21,18 @@ impl Class for HostApplication {
 }
 
 impl IPlugInterfaceSupportTrait for HostApplication {
-    unsafe fn isPlugInterfaceSupported(&self, _iid: *const TUID) -> tresult {
-        // We don't advertise optional host-provided plug interfaces; plugins fall back to
-        // their defaults. Providing the interface at all (rather than failing the
-        // queryInterface) is the point — the context answers standard host queries.
-        kResultFalse
+    unsafe fn isPlugInterfaceSupported(&self, iid: *const TUID) -> tresult {
+        if iid.is_null() {
+            return kResultFalse;
+        }
+        // Advertise the host-side interfaces we genuinely provide (the component handler
+        // installed on the controller); decline the rest so plugins use their defaults.
+        let bytes = std::slice::from_raw_parts(iid as *const u8, 16);
+        if bytes == &IComponentHandler::IID[..] || bytes == &IComponentHandler2::IID[..] {
+            kResultTrue
+        } else {
+            kResultFalse
+        }
     }
 }
 
@@ -47,14 +56,33 @@ impl IHostApplicationTrait for HostApplication {
 
     unsafe fn createInstance(
         &self,
-        _cid: *mut TUID,
+        cid: *mut TUID,
         _iid: *mut TUID,
         obj: *mut *mut std::ffi::c_void,
     ) -> tresult {
-        // We don't provide host-created objects; fail cleanly instead of crashing on a
-        // null context. Inter-component messaging via the host is simply unavailable.
-        if !obj.is_null() {
-            *obj = ptr::null_mut();
+        // Vend the host-created objects plugins ask for (the SDK's HostApplication does
+        // this): IMessage and IAttributeList, used to pass data between a plugin's
+        // component and controller halves. Anything else fails cleanly.
+        if obj.is_null() || cid.is_null() {
+            return kResultFalse;
+        }
+        *obj = ptr::null_mut();
+
+        // Compare the requested class id to a known IID by raw bytes (TUID element type
+        // is platform-dependent, so avoid a typed array compare).
+        let cid_bytes = std::slice::from_raw_parts(cid as *const u8, 16);
+        let matches = |iid: &[u8; 16]| cid_bytes == &iid[..];
+
+        if matches(&IMessage::IID) {
+            if let Some(p) = create_host_message().to_com_ptr::<IMessage>() {
+                *obj = p.into_raw() as *mut std::ffi::c_void;
+                return kResultTrue;
+            }
+        } else if matches(&IAttributeList::IID) {
+            if let Some(p) = create_host_attribute_list().to_com_ptr::<IAttributeList>() {
+                *obj = p.into_raw() as *mut std::ffi::c_void;
+                return kResultTrue;
+            }
         }
         kResultFalse
     }
@@ -63,6 +91,210 @@ impl IHostApplicationTrait for HostApplication {
 /// Create a host-application context to pass to `IComponent::initialize`.
 pub fn create_host_application() -> ComWrapper<HostApplication> {
     ComWrapper::new(HostApplication)
+}
+
+// A host-side IAttributeList: a typed key/value bag plugins use (via the host's
+// createInstance) to pass data between their component and controller halves.
+#[derive(Debug, Clone, PartialEq)]
+enum AttrValue {
+    Int(i64),
+    Float(f64),
+    /// UTF-16 (TChar) string, not null-terminated.
+    Str(Vec<i16>),
+    Bin(Vec<u8>),
+}
+
+/// Host implementation of `IAttributeList`.
+#[derive(Default)]
+pub struct HostAttributeList {
+    attrs: Mutex<HashMap<String, AttrValue>>,
+}
+
+impl HostAttributeList {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // Safe inner API (also the unit-test surface).
+    fn put(&self, key: String, value: AttrValue) {
+        if let Ok(mut m) = self.attrs.lock() {
+            m.insert(key, value);
+        }
+    }
+    fn get_value(&self, key: &str) -> Option<AttrValue> {
+        self.attrs.lock().ok().and_then(|m| m.get(key).cloned())
+    }
+}
+
+/// Decode an `AttrID` (a C string) into an owned key.
+unsafe fn attr_key(id: *const std::os::raw::c_char) -> String {
+    if id.is_null() {
+        return String::new();
+    }
+    CStr::from_ptr(id).to_string_lossy().into_owned()
+}
+
+impl Class for HostAttributeList {
+    type Interfaces = (IAttributeList,);
+}
+
+impl IAttributeListTrait for HostAttributeList {
+    unsafe fn setInt(&self, id: *const std::os::raw::c_char, value: i64) -> tresult {
+        self.put(attr_key(id), AttrValue::Int(value));
+        kResultOk
+    }
+    unsafe fn getInt(&self, id: *const std::os::raw::c_char, value: *mut i64) -> tresult {
+        match self.get_value(&attr_key(id)) {
+            Some(AttrValue::Int(v)) if !value.is_null() => {
+                *value = v;
+                kResultOk
+            }
+            _ => kResultFalse,
+        }
+    }
+    unsafe fn setFloat(&self, id: *const std::os::raw::c_char, value: f64) -> tresult {
+        self.put(attr_key(id), AttrValue::Float(value));
+        kResultOk
+    }
+    unsafe fn getFloat(&self, id: *const std::os::raw::c_char, value: *mut f64) -> tresult {
+        match self.get_value(&attr_key(id)) {
+            Some(AttrValue::Float(v)) if !value.is_null() => {
+                *value = v;
+                kResultOk
+            }
+            _ => kResultFalse,
+        }
+    }
+    unsafe fn setString(&self, id: *const std::os::raw::c_char, string: *const i16) -> tresult {
+        if string.is_null() {
+            return kResultFalse;
+        }
+        let mut buf = Vec::new();
+        let mut p = string;
+        while *p != 0 {
+            buf.push(*p);
+            p = p.add(1);
+        }
+        self.put(attr_key(id), AttrValue::Str(buf));
+        kResultOk
+    }
+    unsafe fn getString(
+        &self,
+        id: *const std::os::raw::c_char,
+        string: *mut i16,
+        size_in_bytes: u32,
+    ) -> tresult {
+        match self.get_value(&attr_key(id)) {
+            Some(AttrValue::Str(v)) if !string.is_null() => {
+                // Copy up to capacity-1 chars, then null-terminate.
+                let cap_chars = (size_in_bytes as usize / 2).saturating_sub(1);
+                let n = v.len().min(cap_chars);
+                for (i, &ch) in v.iter().take(n).enumerate() {
+                    *string.add(i) = ch;
+                }
+                *string.add(n) = 0;
+                kResultOk
+            }
+            _ => kResultFalse,
+        }
+    }
+    unsafe fn setBinary(
+        &self,
+        id: *const std::os::raw::c_char,
+        data: *const std::ffi::c_void,
+        size_in_bytes: u32,
+    ) -> tresult {
+        if data.is_null() {
+            return kResultFalse;
+        }
+        let bytes = std::slice::from_raw_parts(data as *const u8, size_in_bytes as usize).to_vec();
+        self.put(attr_key(id), AttrValue::Bin(bytes));
+        kResultOk
+    }
+    unsafe fn getBinary(
+        &self,
+        id: *const std::os::raw::c_char,
+        data: *mut *const std::ffi::c_void,
+        size_in_bytes: *mut u32,
+    ) -> tresult {
+        // Note: returns a pointer into the stored buffer; valid until the entry is
+        // replaced. VST3 plugins read it synchronously during init, which is safe here.
+        if data.is_null() || size_in_bytes.is_null() {
+            return kResultFalse;
+        }
+        if let Ok(m) = self.attrs.lock() {
+            if let Some(AttrValue::Bin(v)) = m.get(&attr_key(id)) {
+                *data = v.as_ptr() as *const std::ffi::c_void;
+                *size_in_bytes = v.len() as u32;
+                return kResultOk;
+            }
+        }
+        kResultFalse
+    }
+}
+
+/// Create a host attribute list.
+pub fn create_host_attribute_list() -> ComWrapper<HostAttributeList> {
+    ComWrapper::new(HostAttributeList::new())
+}
+
+/// Host implementation of `IMessage` (an id + an attribute list), used for
+/// component<->controller communication that plugins allocate via the host.
+pub struct HostMessage {
+    id: Mutex<Option<std::ffi::CString>>,
+    attributes: ComWrapper<HostAttributeList>,
+}
+
+impl Default for HostMessage {
+    fn default() -> Self {
+        Self {
+            id: Mutex::new(None),
+            attributes: create_host_attribute_list(),
+        }
+    }
+}
+
+impl HostMessage {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Class for HostMessage {
+    type Interfaces = (IMessage,);
+}
+
+impl IMessageTrait for HostMessage {
+    unsafe fn getMessageID(&self) -> FIDString {
+        // Pointer to the stored id (valid until replaced); null if unset.
+        if let Ok(g) = self.id.lock() {
+            if let Some(ref s) = *g {
+                return s.as_ptr();
+            }
+        }
+        ptr::null()
+    }
+    unsafe fn setMessageID(&self, id: FIDString) {
+        if id.is_null() {
+            return;
+        }
+        let owned = CStr::from_ptr(id).to_owned();
+        if let Ok(mut g) = self.id.lock() {
+            *g = Some(owned);
+        }
+    }
+    unsafe fn getAttributes(&self) -> *mut IAttributeList {
+        // Borrowed pointer to the message's own attribute list (kept alive by `self`).
+        self.attributes
+            .to_com_ptr::<IAttributeList>()
+            .map(|p| p.as_ptr())
+            .unwrap_or(ptr::null_mut())
+    }
+}
+
+/// Create a host message.
+pub fn create_host_message() -> ComWrapper<HostMessage> {
+    ComWrapper::new(HostMessage::new())
 }
 
 // Component Handler implementation
@@ -457,5 +689,25 @@ impl IParamValueQueueTrait for ParameterValueQueue {
         }
 
         kResultOk
+    }
+}
+
+#[cfg(test)]
+mod host_attr_tests {
+    use super::*;
+
+    #[test]
+    fn attribute_list_round_trips_each_type() {
+        let list = HostAttributeList::new();
+        list.put("i".into(), AttrValue::Int(42));
+        list.put("f".into(), AttrValue::Float(1.5));
+        list.put("s".into(), AttrValue::Str(vec![72, 105])); // "Hi"
+        list.put("b".into(), AttrValue::Bin(vec![1, 2, 3]));
+
+        assert_eq!(list.get_value("i"), Some(AttrValue::Int(42)));
+        assert_eq!(list.get_value("f"), Some(AttrValue::Float(1.5)));
+        assert_eq!(list.get_value("s"), Some(AttrValue::Str(vec![72, 105])));
+        assert_eq!(list.get_value("b"), Some(AttrValue::Bin(vec![1, 2, 3])));
+        assert_eq!(list.get_value("missing"), None);
     }
 }
