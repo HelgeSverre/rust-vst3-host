@@ -410,6 +410,9 @@ impl PluginImpl {
     }
 
     /// Create processing data structures
+    // `as u32` on the StatesAndFlags_ constants is required where they are generated as
+    // `i32`; on targets where they are already `u32` clippy flags it as redundant.
+    #[allow(clippy::unnecessary_cast)]
     fn create_process_data(&mut self) -> Result<()> {
         unsafe {
             let mut data = Box::new(HostProcessData {
@@ -428,9 +431,12 @@ impl PluginImpl {
             data.process_context.tempo = 120.0;
             data.process_context.timeSigNumerator = 4;
             data.process_context.timeSigDenominator = 4;
-            data.process_context.state = ProcessContext_::StatesAndFlags_::kPlaying
+            // `state` is `uint32`; the StatesAndFlags_ constants are generated as `i32` on
+            // some targets (Windows) and `u32` on others (macOS), so cast to the field type.
+            data.process_context.state = (ProcessContext_::StatesAndFlags_::kPlaying
                 | ProcessContext_::StatesAndFlags_::kTempoValid
-                | ProcessContext_::StatesAndFlags_::kTimeSigValid;
+                | ProcessContext_::StatesAndFlags_::kTimeSigValid)
+                as u32;
 
             // Set up process data
             data.process_data.processMode = ProcessModes_::kRealtime as i32;
@@ -1101,14 +1107,17 @@ impl PluginInternal for PluginImpl {
 
 /// Convert a raw VST3 `Event` (as a plugin emits into its output event list) into a safe
 /// [`MidiEvent`]. Returns `None` for event types this library doesn't model.
-#[allow(non_upper_case_globals)] // kNoteOnEvent etc. are VST3 SDK constants
-// `as u8` casts on the legacy-MIDI fields are required where `c_char` is `i8` (macOS); on
-// platforms where it's already `u8` clippy flags them as redundant. Keep for portability.
+#[allow(non_upper_case_globals)]
+// kNoteOnEvent etc. are VST3 SDK constants
+// SDK enum constants (event types, controller numbers) are generated as `i32` on some
+// targets (Windows) and `u32` on others (macOS); the `u8` field casts are likewise needed
+// where `c_char` is `i8`. We match the `u32` scrutinee against `<const> as u32` and allow
+// the cast clippy flags as redundant on the targets where it already matches.
 #[allow(clippy::unnecessary_cast)]
 pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
     unsafe {
         match e.r#type as u32 {
-            kNoteOnEvent => {
+            t if t == kNoteOnEvent as u32 => {
                 let n = &e.__field0.noteOn;
                 Some(MidiEvent::NoteOn {
                     channel: MidiChannel::from_index(n.channel as u8)?,
@@ -1116,7 +1125,7 @@ pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
                     velocity: (n.velocity * 127.0).round().clamp(0.0, 127.0) as u8,
                 })
             }
-            kNoteOffEvent => {
+            t if t == kNoteOffEvent as u32 => {
                 let n = &e.__field0.noteOff;
                 Some(MidiEvent::NoteOff {
                     channel: MidiChannel::from_index(n.channel as u8)?,
@@ -1124,7 +1133,7 @@ pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
                     velocity: (n.velocity * 127.0).round().clamp(0.0, 127.0) as u8,
                 })
             }
-            kPolyPressureEvent => {
+            t if t == kPolyPressureEvent as u32 => {
                 let p = &e.__field0.polyPressure;
                 Some(MidiEvent::PolyAftertouch {
                     channel: MidiChannel::from_index(p.channel as u8)?,
@@ -1132,16 +1141,16 @@ pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
                     pressure: (p.pressure * 127.0).round().clamp(0.0, 127.0) as u8,
                 })
             }
-            t if t == kLegacyMIDICCOutEvent => {
+            t if t == kLegacyMIDICCOutEvent as u32 => {
                 let c = &e.__field0.midiCCOut;
                 let channel = MidiChannel::from_index(c.channel as u8)?;
                 let value = (c.value as u8) & 0x7F;
                 match c.controlNumber as u32 {
-                    n if n == ControllerNumbers_::kPitchBend => Some(MidiEvent::PitchBend {
+                    n if n == ControllerNumbers_::kPitchBend as u32 => Some(MidiEvent::PitchBend {
                         channel,
                         value: (((c.value2 as u16) & 0x7F) << 7) | value as u16,
                     }),
-                    n if n == ControllerNumbers_::kAfterTouch => {
+                    n if n == ControllerNumbers_::kAfterTouch as u32 => {
                         Some(MidiEvent::ChannelAftertouch {
                             channel,
                             pressure: value,

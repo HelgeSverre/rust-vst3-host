@@ -16,8 +16,8 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
 #[cfg(target_os = "windows")]
 use winapi::{
-    shared::minwindef::{HINSTANCE, HWND, LPARAM, LRESULT, UINT, WPARAM},
-    shared::windef::RECT,
+    shared::minwindef::{HINSTANCE, LPARAM, LRESULT, UINT, WPARAM},
+    shared::windef::{HWND, RECT},
     um::libloaderapi::GetModuleHandleW,
     um::winuser::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, LoadCursorW, RegisterClassExW, ShowWindow,

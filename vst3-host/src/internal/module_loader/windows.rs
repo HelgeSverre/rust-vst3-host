@@ -25,7 +25,9 @@ type GetPluginFactoryFunc = unsafe extern "C" fn() -> *mut IPluginFactory;
 
 /// Windows VST3 module implementation
 pub struct WindowsModule {
-    /// libloading Library handle
+    /// libloading Library handle. Never read directly, but MUST outlive the transmuted
+    /// `'static` symbols below, which point into it. Kept to own its lifetime.
+    #[allow(dead_code)]
     library: Library,
     /// Path to the module
     path: std::path::PathBuf,
@@ -48,9 +50,11 @@ impl WindowsModule {
                 .map_err(|e| Error::PluginLoadFailed(format!("Failed to load DLL: {}", e)))?;
             log::debug!("✅ DLL loaded successfully");
 
-            // Step 2: Try to get InitDll function (OPTIONAL)
+            // Step 2: Try to get InitDll function (OPTIONAL).
+            // Note: `library.get` returns `libloading::Result`, not the crate's `Result`
+            // alias — let it infer rather than annotating with the 1-arg alias.
             log::debug!("Step 2: Looking for InitDll function...");
-            let init_dll_result: Result<Symbol<InitDllFunc>, _> = library.get(b"InitDll");
+            let init_dll_result = library.get::<InitDllFunc>(b"InitDll");
             match init_dll_result {
                 Ok(init_dll) => {
                     log::debug!("✅ InitDll function found, calling it...");
