@@ -201,17 +201,15 @@ impl PluginImpl {
 
             let has_gui = controller.is_some() && {
                 if let Some(ref ctrl) = controller {
-                    unsafe {
-                        let view_type = b"editor\0".as_ptr() as *const i8;
-                        let view_ptr = ctrl.createView(view_type);
-                        if !view_ptr.is_null() {
-                            // Clean up the test view immediately
-                            let view = ComPtr::<IPlugView>::from_raw(view_ptr).unwrap();
-                            view.removed();
-                            true
-                        } else {
-                            false
-                        }
+                    let view_type = b"editor\0".as_ptr() as *const i8;
+                    let view_ptr = ctrl.createView(view_type);
+                    if !view_ptr.is_null() {
+                        // Clean up the test view immediately
+                        let view = ComPtr::<IPlugView>::from_raw(view_ptr).unwrap();
+                        view.removed();
+                        true
+                    } else {
+                        false
                     }
                 } else {
                     false

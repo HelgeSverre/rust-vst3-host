@@ -96,7 +96,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     println!("✅ Processing started in {:?}", start.elapsed());
 
                     // Test MIDI if supported
-                    if info.has_midi_input && should_run_step(target_step, "test") {
+                    if plugin.info().has_midi_input && should_run_step(target_step, "test") {
                         wait_for_input("Continue to MIDI test?")?;
                         println!("\n🎹 STEP 6: MIDI Test");
 

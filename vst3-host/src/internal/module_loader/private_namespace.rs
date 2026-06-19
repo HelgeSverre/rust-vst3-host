@@ -13,10 +13,9 @@
 use super::{ModuleLoader, VstModule};
 use crate::error::{Error, Result};
 use core_foundation::{
-    base::{CFRetain, CFRelease, CFTypeRef, Boolean},
+    base::{CFRelease, CFTypeRef, Boolean},
     bundle::{CFBundleCreate, CFBundleRef},
-    string::CFString,
-    url::{CFURLCreateFromFileSystemRepresentation, CFURLRef},
+    url::CFURLCreateFromFileSystemRepresentation,
 };
 use std::{
     ffi::{CString, c_void},

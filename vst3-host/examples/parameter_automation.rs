@@ -58,7 +58,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use vst3_host::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -218,7 +218,7 @@ impl AutomationDemo {
         println!();
 
         // Set up non-blocking input
-        let stdin = io::stdin();
+        let mut stdin = io::stdin();
         let mut input_buffer = [0u8; 1];
 
         let start_time = Instant::now();
@@ -267,16 +267,16 @@ impl AutomationDemo {
                         break;
                     }
                     b' ' => {
-                        control_tx.send(ControlMessage::TogglePause)?;
+                        control_tx.send(ControlMessage::TogglePause).map_err(|_| Error::Other("Control channel closed".to_string()))?;
                     }
                     b'r' | b'R' => {
                         println!("🔄 Resetting parameters...");
-                        control_tx.send(ControlMessage::Reset)?;
+                        control_tx.send(ControlMessage::Reset).map_err(|_| Error::Other("Control channel closed".to_string()))?;
                     }
                     b'1'..=b'5' => {
                         let pattern_id = (input_buffer[0] - b'1') as usize;
                         println!("🎵 Switching to pattern {}", pattern_id + 1);
-                        control_tx.send(ControlMessage::ChangePattern(pattern_id))?;
+                        control_tx.send(ControlMessage::ChangePattern(pattern_id)).map_err(|_| Error::Other("Control channel closed".to_string()))?;
                     }
                     _ => {}
                 }
@@ -324,13 +324,13 @@ impl AutomationPerformance {
         let pattern_time = elapsed.as_secs_f64();
         
         // Apply current automation pattern
-        if let Some(pattern) = self.automation_patterns.get(self.current_pattern) {
-            self.apply_automation_pattern(pattern, pattern_time)?;
+        if let Some(pattern) = self.automation_patterns.get(self.current_pattern).cloned() {
+            self.apply_automation_pattern(&pattern, pattern_time)?;
         }
 
         // Play MIDI sequence
-        if let Some(sequence) = self.midi_sequences.get(&self.current_pattern) {
-            self.play_midi_sequence(sequence, pattern_time)?;
+        if let Some(sequence) = self.midi_sequences.get(&self.current_pattern).cloned() {
+            self.play_midi_sequence(&sequence, pattern_time)?;
         }
 
         Ok(())
@@ -346,7 +346,7 @@ impl AutomationPerformance {
                 p.name.to_lowercase().contains(&automation.parameter_name.to_lowercase())
             ) {
                 let value = automation.curve.calculate_value(time);
-                self.plugin.set_parameter(param.id, value)?;
+                self.plugin.set_parameter(param.id, value as f64)?;
             }
         }
         Ok(())

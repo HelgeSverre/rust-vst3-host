@@ -1,6 +1,6 @@
 //! Platform-specific VST3 module loading implementations
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use std::path::Path;
 use vst3::Steinberg::IPluginFactory;
 

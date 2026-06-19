@@ -15,6 +15,7 @@ use std::path::Path;
 use std::ptr;
 
 #[cfg(target_os = "macos")]
+#[allow(unused_imports)] // TODO: Remove when methods are implemented
 use objc::{class, msg_send, sel, sel_impl, Encode, Encoding};
 
 /// Objective-C runtime functions

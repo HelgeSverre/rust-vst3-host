@@ -16,10 +16,10 @@ use core_foundation::{
         CFBundleRef, CFBundleUnloadExecutable,
     },
     string::CFString,
-    url::{CFURLCreateFromFileSystemRepresentation, CFURLRef},
+    url::CFURLCreateFromFileSystemRepresentation,
 };
 use std::{
-    ffi::{c_void, CString},
+    ffi::CString,
     path::Path,
     ptr,
 };

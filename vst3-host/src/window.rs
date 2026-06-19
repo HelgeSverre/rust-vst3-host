@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "macos")]
 use cocoa::{
-    appkit::{NSBackingStoreType, NSView, NSWindow, NSWindowStyleMask},
+    appkit::{NSBackingStoreType, NSWindowStyleMask},
     base::{id, nil, NO},
     foundation::{NSPoint, NSRect, NSSize, NSString},
 };

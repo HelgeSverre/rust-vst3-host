@@ -44,7 +44,85 @@ impl Vst3Host {
         Ok(())
     }
 
-    // Discovery functionality removed - not used
+    /// Discover VST3 plugins in configured scan paths
+    pub fn discover_plugins(&mut self) -> Result<Vec<PluginInfo>> {
+        let mut all_paths = self.custom_paths.clone();
+        
+        // Add system paths if enabled
+        if self.scan_default_paths {
+            all_paths.extend(crate::discovery::scan_standard_paths());
+        }
+
+        // Scan directories for VST3 plugins
+        let plugin_paths = crate::discovery::scan_directories(&all_paths)?;
+        
+        // Get plugin info for each found plugin
+        let mut plugins = Vec::new();
+        for path in plugin_paths {
+            match crate::discovery::get_plugin_info(&path) {
+                Ok(info) => plugins.push(info),
+                Err(e) => {
+                    log::warn!("Failed to get info for plugin {}: {}", path.display(), e);
+                    // Continue with other plugins
+                }
+            }
+        }
+        
+        Ok(plugins)
+    }
+
+    /// Discover VST3 plugins, reporting progress through a callback.
+    ///
+    /// The callback receives [`DiscoveryProgress`] events: one `Started` at the
+    /// beginning, a `Found` or `Error` per candidate, and a final `Completed`.
+    /// Returns the successfully-inspected plugins, same as [`Self::discover_plugins`].
+    pub fn discover_plugins_with_callback<F>(
+        &mut self,
+        mut on_progress: F,
+    ) -> Result<Vec<PluginInfo>>
+    where
+        F: FnMut(DiscoveryProgress),
+    {
+        let mut all_paths = self.custom_paths.clone();
+
+        if self.scan_default_paths {
+            all_paths.extend(crate::discovery::scan_standard_paths());
+        }
+
+        let plugin_paths = crate::discovery::scan_directories(&all_paths)?;
+        let total = plugin_paths.len();
+
+        on_progress(DiscoveryProgress::Started {
+            total_plugins: total,
+        });
+
+        let mut plugins = Vec::new();
+        for (index, path) in plugin_paths.into_iter().enumerate() {
+            match crate::discovery::get_plugin_info(&path) {
+                Ok(info) => {
+                    on_progress(DiscoveryProgress::Found {
+                        plugin: info.clone(),
+                        current: index + 1,
+                        total,
+                    });
+                    plugins.push(info);
+                }
+                Err(e) => {
+                    log::warn!("Failed to get info for plugin {}: {}", path.display(), e);
+                    on_progress(DiscoveryProgress::Error {
+                        path: path.display().to_string(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        on_progress(DiscoveryProgress::Completed {
+            total_found: plugins.len(),
+        });
+
+        Ok(plugins)
+    }
 
     /// Load a VST3 plugin
     pub fn load_plugin<P: AsRef<Path>>(&mut self, path: P) -> Result<Plugin> {

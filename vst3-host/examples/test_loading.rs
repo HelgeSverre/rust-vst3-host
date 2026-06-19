@@ -105,7 +105,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             eprintln!("  • Plugin requires specific permissions (macOS)");
             eprintln!();
             eprintln!("Try running with RUST_LOG=debug for more details");
-            return Err(e);
+            return Err(e.into());
         }
     };
 
@@ -113,7 +113,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("📋 Plugin Information");
     println!("=====================");
-    let info = plugin.info();
+    // Clone so we don't hold an immutable borrow of `plugin` across the later
+    // `&mut plugin` lifecycle calls (start_processing / send_midi_event / ...).
+    let info = plugin.info().clone();
     println!("Name:           {}", info.name);
     println!("Vendor:         {}", info.vendor);
     println!("Version:        {}", info.version);

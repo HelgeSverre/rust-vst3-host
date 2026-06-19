@@ -105,13 +105,14 @@ fn test_plugin_parameters() {
         .load_plugin(&plugin_info.path)
         .expect("Failed to load plugin");
 
-    let params = plugin.get_parameters();
+    let params = plugin.get_parameters().expect("Failed to get parameters");
     println!("Plugin has {} parameters", params.len());
 
     if let Some(first_param) = params.first() {
         println!(
-            "First parameter: {} = {} {}",
-            first_param.name, first_param.value_text, first_param.unit
+            "First parameter: {} = {}",
+            first_param.name,
+            first_param.format_value(first_param.value)
         );
 
         // Try to set the parameter
@@ -121,7 +122,7 @@ fn test_plugin_parameters() {
             .expect("Failed to set parameter");
 
         // Verify it was set
-        let updated_params = plugin.get_parameters();
+        let updated_params = plugin.get_parameters().expect("Failed to get updated parameters");
         let updated = updated_params
             .iter()
             .find(|p| p.id == first_param.id)
@@ -185,11 +186,12 @@ fn test_audio_processing() {
         .build()
         .expect("Failed to create host");
 
-    // Create audio backend separately
-    let backend = CpalBackend::new().expect("Failed to create audio backend");
-
+    // TODO(Phase 1): once Vst3Host wires a CpalBackend into the plugin and drives
+    // `process_audio` from the device callback, load with the backend attached so the
+    // `on_audio_process` levels below actually fire. Until then, load plain and the
+    // level assertion stays best-effort (this test is #[ignore]'d).
     let mut plugin = host
-        .load_plugin_with_backend(&plugin_info.path, Box::new(backend))
+        .load_plugin(&plugin_info.path)
         .expect("Failed to load plugin");
 
     // Set up audio level monitoring
@@ -233,7 +235,7 @@ fn test_plugin_state_save_restore() {
         .expect("Failed to load plugin");
 
     // Get initial parameters
-    let initial_params = plugin.get_parameters();
+    let initial_params = plugin.get_parameters().expect("Failed to get initial parameters");
 
     // Modify some parameters
     if let Some(param) = initial_params.first() {
@@ -244,7 +246,7 @@ fn test_plugin_state_save_restore() {
     }
 
     // Get current state by reading parameters
-    let modified_params = plugin.get_parameters();
+    let modified_params = plugin.get_parameters().expect("Failed to get modified parameters");
 
     // Reset parameters to different values
     if let Some(param) = initial_params.first() {
@@ -261,7 +263,7 @@ fn test_plugin_state_save_restore() {
     }
 
     // Verify parameters were restored
-    let restored_params = plugin.get_parameters();
+    let restored_params = plugin.get_parameters().expect("Failed to get restored parameters");
     if let (Some(modified), Some(restored)) = (modified_params.first(), restored_params.first()) {
         assert!(
             (modified.value - restored.value).abs() < 0.01,
@@ -270,59 +272,23 @@ fn test_plugin_state_save_restore() {
     }
 }
 
-/// Test process isolation feature if enabled
+/// Test process isolation feature if enabled.
+///
+/// TODO(Phase 3): this encodes the *target* isolation API and is intentionally a
+/// pending placeholder. The real isolation type today is `PluginHostProcess`, whose
+/// IPC protocol only supports LoadPlugin/UnloadPlugin/Process/Shutdown — there are no
+/// SetParameter/GetParameter/SendMidi/StartProcessing verbs, and `IsolatedPluginImpl`
+/// forwards none of them (see src/internal/isolated_plugin_impl.rs). Phase 3 will add
+/// those verbs and a safe `IsolatedPlugin` wrapper, at which point restore the
+/// end-to-end assertions:
+///   new -> start -> load_plugin -> get_parameters (== expected) ->
+///   set_parameter -> process_audio (passthrough) -> stop.
 #[cfg(feature = "process-isolation")]
 #[test]
-#[ignore = "Requires helper binary and VST3 plugins"]
+#[ignore = "Phase 3: isolation control protocol + IsolatedPlugin wrapper not yet implemented"]
 fn test_process_isolation() {
-    use std::env;
-    use std::path::Path;
-    use vst3_host::process_isolation::IsolatedPlugin;
-
-    // Try to find the helper binary
-    let exe_path = env::current_exe().expect("Failed to get current exe");
-    let helper_path = exe_path
-        .parent()
-        .expect("Failed to get exe directory")
-        .join("examples")
-        .join("isolated_plugin_helper");
-
-    if !helper_path.exists() {
-        println!(
-            "Helper binary not found at {:?}, skipping test",
-            helper_path
-        );
-        return;
-    }
-
-    let mut isolated = IsolatedPlugin::new(helper_path);
-    isolated.start().expect("Failed to start helper process");
-
-    // Load a plugin (the example returns mock data)
-    let info = isolated
-        .load_plugin(Path::new("/fake/plugin.vst3"))
-        .expect("Failed to load plugin in isolated process");
-
-    assert_eq!(info.name, "Example Plugin");
-    assert_eq!(info.vendor, "Example Vendor");
-
-    // Get parameters
-    let params = isolated.get_parameters().expect("Failed to get parameters");
-    assert_eq!(params.len(), 3);
-
-    // Set a parameter
-    isolated
-        .set_parameter(0, 0.75)
-        .expect("Failed to set parameter");
-
-    // Process audio
-    let input = vec![vec![0.0; 512]; 2];
-    let output = isolated
-        .process_audio(input.clone(), 512)
-        .expect("Failed to process audio");
-    assert_eq!(output, input); // Example just passes through
-
-    isolated.stop().expect("Failed to stop helper process");
+    // Smoke-test only: the in-process IPC host type exists and constructs.
+    let _ = vst3_host::process_isolation::PluginHostProcess::new();
 }
 
 #[test]
@@ -339,7 +305,7 @@ fn test_specific_free_plugins() {
         ("OB-Xd", "discoDSP"),
     ];
 
-    for (name, vendor) in &free_plugins {
+    for (name, _vendor) in &free_plugins {
         if let Some(plugin) = plugins.iter().find(|p| p.name.contains(name)) {
             println!(
                 "Found {}: {} by {} v{}",
@@ -358,7 +324,7 @@ fn test_specific_free_plugins() {
                         "  - MIDI: {}",
                         if plugin.has_midi_input { "Yes" } else { "No" }
                     );
-                    println!("  - Parameters: {}", loaded.get_parameters().len());
+                    println!("  - Parameters: {}", loaded.get_parameters().unwrap_or_default().len());
 
                     // Test basic operations
                     if loaded.start_processing().is_ok() {

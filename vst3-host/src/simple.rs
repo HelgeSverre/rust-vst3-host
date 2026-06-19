@@ -178,7 +178,11 @@ pub fn load_plugin_isolated<P: AsRef<Path>>(path: P) -> Result<Plugin> {
 /// # }
 /// ```
 pub fn discover_plugins() -> Result<Vec<PluginInfo>> {
-    Err(Error::Other("Plugin discovery not yet implemented. Use get_plugin_info() for individual plugins.".to_string()))
+    let mut host = Vst3Host::builder()
+        .scan_default_paths() // Enable scanning system directories
+        .build()?;
+
+    host.discover_plugins()
 }
 
 /// Discover plugins in a specific directory.
@@ -199,8 +203,12 @@ pub fn discover_plugins() -> Result<Vec<PluginInfo>> {
 /// # Ok(())
 /// # }
 /// ```
-pub fn discover_plugins_in<P: AsRef<Path>>(_path: P) -> Result<Vec<PluginInfo>> {
-    Err(Error::Other("Plugin discovery not yet implemented. Use get_plugin_info() for individual plugins.".to_string()))
+pub fn discover_plugins_in<P: AsRef<Path>>(path: P) -> Result<Vec<PluginInfo>> {
+    let mut host = Vst3Host::builder()
+        .add_scan_path(path)
+        .build()?;
+
+    host.discover_plugins()
 }
 
 /// Get information about a specific plugin without loading it.
@@ -283,7 +291,6 @@ pub fn is_valid_plugin<P: AsRef<Path>>(path: P) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_is_valid_plugin() {
