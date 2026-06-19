@@ -31,6 +31,7 @@ Focused recipes. They assume you've done the getting-started tutorial.
 - [Architecture](explanation/architecture.md) — how safe Rust wraps the VST3 COM API.
 - [Process isolation](explanation/process-isolation.md) — running plugins in a separate process.
 - [Audio processing](explanation/audio-processing.md) — the audio model and its current limits.
+- [Threading model](explanation/threading.md) — which thread each call belongs on, and why.
 - [VST3 primer](explanation/vst3-primer.md) — the VST3 mental model, if you're new to it.
 
 ---
