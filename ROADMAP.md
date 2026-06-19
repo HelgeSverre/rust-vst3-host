@@ -100,14 +100,21 @@ A multi-agent analysis produced an incremental, compile-at-each-step slice plan.
   now uses it; deleted `plugin_discovery.rs`. `grep vst3_host`: 0 → consumer.
 - [x] Slice 4 (partial). MIDI note-name converters delegate to `vst3_host::midi`
   (deleted ~60 lines of dup; test now guards the library's C3=60 convention).
-- [ ] Slice 0 (lib). `DetailedPluginInfo` (factory/class/bus/param introspection) to feed
-  the inspector's info tabs — unblocks Slice 2.
-- [ ] Slices 2/3/5 (THE BIG COUPLED CHANGE). Replace the inspector's raw COM/audio state
-  (`component`/`controller`/`processor`/`plugin_library`/`AudioProcessingState`) with a
-  `vst3_host::Plugin` + `AudioHandle`, rewiring every GUI reader of params/MIDI/audio.
-  Atomic (the lib hides COM, so the old fields can't coexist) and only build-verifiable
-  headlessly — **best done with interactive (GUI) verification**. Deletes
-  `com_implementations.rs`, `audio_processing.rs`. Plan: workflow output in session notes.
+- [x] Slice 0 (lib). `DetailedPluginInfo` + `get_detailed_plugin_info(path)` (factory,
+  classes, bus layout) re-exported at the crate root; `discovery` is now a public module.
+  Verified against Dexed. Unblocks the load migration.
+- [ ] Slices 2/3/5 (THE BIG COUPLED CHANGE — needs interactive verification). Replace the
+  inspector's raw COM/audio state with `vst3_host::Plugin` + `AudioHandle`. SIZED: **73
+  `self.{component,controller,processor,plugin_library,host_process_data,
+  shared_audio_state,plugin_view,plugin_host_process}` references** across load, the
+  audio-thread-shared state (16 refs), MIDI, and the editor — one atomic change
+  (the lib hides COM, so the fields can't be removed piecemeal). Deletes
+  `com_implementations.rs`, `audio_processing.rs`. **Verification gap:** the GUI launches
+  and is screenshottable (rendering verified), but egui takes no external input
+  injection, so the *behavior* this change alters (loading, param edits, audio playback,
+  MIDI, editor open) can only be confirmed by a human clicking through it. Do it in an
+  interactive session — or add a startup self-test path that auto-loads Dexed + logs
+  params/audio-peak to make it headlessly verifiable.
 - [ ] Slice 6. Process isolation → library; delete `plugin_host_process.rs` +
   `vst3-inspector-helper.rs` (parity already proven).
 - [ ] Slice 9 (LAST, interactive-only). Editor window → `Plugin::open_editor`/`PluginWindow`.
