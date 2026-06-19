@@ -276,23 +276,91 @@ fn test_plugin_state_save_restore() {
     }
 }
 
-/// Test process isolation feature if enabled.
+/// Phase 3 capstone: drive a plugin end-to-end in an isolated process.
 ///
-/// TODO(Phase 3): this encodes the *target* isolation API and is intentionally a
-/// pending placeholder. The real isolation type today is `PluginHostProcess`, whose
-/// IPC protocol only supports LoadPlugin/UnloadPlugin/Process/Shutdown — there are no
-/// SetParameter/GetParameter/SendMidi/StartProcessing verbs, and `IsolatedPluginImpl`
-/// forwards none of them (see src/internal/isolated_plugin_impl.rs). Phase 3 will add
-/// those verbs and a safe `IsolatedPlugin` wrapper, at which point restore the
-/// end-to-end assertions:
-///   new -> start -> load_plugin -> get_parameters (== expected) ->
-///   set_parameter -> process_audio (passthrough) -> stop.
+/// Requires the `vst3-host-helper` binary to be built and the bundled Dexed test
+/// plugin to be present, so it is `#[ignore]`d by default. Run with:
+/// `cargo test --features process-isolation --test integration_tests -- --ignored`.
 #[cfg(feature = "process-isolation")]
 #[test]
-#[ignore = "Phase 3: isolation control protocol + IsolatedPlugin wrapper not yet implemented"]
+#[ignore = "Requires the helper binary and the bundled test plugin"]
 fn test_process_isolation() {
-    // Smoke-test only: the in-process IPC host type exists and constructs.
-    let _ = vst3_host::process_isolation::PluginHostProcess::new();
+    let plugin_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(plugin_path).exists() {
+        println!("Test plugin not found at {plugin_path}, skipping");
+        return;
+    }
+
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .with_process_isolation(true)
+        .build()
+        .expect("Failed to build isolated host");
+
+    let mut plugin = host
+        .load_plugin(plugin_path)
+        .expect("Failed to load plugin in isolated process");
+
+    // Parameters marshal across the process boundary.
+    let params = plugin.get_parameters().expect("get_parameters over IPC");
+    assert!(!params.is_empty(), "isolated plugin reported no parameters");
+
+    // Parameter set/get round-trips across the boundary.
+    let id = params[0].id;
+    plugin.set_parameter(id, 0.5).expect("set_parameter over IPC");
+    let got = plugin.get_parameter(id).expect("get_parameter over IPC");
+    assert!((got - 0.5).abs() < 0.05, "parameter did not round-trip: {got}");
+
+    // Audio crosses the boundary.
+    plugin.start_processing().expect("start_processing over IPC");
+    plugin
+        .send_midi_note(60, 110, MidiChannel::Ch1)
+        .expect("send MIDI over IPC");
+
+    let mut max_peak = 0.0f32;
+    for _ in 0..20 {
+        let mut buffers = AudioBuffers::new(0, 2, 512, 48000.0);
+        plugin.process_audio(&mut buffers).expect("process over IPC");
+        for ch in &buffers.outputs {
+            for &s in ch {
+                max_peak = max_peak.max(s.abs());
+            }
+        }
+    }
+    plugin.stop_processing().expect("stop_processing over IPC");
+
+    assert!(
+        max_peak > 0.0,
+        "isolated synth produced no audio across the process boundary"
+    );
+    println!("Isolated plugin produced audio (peak {max_peak:.4})");
+}
+
+/// A dead/crashed helper must surface as an error quickly, never a hang.
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the helper binary"]
+fn test_isolation_dead_helper_errors_fast() {
+    use vst3_host::process_isolation::{HostCommand, PluginHostProcess};
+
+    let mut proc = match PluginHostProcess::new() {
+        Ok(p) => p,
+        Err(e) => {
+            println!("Helper not available ({e}), skipping");
+            return;
+        }
+    };
+
+    // Kill the helper, then a command must error promptly (not block on read).
+    proc.shutdown();
+    let start = std::time::Instant::now();
+    let res = proc.send_command(HostCommand::GetAllParameters);
+    assert!(res.is_err(), "command to a dead helper should error");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "dead-helper command must not hang"
+    );
 }
 
 #[test]

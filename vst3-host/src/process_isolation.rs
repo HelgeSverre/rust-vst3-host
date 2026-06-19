@@ -6,6 +6,12 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+/// Default time to wait for a helper response before treating the plugin as hung.
+const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Commands that can be sent to the isolated plugin process.
 ///
@@ -116,11 +122,23 @@ pub enum HostResponse {
     },
 }
 
-/// Manages a plugin running in an isolated process
+/// Manages a plugin running in an isolated process.
+///
+/// Responses are read on a background thread and delivered over a channel, so
+/// [`Self::send_command`] can wait with a deadline: a hung plugin yields a timeout
+/// error (and the child is killed) instead of blocking the host forever, and a
+/// crashed helper surfaces as a disconnect error rather than a silent wedge.
 pub struct PluginHostProcess {
     process: Option<Child>,
     stdin: Option<ChildStdin>,
-    stdout: Option<BufReader<std::process::ChildStdout>>,
+    /// Lines received from the helper's stdout (one JSON response each).
+    responses: Receiver<String>,
+    /// Background reader thread handle (joined on shutdown).
+    reader: Option<JoinHandle<()>>,
+    /// How long to wait for a single response before declaring a timeout.
+    timeout: Duration,
+    /// Set once the child has been killed/exited so we stop trying to talk to it.
+    dead: bool,
 }
 
 impl PluginHostProcess {
@@ -199,43 +217,94 @@ impl PluginHostProcess {
         let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
         let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
 
+        // Read responses on a background thread so the caller can apply a deadline.
+        // The thread ends (dropping the sender) when stdout hits EOF — i.e. when the
+        // helper process exits or crashes — which the receiver sees as Disconnected.
+        let (tx, rx) = mpsc::channel::<String>();
+        let reader = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break, // EOF: helper exited
+                    Ok(_) => {
+                        if tx.send(std::mem::take(&mut line)).is_err() {
+                            break; // receiver dropped
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
         Ok(Self {
             process: Some(child),
             stdin: Some(stdin),
-            stdout: Some(BufReader::new(stdout)),
+            responses: rx,
+            reader: Some(reader),
+            timeout: DEFAULT_RESPONSE_TIMEOUT,
+            dead: false,
         })
     }
 
-    /// Send a command to the helper process and get a response
+    /// Set how long to wait for a helper response before declaring a timeout.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
+    /// Send a command to the helper process and wait (with a deadline) for a response.
+    ///
+    /// Returns an error without blocking indefinitely if the plugin hangs (the child
+    /// is killed) or the helper has crashed/exited.
     pub fn send_command(&mut self, command: HostCommand) -> Result<HostResponse, String> {
-        let stdin = self.stdin.as_mut().ok_or("No stdin available")?;
+        if self.dead {
+            return Err("Helper process is no longer running".to_string());
+        }
 
-        let stdout = self.stdout.as_mut().ok_or("No stdout available")?;
-
-        // Send command
         let command_json = serde_json::to_string(&command)
             .map_err(|e| format!("Failed to serialize command: {}", e))?;
 
-        writeln!(stdin, "{}", command_json)
-            .map_err(|e| format!("Failed to write command: {}", e))?;
-
-        stdin
-            .flush()
-            .map_err(|e| format!("Failed to flush stdin: {}", e))?;
-
-        // Read response with timeout
-        let mut response_line = String::new();
-        stdout
-            .read_line(&mut response_line)
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-
-        if response_line.is_empty() {
-            // Process might have crashed
-            self.check_process_status()?;
-            return Err("No response from helper process".to_string());
+        {
+            let stdin = self.stdin.as_mut().ok_or("No stdin available")?;
+            writeln!(stdin, "{}", command_json).map_err(|e| {
+                self.dead = true;
+                format!("Failed to write command (helper gone?): {}", e)
+            })?;
+            stdin.flush().map_err(|e| {
+                self.dead = true;
+                format!("Failed to flush stdin (helper gone?): {}", e)
+            })?;
         }
 
-        serde_json::from_str(&response_line).map_err(|e| format!("Failed to parse response: {}", e))
+        match self.responses.recv_timeout(self.timeout) {
+            Ok(line) => serde_json::from_str(&line)
+                .map_err(|e| format!("Failed to parse response: {}", e)),
+            Err(RecvTimeoutError::Timeout) => {
+                // The plugin is hung. Kill the child so it can't wedge us further.
+                self.dead = true;
+                if let Some(ref mut process) = self.process {
+                    let _ = process.kill();
+                }
+                Err(format!(
+                    "Timed out after {:?} waiting for helper response (plugin may have hung)",
+                    self.timeout
+                ))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                // Reader thread ended => stdout closed => helper exited/crashed.
+                self.dead = true;
+                match self.check_process_status() {
+                    Err(status) => Err(format!("Helper process crashed: {}", status)),
+                    Ok(()) => Err("Helper process exited unexpectedly".to_string()),
+                }
+            }
+        }
+    }
+
+    /// Whether the helper process is still considered alive.
+    pub fn is_alive(&self) -> bool {
+        !self.dead
     }
 
     /// Check if the helper process is still running
@@ -261,16 +330,28 @@ impl PluginHostProcess {
 
     /// Shutdown the helper process
     pub fn shutdown(&mut self) {
-        // Send shutdown command
-        let _ = self.send_command(HostCommand::Shutdown);
+        // Best-effort Shutdown command (no response expected — the helper just exits).
+        // We do NOT use send_command here: it waits for a reply, and Shutdown has none.
+        if !self.dead {
+            if let (Some(stdin), Ok(json)) =
+                (self.stdin.as_mut(), serde_json::to_string(&HostCommand::Shutdown))
+            {
+                let _ = writeln!(stdin, "{}", json);
+                let _ = stdin.flush();
+            }
+        }
 
-        // Wait for process to exit
+        // Dropping stdin gives the helper's read loop EOF, guaranteeing it exits even
+        // if it ignored the Shutdown command; that in turn ends the reader thread.
+        self.stdin = None;
+
         if let Some(mut process) = self.process.take() {
             let _ = process.wait();
         }
-
-        self.stdin = None;
-        self.stdout = None;
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        self.dead = true;
     }
 }
 

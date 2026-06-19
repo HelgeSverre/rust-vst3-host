@@ -74,8 +74,11 @@ examples compile, reached phase by phase.
 - [x] 3d. `process-isolation` is now a default feature so the helper binary always
   builds and the opt-in works without manual flags. Runtime default stays in-process
   (defaulting isolation ON needs helper-binary distribution in the consumer env).
-- [ ] 3c. Real timeout + crash recovery (send_command still blocks on read_line; a hung
-  plugin blocks the host, and there is no helper respawn). REMAINING.
+- [x] 3c. Timeout + crash detection: responses are read on a background thread and
+  `send_command` waits with a 5s deadline — a hung plugin yields a timeout error (and
+  the child is killed), a crashed/exited helper surfaces as a disconnect error, and a
+  dead helper short-circuits. Verified by `test_isolation_dead_helper_errors_fast`
+  (errors in <1s, no hang). Auto-respawn-and-reload is the one remaining sub-item.
 - [ ] 3e. Plugin GUI across the process boundary (CreateGui/CloseGui currently error).
   REMAINING.
 
