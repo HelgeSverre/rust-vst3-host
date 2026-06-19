@@ -87,6 +87,17 @@ pub(crate) trait PluginInternal: Send {
             "state save/restore is not supported".to_string(),
         ))
     }
+    /// OS process id of the isolated helper, if this plugin runs out-of-process.
+    fn helper_pid(&self) -> Option<u32> {
+        None
+    }
+    /// Recover from a crashed isolated helper by respawning and reloading. Only meaningful
+    /// for process-isolated plugins.
+    fn recover(&mut self) -> Result<()> {
+        Err(Error::Other(
+            "recovery is only supported for process-isolated plugins".to_string(),
+        ))
+    }
 }
 
 impl Plugin {
@@ -424,6 +435,30 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .load_state(data)
+    }
+
+    /// The OS process id of the isolated helper hosting this plugin, or `None` if it runs
+    /// in-process. Useful for monitoring an isolated plugin's resource use.
+    pub fn isolation_pid(&self) -> Option<u32> {
+        self.internal.as_ref().and_then(|i| i.helper_pid())
+    }
+
+    /// Recover a process-isolated plugin whose helper has crashed.
+    ///
+    /// When an isolated plugin's helper process dies, calls return [`Error::PluginCrashed`]
+    /// and the host itself stays alive. This respawns the helper and reloads the plugin
+    /// from the same path and audio settings, restarting processing if it was running.
+    ///
+    /// **The reloaded plugin starts from its default state** — parameter values and any
+    /// loaded preset are lost. Snapshot with [`Self::save_state`] beforehand and
+    /// [`Self::load_state`] after recovering to preserve them. Returns an error for
+    /// in-process plugins (an in-process crash takes down the whole host) and if the
+    /// reload itself fails.
+    pub fn recover(&mut self) -> Result<()> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .recover()
     }
 }
 

@@ -395,6 +395,57 @@ fn test_isolation_state_roundtrip() {
     println!("Isolated state round-trip OK ({} bytes)", snapshot.len());
 }
 
+/// B2: when an isolated helper dies mid-session, calls surface a typed `PluginCrashed`
+/// (the host stays alive) and `recover()` brings the plugin back.
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the helper binary and the bundled test plugin"]
+fn test_isolation_crash_recovery() {
+    let plugin_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(plugin_path).exists() {
+        println!("Test plugin not found at {plugin_path}, skipping");
+        return;
+    }
+
+    let mut host = Vst3Host::builder()
+        .with_process_isolation(true)
+        .build()
+        .expect("build isolated host");
+    let mut plugin = host.load_plugin(plugin_path).expect("load isolated");
+    plugin.start_processing().expect("start");
+    let id = plugin.get_parameters().expect("params")[0].id;
+    plugin.set_parameter(id, 0.5).expect("set");
+
+    // Simulate a crash: kill the helper process out from under us.
+    let pid = plugin.isolation_pid().expect("helper pid");
+    let killed = std::process::Command::new("kill")
+        .arg("-9")
+        .arg(pid.to_string())
+        .status()
+        .expect("kill helper");
+    assert!(killed.success(), "failed to kill helper");
+    thread::sleep(Duration::from_millis(300));
+
+    // The next call must surface a typed crash, not hang and not kill us. Reaching this
+    // assert at all proves the host process survived the helper's death.
+    let err = plugin
+        .get_parameters()
+        .expect_err("call to a dead helper should error");
+    assert!(
+        matches!(err, Error::PluginCrashed),
+        "expected PluginCrashed, got {err:?}"
+    );
+
+    // Explicit recovery respawns + reloads; the plugin is usable again.
+    plugin.recover().expect("recover");
+    let params = plugin.get_parameters().expect("params after recover");
+    assert!(!params.is_empty(), "no parameters after recovery");
+    println!(
+        "Crash recovery OK: host survived, plugin reloaded ({} params)",
+        params.len()
+    );
+}
+
 /// A dead/crashed helper must surface as an error quickly, never a hang.
 #[cfg(feature = "process-isolation")]
 #[test]

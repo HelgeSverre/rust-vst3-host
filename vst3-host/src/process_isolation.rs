@@ -329,6 +329,12 @@ impl PluginHostProcess {
         !self.dead
     }
 
+    /// OS process id of the running helper, if any. Useful for monitoring — and for tests
+    /// that need to simulate a crash by killing the helper.
+    pub fn helper_pid(&self) -> Option<u32> {
+        self.process.as_ref().map(|c| c.id())
+    }
+
     /// Check if the helper process is still running
     pub fn check_process_status(&mut self) -> Result<(), String> {
         if let Some(ref mut process) = self.process {

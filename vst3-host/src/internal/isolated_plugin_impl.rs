@@ -19,8 +19,7 @@ pub struct IsolatedPluginImpl {
     process: Mutex<PluginHostProcess>,
     /// Plugin information
     info: PluginInfo,
-    /// Current sample rate (diagnostics / config record)
-    #[allow(dead_code)]
+    /// Current sample rate (also used to reload after a crash)
     sample_rate: f64,
     /// Current block size
     block_size: usize,
@@ -48,7 +47,13 @@ impl IsolatedPluginImpl {
         }
     }
 
-    /// Send a command and get response
+    /// Send a command and get response.
+    ///
+    /// Maps a dead/crashed/hung helper to a typed [`Error::PluginCrashed`] /
+    /// [`Error::PluginTimeout`] (the host process stays alive); the caller can then call
+    /// [`PluginInternal::recover`] to respawn. Recovery is deliberately *not* inline here:
+    /// `process()` runs on the audio thread, where a synchronous respawn+reload would stall
+    /// it for hundreds of milliseconds.
     fn send_command(&self, command: HostCommand) -> Result<HostResponse> {
         let mut process = self
             .process
@@ -57,7 +62,24 @@ impl IsolatedPluginImpl {
 
         process
             .send_command(command)
-            .map_err(|e| Error::Other(format!("IPC error: {}", e)))
+            .map_err(|e| classify_ipc_error(&e))
+    }
+}
+
+/// Classify a low-level IPC error string into a typed library error.
+fn classify_ipc_error(message: &str) -> Error {
+    let lo = message.to_lowercase();
+    if lo.contains("timed out") {
+        Error::PluginTimeout
+    } else if lo.contains("crash")
+        || lo.contains("no longer running")
+        || lo.contains("gone")
+        || lo.contains("exited")
+        || lo.contains("not running")
+    {
+        Error::PluginCrashed
+    } else {
+        Error::Other(format!("IPC error: {message}"))
     }
 }
 
@@ -232,6 +254,42 @@ impl PluginInternal for IsolatedPluginImpl {
             },
             "LoadState",
         )
+    }
+
+    fn helper_pid(&self) -> Option<u32> {
+        self.process.lock().ok().and_then(|p| p.helper_pid())
+    }
+
+    fn recover(&mut self) -> Result<()> {
+        let mut process = self
+            .process
+            .lock()
+            .map_err(|e| Error::Other(format!("Failed to lock process: {}", e)))?;
+
+        // Spawn a fresh helper and reload the plugin from the original path + settings.
+        let mut fresh = PluginHostProcess::new()
+            .map_err(|e| Error::ProcessError(format!("Failed to respawn helper: {e}")))?;
+        match fresh.send_command(HostCommand::LoadPlugin {
+            path: self.info.path.display().to_string(),
+            sample_rate: self.sample_rate,
+            block_size: self.block_size as u32,
+        }) {
+            Ok(HostResponse::PluginInfo { .. }) => {}
+            Ok(HostResponse::Error { message }) => {
+                return Err(Error::PluginLoadFailed(format!("reload failed: {message}")))
+            }
+            Ok(_) => return Err(Error::Other("unexpected response while reloading".into())),
+            // The reload itself crashed the fresh helper — the plugin is unrecoverable.
+            Err(e) => return Err(classify_ipc_error(&e)),
+        }
+
+        // Restore processing state (parameter values are NOT replayed; see Plugin::recover).
+        if self.is_processing {
+            let _ = fresh.send_command(HostCommand::StartProcessing);
+        }
+
+        *process = fresh;
+        Ok(())
     }
 }
 
