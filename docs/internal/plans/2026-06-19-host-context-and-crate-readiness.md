@@ -131,12 +131,14 @@ isolated automatically. Files: `host.rs`, `discovery.rs`.
 crash contained) or loads isolated — the host process never segfaults. Verify with the
 `isolated_host` example + a new selftest variant.
 
-### B2: Isolation crash-recovery (auto-respawn)
-Finish the deferred Phase 3 item: when `send_command` detects the helper died, respawn it
-and re-load the plugin (replaying setup), or surface a typed `PluginCrashed` so the caller
-can. Files: `process_isolation.rs`, `internal/isolated_plugin_impl.rs`.
-**Acceptance:** a test that kills the helper mid-session and confirms the next call either
-recovers or returns `Error::PluginCrashed` (not a generic error); host stays alive.
+### B2: Isolation crash-recovery (auto-respawn) — ✅ DONE
+A dead/crashed/hung helper now maps to a typed `Error::PluginCrashed` / `PluginTimeout`
+(host stays alive); `Plugin::recover()` respawns + reloads + restarts processing. Recovery
+is explicit (not inline) to keep respawn off the audio thread. Added `Plugin::isolation_pid`.
+Files: `process_isolation.rs`, `internal/isolated_plugin_impl.rs`, `plugin.rs`.
+**Acceptance (met):** `test_isolation_crash_recovery` kills the helper mid-session → next
+call returns `PluginCrashed` and the host survives → `recover()` reloads Dexed (2238 params).
+*Deferred:* parameter values are not replayed on recovery (pair with state save/restore).
 
 ### B3: A "validate plugin" probe (the DAW rescan feature)
 A `Vst3Host::probe_plugin(path) -> PluginStatus { Ok, Crashed, Timeout }` that loads in an
@@ -145,10 +147,10 @@ bad plugins during a scan. Builds on B1/B2. Files: `host.rs`, `process_isolation
 **Acceptance:** `probe_plugin(WaveShell)` returns `Crashed` (not a host crash);
 `probe_plugin(Dexed)` returns `Ok`.
 
-### B4: Main-thread loading guidance
-Document (and optionally provide a helper that asserts) that plugins should be loaded on the
-host's main thread; relevant for editor GUIs. Files: `docs/explanation/`, a debug-assert in
-`PluginImpl::load`. Low effort; mostly docs.
+### B4: Main-thread loading guidance — ✅ DONE
+Added `docs/explanation/threading.md` (which thread each call belongs on, why) and linked it
+from `docs/README.md`. No debug-assert: a portable main-thread check doesn't exist in safe
+Rust, so a wrong guess would mislead — the contract is documented instead.
 
 ---
 
@@ -162,11 +164,15 @@ GitHub Actions at `.github/workflows/ci.yml`: matrix of macOS + Linux (reuse the
 **Acceptance:** green CI on a push; the matrix actually compiles Windows + Linux (catches
 the next c_char-style portability bug automatically).
 
-### C2: Warnings to zero
-Migrate `window.rs` from deprecated `cocoa`/`objc` to `objc2`/`objc2-app-kit` (clears ~50
-warnings + the `cargo-clippy` cfg noise), clear the remaining `missing_docs`, then add
-`#![deny(missing_docs)]` and `-D warnings` in CI (flip `just lint`). Files: `window.rs`,
-`lib.rs`, CI. This is GUI code — verify the macOS editor window still opens interactively.
+### C2: Warnings to zero — ✅ DONE (runtime GUI check pending)
+`window.rs` migrated to `objc2` + `objc2-app-kit` + `objc2-foundation` (typed AppKit APIs);
+`cocoa`/`objc` removed from the dependency graph. Both the module-level `#![allow(deprecated)]`
+and the crate-root `#![allow(unexpected_cfgs)]` (which only existed for the old `msg_send!`)
+are gone. `-D warnings` was already enforced in `just lint` + CI. Files: `window.rs`,
+`lib.rs`, `Cargo.toml`.
+**Verified:** clean build + clippy `-D warnings` (no allows), workspace tests green, Linux
+build via Docker green (objc2 deps are macOS-only). **Pending:** opening a real editor window
+is GUI runtime behavior — verify interactively (`cargo run --example plugin_gui`).
 
 ### C3: Publish readiness
 `Cargo.toml` metadata audit (keywords/categories present; `readme`, `repository`,
@@ -185,12 +191,15 @@ Lightweight; a doc + small edits.
 ## Track D — Remaining functional gaps (from `docs/internal/roadmap.md`)
 
 Sequenced after the above; each is its own plan when picked up:
-- **Plugin state save/restore** (`getState`/`setState`) — needed for presets; reference
-  Jurek's working tool. Likely a quick, high-value add.
-- **Editor embedding into egui** (the `egui-widgets` feature) + `IPlugFrame` resize.
-- **GUI across the process boundary** (isolated editor windows).
-- **MIDI output capture in isolated mode** (in-process already done).
-- **Parameter automation execution** (`ParameterAutomation` is computed but not applied).
+- **Plugin state save/restore** (`getState`/`setState`) — ✅ DONE. `Plugin::save_state`/
+  `load_state` via a host-side `MemoryStream` (`IBStream`); bridged across process isolation
+  (`SaveState`/`LoadState` IPC). Verified by exact byte round-trip + value restore against
+  Dexed, in-process and isolated. Single- vs separate-component handled (`setComponentState`
+  only for separate controllers).
+- **Editor embedding into egui** (the `egui-widgets` feature) + `IPlugFrame` resize. *(open)*
+- **GUI across the process boundary** (isolated editor windows). *(open)*
+- **MIDI output capture in isolated mode** (in-process already done). *(open)*
+- **Parameter automation execution** (`ParameterAutomation` is computed but not applied). *(open)*
 
 ---
 

@@ -16,8 +16,12 @@ First usable release of the safe VST3 hosting library, extracted from the inspec
   a plugin while it plays.
 - Parameters (`get`/`set`/`format_parameter`), MIDI in (`send_midi_*`, pitch bend,
   aftertouch) and MIDI out capture (`take_output_midi`).
+- Plugin state save/restore (`Plugin::save_state` / `load_state`) via the plugin's own
+  `getState`/`setState`; works in-process and across process isolation.
 - Process isolation: opt-in out-of-process hosting with timeout/crash detection,
-  `auto_isolate_problematic`, and `probe_plugin` to validate plugins safely.
+  `auto_isolate_problematic`, and `probe_plugin` to validate plugins safely. Crashes now
+  surface as a typed `Error::PluginCrashed`; `Plugin::recover()` respawns and reloads, and
+  `Plugin::isolation_pid()` exposes the helper process id.
 - Complete host context (`IHostApplication` + `IPlugInterfaceSupport`, vending
   `IMessage`/`IAttributeList`) — fixes crashes in plugins that query the host (e.g. u-he).
 - Native plugin editor windows (macOS/Windows; Linux via X11/XCB).
