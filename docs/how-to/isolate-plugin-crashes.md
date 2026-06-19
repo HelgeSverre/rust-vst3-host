@@ -41,6 +41,44 @@ isolation-using app, ship the helper alongside it.
 - **Hang protection** — calls wait with a timeout (5s by default); a hung plugin yields a
   timeout error and the helper is killed, instead of blocking your thread forever.
 
+## Validate a plugin before loading it
+
+To check whether a plugin loads safely — the "validate plugins" step a scanner does —
+probe it. The probe loads it in the isolated helper, so a crash is contained and reported,
+never taking down your process:
+
+```rust
+use vst3_host::{Vst3Host, ProbeResult};
+
+# fn main() -> vst3_host::Result<()> {
+let host = Vst3Host::new()?;
+match host.probe_plugin("/path/to/plugin.vst3") {
+    ProbeResult::Ok => println!("safe to load"),
+    ProbeResult::Crashed => println!("crashes on load — blacklist it"),
+    ProbeResult::TimedOut => println!("hung on load"),
+    ProbeResult::Failed(msg) => println!("failed: {msg}"),
+}
+# Ok(())
+# }
+```
+
+## Auto-isolate crash-prone plugins
+
+Some plugins (e.g. Waves/WaveShell) crash from their *own* packaging and can't be loaded
+safely in-process. Let the host route those to isolation automatically, so a crash becomes
+a returned `Err` instead of a dead host:
+
+```rust
+# use vst3_host::Vst3Host;
+# fn main() -> vst3_host::Result<()> {
+let mut host = Vst3Host::builder()
+    .auto_isolate_problematic(true)   // Waves etc. load isolated; others stay in-process
+    .build()?;
+// host.load_plugin("…WaveShell….vst3") now returns Err if it crashes — the host survives.
+# Ok(())
+# }
+```
+
 ## Current limits
 
 - **Not the runtime default.** The default load path is in-process. Isolation is opt-in

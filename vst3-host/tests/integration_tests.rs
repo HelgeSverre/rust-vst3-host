@@ -432,3 +432,50 @@ fn test_specific_free_plugins() {
         }
     }
 }
+
+/// Track B: probing + auto-isolation handle crash-prone plugins without killing the host.
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "requires the helper binary and installed plugins"]
+fn test_probe_and_auto_isolate() {
+    use vst3_host::{ProbeResult, Vst3Host};
+
+    let host = Vst3Host::new().expect("host");
+
+    // A plugin that loads cleanly probes Ok.
+    let dexed = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if std::path::Path::new(dexed).exists() {
+        assert_eq!(
+            host.probe_plugin(dexed),
+            ProbeResult::Ok,
+            "Dexed should probe Ok"
+        );
+    }
+
+    // A bogus path fails cleanly (not a crash).
+    assert!(matches!(
+        host.probe_plugin("/no/such/plugin.vst3"),
+        ProbeResult::Failed(_)
+    ));
+
+    // WaveShell (if installed) crashes the isolated helper — contained as Crashed — and an
+    // auto-isolating host returns an Err instead of segfaulting this process.
+    let waveshell = "/Library/Audio/Plug-Ins/VST3/WaveShell1-VST3 14.12.vst3";
+    if std::path::Path::new(waveshell).exists() {
+        assert_eq!(
+            host.probe_plugin(waveshell),
+            ProbeResult::Crashed,
+            "WaveShell should probe as Crashed"
+        );
+        let mut h = Vst3Host::builder()
+            .auto_isolate_problematic(true)
+            .build()
+            .unwrap();
+        assert!(
+            h.load_plugin(waveshell).is_err(),
+            "auto-isolated WaveShell should error, not crash the host"
+        );
+        // Reaching here means the host process survived WaveShell's crash.
+        println!("WaveShell contained: host survived");
+    }
+}

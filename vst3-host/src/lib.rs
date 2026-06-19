@@ -75,7 +75,7 @@ pub use discovery::{
     get_detailed_plugin_info, BusInfo, BusLayout, ClassInfo, DetailedPluginInfo, FactoryInfo,
 };
 pub use error::{Error, Result};
-pub use host::{DiscoveryProgress, Vst3Host, Vst3HostBuilder};
+pub use host::{DiscoveryProgress, ProbeResult, Vst3Host, Vst3HostBuilder};
 pub use midi::{cc, MidiChannel, MidiEvent};
 pub use parameters::{Parameter, ParameterAutomation, ParameterChange};
 pub use playback::{play_with_backend, AudioHandle};
