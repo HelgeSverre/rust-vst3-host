@@ -1,48 +1,73 @@
-# VST3 Host in Rust
+# vst3-host
 
-Experimental VST3 plugin host written in Rust. Uses unsafe code and raw pointers for direct VST3 SDK integration.
+A safe Rust library for hosting VST3 plugins: discover them, load them, play audio
+through them, control parameters, send MIDI, and isolate crashes — without writing any
+`unsafe` code yourself.
 
-## What works
+```rust
+use vst3_host::{simple, midi::MidiChannel};
 
-- Audio streaming with VST3 plugins
-- MIDI input/output
-- Plugin GUIs (macOS/Windows)
-- Parameter control
-- Plugin discovery
+# fn main() -> vst3_host::Result<()> {
+// Load a synth and start it playing through the default audio device.
+let plugin = simple::load_plugin("/Library/Audio/Plug-Ins/VST3/Dexed.vst3")?;
+let audio = simple::play(plugin)?;
 
-## Building
+// Play middle C for one second.
+audio.lock().send_midi_note(60, 100, MidiChannel::Ch1)?;
+std::thread::sleep(std::time::Duration::from_secs(1));
+# Ok(())
+# }
+```
+
+## What it does
+
+- **Discovery** — find installed VST3 plugins and read their metadata.
+- **Audio** — a bundled CPAL backend drives a plugin to your speakers; or plug in your own backend.
+- **Parameters** — list, read, set, and format parameters as the plugin itself displays them.
+- **MIDI** — notes, control changes, pitch bend, and aftertouch.
+- **Crash isolation** — run a plugin in a separate process so a crash can't take down your app.
+- **Native plugin editors** — open a plugin's own GUI in a window (macOS/Windows).
+
+All VST3 COM interaction is contained behind a safe API. The public surface has no `unsafe`.
+
+## Status
+
+The core is working and exercised against real plugins on macOS. Some things are still in
+progress — see [Platform support](docs/reference/platform-support.md) and the honest caveats
+in each guide. Notably: the audio path is correctness-first (not yet tuned for the lowest
+latency), process isolation is opt-in, and plugin-editor embedding into egui is planned.
+
+## Install
+
+```toml
+[dependencies]
+vst3-host = "0.1"
+```
+
+Building from source requires the VST3 SDK (included as a submodule):
 
 ```bash
-git clone https://github.com/HelgeSverre/rust-vst3-host.git
+git clone --recursive https://github.com/HelgeSverre/rust-vst3-host.git
 cd rust-vst3-host
-git submodule update --init --recursive
 cargo build --release
-cargo run
 ```
 
-## Implementation Notes
+## Documentation
 
-This host prioritizes working code over safe code:
+Start with the [documentation index](docs/README.md). It's organized by what you're doing:
 
-- Extensive `unsafe` blocks for VST3 interop
-- Raw pointer manipulation for audio buffers  
-- Direct COM interface implementation
-- Manual memory management
+- **[Getting started](docs/tutorials/getting-started.md)** — load and hear a plugin, step by step.
+- **[How-to guides](docs/how-to/)** — focused recipes: discover, play, parameters, MIDI, isolation.
+- **[Reference](docs/reference/)** — feature flags, platform support, API map. Full API on [docs.rs](https://docs.rs/vst3-host).
+- **[Explanation](docs/explanation/)** — how the library is built and why.
 
-The VST3 SDK is inherently unsafe, so safe abstractions add complexity without much benefit for this experimental implementation.
+## Workspace layout
 
-## Architecture
+- `vst3-host/` — the library.
+- `vst3-inspector/` — a GUI app (egui) built entirely on the library's public API; a worked example of consuming it.
 
-```
-[UI Thread] ←→ [Shared State] ←→ [Audio Thread]
-     ↓              ↓              ↓
-  Parameters     MIDI Queue    VST3 Process
-```
+Common tasks are wrapped in a [`justfile`](justfile): `just build`, `just test`, `just play`, `just lint`.
 
-- UI thread handles GUI and plugin loading
-- Audio thread processes VST3 in real-time
-- Thread-safe communication via `Arc<Mutex<AudioProcessingState>>`
+## License
 
-## Warning
-
-This is experimental code for learning purposes. Extensive use of unsafe Rust, minimal error handling, and not optimized for production use.
+MIT OR Apache-2.0
