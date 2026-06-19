@@ -108,6 +108,7 @@ struct FactoryInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // UI model: not every field is shown yet
 struct ClassInfo {
     name: String,
     category: String,
@@ -293,6 +294,7 @@ struct MidiEvent {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // full MIDI taxonomy; not every variant is produced yet
 enum MidiEventType {
     NoteOn {
         pitch: i16,
@@ -478,13 +480,13 @@ impl eframe::App for VST3Inspector {
             ui.horizontal(|ui| {
                 // Plugin info - left side
                 ui.vertical(|ui| {
-                    ui.heading(format!(
-                        "{}",
+                    ui.heading(
                         self.plugin_info
                             .as_ref()
                             .and_then(|p| p.classes.first())
                             .map_or("VST3 Plugin Inspector", |c| &c.name)
-                    ));
+                            .to_string(),
+                    );
                     ui.label(format!(
                         "by {}",
                         self.plugin_info
@@ -502,7 +504,7 @@ impl eframe::App for VST3Inspector {
                 if self.current_tab != Tab::Plugins {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Large GUI button
-                        if self.plugin_info.as_ref().map_or(false, |p| p.has_gui) {
+                        if self.plugin_info.as_ref().is_some_and(|p| p.has_gui) {
                             if self.gui_attached {
                                 if ui
                                     .add_sized([120.0, 40.0], egui::Button::new("Close GUI"))
@@ -850,7 +852,7 @@ impl VST3Inspector {
 
                                         if !info.audio_inputs.is_empty() {
                                             ui.strong("🎤 Audio Inputs");
-                                            for (_i, bus) in info.audio_inputs.iter().enumerate() {
+                                            for bus in info.audio_inputs.iter() {
                                                 ui.label(format!(
                                                     "  {} - {} channels",
                                                     bus.name, bus.channel_count
@@ -861,7 +863,7 @@ impl VST3Inspector {
 
                                         if !info.audio_outputs.is_empty() {
                                             ui.strong("🔊 Audio Outputs");
-                                            for (_i, bus) in info.audio_outputs.iter().enumerate() {
+                                            for bus in info.audio_outputs.iter() {
                                                 ui.label(format!(
                                                     "  {} - {} channels",
                                                     bus.name, bus.channel_count
@@ -1058,8 +1060,7 @@ impl VST3Inspector {
 
                     // Pagination and table
                     if !filtered_params.is_empty() {
-                        let total_pages =
-                            (filtered_params.len() + self.items_per_page - 1) / self.items_per_page;
+                        let total_pages = filtered_params.len().div_ceil(self.items_per_page);
                         let start_idx = self.current_page * self.items_per_page;
                         let end_idx = (start_idx + self.items_per_page).min(filtered_params.len());
 
@@ -1587,14 +1588,14 @@ impl VST3Inspector {
 
                             // VU meter bar with peak hold indicator
                             let bar_value = if db_left.is_finite() {
-                                ((db_left - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                                ((db_left - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
 
                             // Calculate peak hold position
                             let hold_value = if db_hold_left.is_finite() {
-                                ((db_hold_left - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                                ((db_hold_left - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
@@ -1639,14 +1640,14 @@ impl VST3Inspector {
 
                             // VU meter bar with peak hold indicator
                             let bar_value = if db_right.is_finite() {
-                                ((db_right - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                                ((db_right - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
 
                             // Calculate peak hold position
                             let hold_value = if db_hold_right.is_finite() {
-                                ((db_hold_right - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                                ((db_hold_right - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };

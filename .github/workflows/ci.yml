@@ -23,7 +23,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-features
+      - run: cargo clippy --workspace --all-features -- -D warnings
       - run: cargo test --workspace --all-features
       - run: cargo build --workspace --all-features --examples
 
@@ -44,7 +44,7 @@ jobs:
           sudo apt-get install -y libclang-dev clang libxcb1-dev libxcb-util-dev libasound2-dev pkg-config
       - run: cargo build -p vst3-host --all-features
       - run: cargo test -p vst3-host --all-features
-      - run: cargo clippy -p vst3-host --all-features
+      - run: cargo clippy -p vst3-host --all-features -- -D warnings
 
   # The published crate must at least build on Windows (bindgen needs LLVM).
   windows:
