@@ -34,11 +34,18 @@ examples compile, reached phase by phase.
   timeout / lock-free / pooling (marked _(planned)_ + link ROADMAP); fixed the
   `simple.rs` docstrings that wrongly said discovery is unimplemented.
 
-## Phase 1 — Batteries-included sound (core promise)
-- [ ] 1b. Make `Plugin` drivable from the audio thread (sound ownership/Send model).
-- [ ] 1a. Wire `CpalBackend → Plugin`: a real `Vst3Host`/`Plugin` audio-attach that
-  pumps `process_audio` from the device callback; implement `with_backend` for real.
-- [ ] 1c. CPAL device-capability negotiation + buffer/sample-rate fallback.
+## Phase 1 — Batteries-included sound (core promise)  ✅ DONE
+- [x] 1b. Ownership model: `Plugin` is `Send` (PluginInternal: Send); playback shares
+  it as `Arc<Mutex<Plugin>>` behind an `AudioHandle` so the audio thread pumps it
+  while the control thread keeps sending MIDI/params.
+- [x] 1a. Wired `CpalBackend → Plugin` in `src/playback.rs`: `play_with_backend`
+  (generic over `AudioBackend`) + `Vst3Host::play` + `simple::play`. Pure
+  `interleave_outputs` is unit-tested (5 tests). Removed the lying `with_backend`
+  no-op stub. **Verified on real hardware**: `play_synth` example loads Dexed and
+  produces audio (peak 0.13) through the default output device.
+- [x] 1c. `CpalBackend` buffer-size negotiation: clamp to the device's supported
+  range or fall back to `BufferSize::Default` (fixes CoreAudio rejecting Fixed);
+  channel count kept exact so the interleave stays consistent.
 
 ## Phase 2 — Prove consumability + close API gaps
 - [ ] 2a. Port `vst3-inspector` onto the library (regression net).

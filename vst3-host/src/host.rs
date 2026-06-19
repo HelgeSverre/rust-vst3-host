@@ -373,17 +373,36 @@ pub enum DiscoveryProgress {
 
 #[cfg(feature = "cpal-backend")]
 impl Vst3Host {
-    /// Create a host with CPAL audio backend
-    pub fn with_cpal_backend() -> Result<Self> {
-        use crate::backends::CpalBackend;
-
-        let backend = CpalBackend::new()?;
-        Self::with_backend(backend)
-    }
-
-    /// Create a host with a custom audio backend
-    pub fn with_backend<B: crate::audio::AudioBackend>(_backend: B) -> Result<Self> {
-        // This will be implemented when we create the AudioBackend trait
-        Self::new()
+    /// Load a plugin and immediately start playing it through the default audio
+    /// output device, using the host's configured sample rate and block size.
+    ///
+    /// This is the "batteries-included" path: it wires a [`CpalBackend`] to the
+    /// plugin and pumps audio for you. The returned [`AudioHandle`] keeps the stream
+    /// alive — drop it to stop — and lets you keep sending MIDI / changing parameters
+    /// while it plays:
+    ///
+    /// ```no_run
+    /// # use vst3_host::Vst3Host;
+    /// # use vst3_host::midi::MidiChannel;
+    /// # fn main() -> vst3_host::Result<()> {
+    /// let mut host = Vst3Host::new()?;
+    /// let plugin = host.load_plugin("/path/to/synth.vst3")?;
+    /// let audio = host.play(plugin)?;
+    /// audio.lock().send_midi_note(60, 100, MidiChannel::Ch1)?;
+    /// std::thread::sleep(std::time::Duration::from_secs(1));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`CpalBackend`]: crate::backends::CpalBackend
+    /// [`AudioHandle`]: crate::AudioHandle
+    pub fn play(&self, plugin: Plugin) -> Result<crate::AudioHandle> {
+        let backend = crate::backends::CpalBackend::new()?;
+        let config = crate::audio::AudioConfig {
+            output_channels: 2,
+            input_channels: 0,
+            ..self.config
+        };
+        crate::playback::play_with_backend(&backend, plugin, config)
     }
 }

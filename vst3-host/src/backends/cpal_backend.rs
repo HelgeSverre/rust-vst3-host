@@ -6,9 +6,42 @@ use crate::{
 };
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    BufferSize, Device, SampleRate, Stream, StreamConfig,
+    BufferSize, Device, SampleRate, Stream, StreamConfig, SupportedBufferSize,
 };
 use std::sync::Arc;
+
+/// Pick a buffer size the device will actually accept for the requested channel
+/// count and sample rate.
+///
+/// Many devices (notably CoreAudio on macOS) reject `BufferSize::Fixed` outright, so
+/// we only request a fixed size when the device advertises a supported range — and
+/// then clamp the requested `block_size` into it. Otherwise we fall back to
+/// `BufferSize::Default` and let the device choose. The channel count and sample rate
+/// are NOT changed here: the playback bridge interleaves based on the requested
+/// channel count, so silently changing it would garble the output.
+fn resolve_output_buffer_size(device: &Device, config: &AudioConfig) -> BufferSize {
+    let want_sr = SampleRate(config.sample_rate as u32);
+    let want_ch = config.output_channels as u16;
+
+    if let Ok(ranges) = device.supported_output_configs() {
+        for range in ranges {
+            if range.channels() != want_ch {
+                continue;
+            }
+            if want_sr < range.min_sample_rate() || want_sr > range.max_sample_rate() {
+                continue;
+            }
+            return match range.buffer_size() {
+                SupportedBufferSize::Range { min, max } => {
+                    BufferSize::Fixed((config.block_size as u32).clamp(*min, *max))
+                }
+                SupportedBufferSize::Unknown => BufferSize::Default,
+            };
+        }
+    }
+
+    BufferSize::Default
+}
 
 /// CPAL stream wrapper
 pub struct CpalStream {
@@ -136,7 +169,7 @@ impl AudioBackend for CpalBackend {
         let stream_config = StreamConfig {
             channels: config.output_channels as u16,
             sample_rate: SampleRate(config.sample_rate as u32),
-            buffer_size: BufferSize::Fixed(config.block_size as u32),
+            buffer_size: resolve_output_buffer_size(device, &config),
         };
 
         let stream = device

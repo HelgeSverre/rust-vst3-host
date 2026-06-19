@@ -156,6 +156,35 @@ pub fn load_plugin_isolated<P: AsRef<Path>>(path: P) -> Result<Plugin> {
     host.load_plugin(path)
 }
 
+/// Load a plugin and immediately start playing it through the default audio device.
+///
+/// The quickest way to actually hear a synth: load, then `play`. The returned
+/// [`AudioHandle`](crate::AudioHandle) keeps audio running until dropped, and lets
+/// you control the plugin while it plays.
+///
+/// # Examples
+/// ```no_run
+/// use vst3_host::{simple, midi::MidiChannel};
+///
+/// # fn main() -> vst3_host::Result<()> {
+/// let plugin = simple::load_plugin("/path/to/synth.vst3")?;
+/// let audio = simple::play(plugin)?;
+/// audio.lock().send_midi_note(60, 100, MidiChannel::Ch1)?; // middle C
+/// std::thread::sleep(std::time::Duration::from_secs(2));
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "cpal-backend")]
+pub fn play(plugin: Plugin) -> Result<crate::AudioHandle> {
+    let backend = crate::backends::CpalBackend::new()?;
+    let config = crate::audio::AudioConfig {
+        output_channels: 2,
+        input_channels: 0,
+        ..Default::default()
+    };
+    crate::playback::play_with_backend(&backend, plugin, config)
+}
+
 /// Discover all VST3 plugins in the standard system locations.
 ///
 /// Scans the platform's standard VST3 directories and returns metadata for each

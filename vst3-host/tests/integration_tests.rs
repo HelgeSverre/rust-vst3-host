@@ -186,39 +186,43 @@ fn test_audio_processing() {
         .build()
         .expect("Failed to create host");
 
-    // TODO(Phase 1): once Vst3Host wires a CpalBackend into the plugin and drives
-    // `process_audio` from the device callback, load with the backend attached so the
-    // `on_audio_process` levels below actually fire. Until then, load plain and the
-    // level assertion stays best-effort (this test is #[ignore]'d).
-    let mut plugin = host
+    let plugin = host
         .load_plugin(&plugin_info.path)
         .expect("Failed to load plugin");
 
-    // Set up audio level monitoring
-    let levels_received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let levels_clone = levels_received.clone();
-    plugin.on_audio_process(move |levels| {
-        // Check if any channel has activity
-        for channel in &levels.channels {
-            if channel.peak > 0.0 || channel.rms > 0.0 {
-                levels_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-                break;
-            }
-        }
-    });
+    // Phase 1 capstone: the library wires a CpalBackend to the plugin and pumps
+    // `process_audio` from the device callback. `play` opens the default output
+    // device and starts streaming; the AudioHandle keeps it alive and lets us drive
+    // the plugin while it runs.
+    let audio = host.play(plugin).expect("Failed to start audio playback");
 
-    plugin
-        .start_processing()
-        .expect("Failed to start processing");
+    // Feed a note so an instrument actually produces output.
+    audio
+        .lock()
+        .send_midi_note(60, 110, MidiChannel::Ch1)
+        .expect("Failed to send MIDI note");
 
-    // Let it process for a bit
-    thread::sleep(Duration::from_secs(1));
+    // Let the audio thread pull a number of blocks.
+    thread::sleep(Duration::from_millis(500));
 
-    plugin.stop_processing().expect("Failed to stop processing");
+    // The plugin should have produced some non-silent output by now. We read the
+    // levels the bridge populated on the audio thread.
+    let levels = audio.lock().get_output_levels();
+    let any_activity = levels
+        .channels
+        .iter()
+        .any(|c| c.peak > 0.0 || c.rms > 0.0);
 
-    // Note: We can't really assert that audio was processed without
-    // generating test signals, which would require more setup
-    println!("Audio processing test completed");
+    audio
+        .lock()
+        .send_midi_note_off(60, MidiChannel::Ch1)
+        .expect("Failed to send note off");
+
+    audio.stop();
+
+    // Synth plugins should drive the meters; pure effects fed silence may not, so
+    // this is a soft check rather than a hard assert.
+    println!("Audio processing test completed (level activity: {})", any_activity);
 }
 
 #[test]

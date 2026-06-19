@@ -56,6 +56,7 @@ pub mod error;
 pub mod host;
 pub mod midi;
 pub mod parameters;
+pub mod playback;
 pub mod plugin;
 pub mod simple;
 pub mod window;
@@ -74,6 +75,7 @@ pub use error::{Error, Result};
 pub use host::{DiscoveryProgress, Vst3Host, Vst3HostBuilder};
 pub use midi::{cc, MidiChannel, MidiEvent};
 pub use parameters::{Parameter, ParameterAutomation, ParameterChange};
+pub use playback::{play_with_backend, AudioHandle};
 pub use plugin::{Plugin, PluginInfo, WindowHandle};
 pub use window::PluginWindow;
 
@@ -88,6 +90,7 @@ pub mod prelude {
         host::{DiscoveryProgress, Vst3Host, Vst3HostBuilder},
         midi::{cc, MidiChannel, MidiEvent},
         parameters::{Parameter, ParameterAutomation},
+        playback::{play_with_backend, AudioHandle},
         plugin::{Plugin, PluginInfo, WindowHandle},
         window::PluginWindow,
     };

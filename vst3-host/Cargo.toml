@@ -53,6 +53,10 @@ rfd = "0.15"
 eframe = "0.31"
 
 [[example]]
+name = "play_synth"
+required-features = ["cpal-backend"]
+
+[[example]]
 name = "plugin_scanner"
 
 [[example]]
