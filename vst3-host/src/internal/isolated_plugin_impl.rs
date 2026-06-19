@@ -216,6 +216,23 @@ impl PluginInternal for IsolatedPluginImpl {
         // Parameter changes not supported in process isolation mode
         Vec::new()
     }
+
+    fn save_state(&self) -> Result<Vec<u8>> {
+        match self.send_command(HostCommand::SaveState)? {
+            HostResponse::State { data } => Ok(data),
+            HostResponse::Error { message } => Err(Error::Other(format!("SaveState: {message}"))),
+            _ => Err(Error::Other("SaveState: unexpected response".to_string())),
+        }
+    }
+
+    fn load_state(&mut self, data: &[u8]) -> Result<()> {
+        self.expect_success(
+            HostCommand::LoadState {
+                data: data.to_vec(),
+            },
+            "LoadState",
+        )
+    }
 }
 
 // Ensure IsolatedPluginImpl is Send

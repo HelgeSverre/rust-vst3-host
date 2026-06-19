@@ -356,6 +356,45 @@ fn test_process_isolation() {
     println!("Isolated plugin produced audio (peak {max_peak:.4})");
 }
 
+/// Track D: plugin state save/restore survives the process-isolation boundary.
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the helper binary and the bundled test plugin"]
+fn test_isolation_state_roundtrip() {
+    let plugin_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(plugin_path).exists() {
+        println!("Test plugin not found at {plugin_path}, skipping");
+        return;
+    }
+
+    let mut host = Vst3Host::builder()
+        .with_process_isolation(true)
+        .build()
+        .expect("build isolated host");
+    let mut plugin = host.load_plugin(plugin_path).expect("load isolated");
+
+    let id = plugin.get_parameters().expect("params")[0].id;
+
+    // Snapshot a known value, move away, restore, confirm the value comes back — all
+    // across the IPC boundary.
+    plugin.set_parameter(id, 0.25).expect("set v1");
+    let snapshot = plugin.save_state().expect("save_state over IPC");
+    assert!(
+        !snapshot.is_empty(),
+        "isolated save_state returned no bytes"
+    );
+
+    plugin.set_parameter(id, 0.75).expect("set v2");
+    plugin.load_state(&snapshot).expect("load_state over IPC");
+
+    let restored = plugin.get_parameter(id).expect("get after restore");
+    assert!(
+        (restored - 0.25).abs() < 0.05,
+        "isolated state did not restore: {restored} (expected ~0.25)"
+    );
+    println!("Isolated state round-trip OK ({} bytes)", snapshot.len());
+}
+
 /// A dead/crashed helper must surface as an error quickly, never a hang.
 #[cfg(feature = "process-isolation")]
 #[test]

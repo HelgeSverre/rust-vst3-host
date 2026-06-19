@@ -72,6 +72,13 @@ pub enum HostCommand {
         /// Number of frames in this block.
         frames: u32,
     },
+    /// Serialize the plugin's current state to an opaque byte blob.
+    SaveState,
+    /// Restore the plugin's state from a blob previously returned by `SaveState`.
+    LoadState {
+        /// The opaque state bytes.
+        data: Vec<u8>,
+    },
     /// Shutdown the helper process
     Shutdown,
 }
@@ -113,6 +120,11 @@ pub enum HostResponse {
     Parameters {
         /// All parameters reported by the plugin.
         params: Vec<crate::parameters::Parameter>,
+    },
+    /// Opaque plugin state bytes (reply to `SaveState`).
+    State {
+        /// The serialized state.
+        data: Vec<u8>,
     },
     /// Plugin information
     PluginInfo {

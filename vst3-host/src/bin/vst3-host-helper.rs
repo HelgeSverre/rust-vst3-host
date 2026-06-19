@@ -189,6 +189,16 @@ fn handle(
                 }
             })
         }
+        HostCommand::SaveState => with_plugin(plugin, |p| match p.save_state() {
+            Ok(data) => HostResponse::State { data },
+            Err(e) => err("SaveState", e),
+        }),
+        HostCommand::LoadState { data } => with_plugin(plugin, |p| match p.load_state(&data) {
+            Ok(()) => HostResponse::Success {
+                message: "state restored".to_string(),
+            },
+            Err(e) => err("LoadState", e),
+        }),
         HostCommand::CreateGui | HostCommand::CloseGui => HostResponse::Error {
             message: "Plugin GUI is not supported across process isolation yet".to_string(),
         },
