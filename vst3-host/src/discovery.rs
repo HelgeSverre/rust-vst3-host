@@ -4,6 +4,76 @@ use crate::{error::Result, plugin::PluginInfo};
 use std::path::{Path, PathBuf};
 use std::ptr;
 
+/// Factory-level metadata (the plugin vendor's identity).
+#[derive(Debug, Clone, Default)]
+pub struct FactoryInfo {
+    /// Vendor / manufacturer name.
+    pub vendor: String,
+    /// Vendor URL.
+    pub url: String,
+    /// Vendor contact email.
+    pub email: String,
+    /// Raw factory flags.
+    pub flags: i32,
+}
+
+/// One class exported by a plugin's factory.
+#[derive(Debug, Clone, Default)]
+pub struct ClassInfo {
+    /// Class display name.
+    pub name: String,
+    /// Class category (e.g. "Audio Module Class").
+    pub category: String,
+    /// Class id, hex-encoded.
+    pub class_id: String,
+    /// Instantiation cardinality.
+    pub cardinality: i32,
+    /// Version string (if available).
+    pub version: String,
+}
+
+/// One audio or event bus.
+#[derive(Debug, Clone, Default)]
+pub struct BusInfo {
+    /// Bus display name.
+    pub name: String,
+    /// Bus type (Main = 0, Aux = 1).
+    pub bus_type: i32,
+    /// Raw bus flags.
+    pub flags: i32,
+    /// Number of channels on this bus.
+    pub channel_count: i32,
+}
+
+/// The plugin's full bus layout.
+#[derive(Debug, Clone, Default)]
+pub struct BusLayout {
+    /// Audio input buses.
+    pub audio_inputs: Vec<BusInfo>,
+    /// Audio output buses.
+    pub audio_outputs: Vec<BusInfo>,
+    /// Event (MIDI) input buses.
+    pub event_inputs: Vec<BusInfo>,
+    /// Event (MIDI) output buses.
+    pub event_outputs: Vec<BusInfo>,
+}
+
+/// A deep introspection report for a VST3 plugin — factory, classes, and bus layout.
+/// This is the static metadata a plugin *inspector* UI needs, beyond the lightweight
+/// [`PluginInfo`]. For the parameter list, load the plugin and call
+/// [`crate::Plugin::get_parameters`] (which runs the full controller logic).
+#[derive(Debug, Clone)]
+pub struct DetailedPluginInfo {
+    /// The basic metadata (also part of this report for convenience).
+    pub info: PluginInfo,
+    /// Factory / vendor identity.
+    pub factory: FactoryInfo,
+    /// All classes exported by the factory.
+    pub classes: Vec<ClassInfo>,
+    /// Full audio + event bus layout.
+    pub buses: BusLayout,
+}
+
 /// Scan standard VST3 directories for plugins
 pub fn scan_standard_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -214,6 +284,108 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
             has_midi_input,
             has_midi_output: false, // Would need to check event output buses
             has_gui,
+        })
+    }
+}
+
+/// Deep-introspect a VST3 plugin: factory identity, exported classes, and bus layout.
+///
+/// Heavier than [`get_plugin_info`] (it enumerates every class and bus) but still does
+/// not require driving audio. For the parameter list, load the plugin and call
+/// [`crate::Plugin::get_parameters`].
+pub fn get_detailed_plugin_info(path: &Path) -> Result<DetailedPluginInfo> {
+    use vst3::Steinberg::Vst::BusDirections_::*;
+    use vst3::Steinberg::Vst::MediaTypes_::*;
+    use vst3::Steinberg::Vst::BusInfo as VstBusInfo;
+    use vst3::{ComPtr, Interface, Steinberg::Vst::*, Steinberg::*};
+
+    // Reuse the lightweight pass for the basic info.
+    let info = get_plugin_info(path)?;
+
+    unsafe {
+        let module = crate::internal::module_loader::load_module(path)?;
+        let factory_ptr = module.get_factory()?;
+        let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or_else(|| {
+            crate::Error::PluginLoadFailed("Failed to create factory ComPtr".to_string())
+        })?;
+
+        // Factory identity.
+        let mut fi: PFactoryInfo = std::mem::zeroed();
+        factory.getFactoryInfo(&mut fi);
+        let factory_info = FactoryInfo {
+            vendor: crate::internal::utils::c_str_to_string(&fi.vendor),
+            url: crate::internal::utils::c_str_to_string(&fi.url),
+            email: crate::internal::utils::c_str_to_string(&fi.email),
+            flags: fi.flags,
+        };
+
+        // Exported classes + locate the audio component class id.
+        let num_classes = factory.countClasses();
+        let mut classes = Vec::new();
+        let mut audio_cid: Option<[i8; 16]> = None;
+        for i in 0..num_classes {
+            let mut ci: PClassInfo = std::mem::zeroed();
+            if factory.getClassInfo(i, &mut ci) == kResultOk {
+                let category = crate::internal::utils::c_str_to_string(&ci.category);
+                let class_id = ci.cid.iter().map(|b| format!("{:02X}", b)).collect::<String>();
+                if category.contains("Audio Module Class") && audio_cid.is_none() {
+                    audio_cid = Some(ci.cid);
+                }
+                classes.push(ClassInfo {
+                    name: crate::internal::utils::c_str_to_string(&ci.name),
+                    category,
+                    class_id,
+                    cardinality: ci.cardinality,
+                    version: String::new(), // not available in PClassInfo
+                });
+            }
+        }
+
+        // Bus layout from the audio component.
+        let mut buses = BusLayout::default();
+        if let Some(cid) = audio_cid {
+            let mut component_ptr: *mut IComponent = ptr::null_mut();
+            let result = factory.createInstance(
+                cid.as_ptr(),
+                IComponent::IID.as_ptr() as *const i8,
+                &mut component_ptr as *mut _ as *mut _,
+            );
+            if result == kResultOk && !component_ptr.is_null() {
+                if let Some(component) = ComPtr::<IComponent>::from_raw(component_ptr) {
+                    component.initialize(ptr::null_mut());
+
+                    let collect = |media: i32, dir: i32| -> Vec<crate::discovery::BusInfo> {
+                        let mut out = Vec::new();
+                        let count = component.getBusCount(media, dir);
+                        for i in 0..count {
+                            let mut bi: VstBusInfo = std::mem::zeroed();
+                            if component.getBusInfo(media, dir, i, &mut bi) == kResultOk {
+                                out.push(crate::discovery::BusInfo {
+                                    name: crate::internal::utils::vst_string_to_string(&bi.name),
+                                    bus_type: bi.busType,
+                                    flags: bi.flags as i32,
+                                    channel_count: bi.channelCount,
+                                });
+                            }
+                        }
+                        out
+                    };
+
+                    buses.audio_inputs = collect(kAudio as i32, kInput as i32);
+                    buses.audio_outputs = collect(kAudio as i32, kOutput as i32);
+                    buses.event_inputs = collect(kEvent as i32, kInput as i32);
+                    buses.event_outputs = collect(kEvent as i32, kOutput as i32);
+
+                    component.terminate();
+                }
+            }
+        }
+
+        Ok(DetailedPluginInfo {
+            info,
+            factory: factory_info,
+            classes,
+            buses,
         })
     }
 }

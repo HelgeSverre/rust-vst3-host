@@ -61,7 +61,7 @@ pub mod plugin;
 pub mod simple;
 pub mod window;
 
-pub(crate) mod discovery;
+pub mod discovery;
 
 #[cfg(feature = "cpal-backend")]
 pub mod backends;
@@ -71,6 +71,9 @@ pub mod process_isolation;
 mod internal;
 
 pub use audio::{AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStream, ChannelLevel};
+pub use discovery::{
+    get_detailed_plugin_info, BusInfo, BusLayout, ClassInfo, DetailedPluginInfo, FactoryInfo,
+};
 pub use error::{Error, Result};
 pub use host::{DiscoveryProgress, Vst3Host, Vst3HostBuilder};
 pub use midi::{cc, MidiChannel, MidiEvent};

@@ -183,3 +183,30 @@ fn test_scan_plugin_paths_is_lightweight_and_finds_bundles() {
         .iter()
         .all(|p| p.extension().map(|e| e == "vst3").unwrap_or(false)));
 }
+
+#[test]
+#[ignore = "requires the bundled Dexed test plugin"]
+fn test_detailed_plugin_info_dexed() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(path).exists() {
+        println!("Dexed not present, skipping");
+        return;
+    }
+    let d = vst3_host::get_detailed_plugin_info(std::path::Path::new(path))
+        .expect("detailed info");
+    println!(
+        "name={} vendor={} url={} classes={} audio_out_buses={} event_in_buses={}",
+        d.info.name,
+        d.factory.vendor,
+        d.factory.url,
+        d.classes.len(),
+        d.buses.audio_outputs.len(),
+        d.buses.event_inputs.len(),
+    );
+    assert!(!d.factory.vendor.is_empty(), "factory vendor should be populated");
+    assert!(!d.classes.is_empty(), "should enumerate at least one class");
+    assert!(
+        !d.buses.audio_outputs.is_empty(),
+        "Dexed (a synth) should have an audio output bus"
+    );
+}
