@@ -103,7 +103,13 @@ A multi-agent analysis produced an incremental, compile-at-each-step slice plan.
 - [x] Slice 0 (lib). `DetailedPluginInfo` + `get_detailed_plugin_info(path)` (factory,
   classes, bus layout) re-exported at the crate root; `discovery` is now a public module.
   Verified against Dexed. Unblocks the load migration.
-- [ ] Slices 2/3/5 (THE BIG COUPLED CHANGE — needs interactive verification). Replace the
+- [x] Verification harness (Option 2). `vst3-inspector --selftest [plugin]` (`just
+  selftest`) drives the library end-to-end from inside the inspector binary and exits
+  0/1 — makes the UI migration headlessly verifiable. **Already caught + fixed a real
+  crash**: `PluginImpl::process` panicked on any audio block smaller than the configured
+  size (routine with `BufferSize::Default`); now sets `numSamples` per call + uses
+  length-clamped copies. Affected all playback, not just the inspector.
+- [ ] Slices 2/3/5 (THE BIG COUPLED CHANGE — now harness-verifiable). Replace the
   inspector's raw COM/audio state with `vst3_host::Plugin` + `AudioHandle`. SIZED: **73
   `self.{component,controller,processor,plugin_library,host_process_data,
   shared_audio_state,plugin_view,plugin_host_process}` references** across load, the
