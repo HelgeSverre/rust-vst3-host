@@ -77,6 +77,23 @@ fn main() -> vst3_host::Result<()> {
         audio.lock().send_midi_note_off(note, MidiChannel::Ch1)?;
     }
 
+    // Exercise the full MIDI event surface (held note + expression).
+    use vst3_host::MidiEvent;
+    audio.lock().send_midi_note(64, 100, MidiChannel::Ch1)?;
+    let events = [
+        ("PitchBend", MidiEvent::PitchBend { channel: MidiChannel::Ch1, value: 10000 }),
+        ("ChannelAftertouch", MidiEvent::ChannelAftertouch { channel: MidiChannel::Ch1, pressure: 80 }),
+        ("PolyAftertouch", MidiEvent::PolyAftertouch { channel: MidiChannel::Ch1, note: 64, pressure: 80 }),
+        ("ProgramChange", MidiEvent::ProgramChange { channel: MidiChannel::Ch1, program: 1 }),
+    ];
+    for (name, ev) in events {
+        match audio.lock().send_midi_event(ev) {
+            Ok(()) => println!("  MIDI {name:<18} accepted"),
+            Err(e) => println!("  MIDI {name:<18} -> {e}"),
+        }
+    }
+    audio.lock().send_midi_note_off(64, MidiChannel::Ch1)?;
+
     println!("Done. Max output peak while playing: {max_peak:.4}");
     if max_peak > 0.0 {
         println!("✅ Plugin produced audio through the CPAL backend.");

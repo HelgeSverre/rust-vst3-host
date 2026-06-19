@@ -722,10 +722,45 @@ impl PluginInternal for PluginImpl {
                     // In the future, could use PolyPressureEvent for some CCs
                     return self.send_legacy_midi_cc(channel, controller, value);
                 }
-                _ => {
-                    // Other events not yet implemented
+                MidiEvent::PitchBend { channel, value } => {
+                    // 14-bit pitch bend (0..=16383) carried as two MIDI data bytes via
+                    // the legacy controller channel kPitchBend (129): value = LSB, value2 = MSB.
+                    vst_event.r#type = kLegacyMIDICCOutEvent as u16;
+                    vst_event.__field0.midiCCOut.controlNumber =
+                        ControllerNumbers_::kPitchBend as u8;
+                    vst_event.__field0.midiCCOut.channel = channel.as_index() as i8;
+                    vst_event.__field0.midiCCOut.value = (value & 0x7F) as i8;
+                    vst_event.__field0.midiCCOut.value2 = ((value >> 7) & 0x7F) as i8;
+                }
+                MidiEvent::ChannelAftertouch { channel, pressure } => {
+                    // Channel pressure via legacy controller channel kAfterTouch (128).
+                    vst_event.r#type = kLegacyMIDICCOutEvent as u16;
+                    vst_event.__field0.midiCCOut.controlNumber =
+                        ControllerNumbers_::kAfterTouch as u8;
+                    vst_event.__field0.midiCCOut.channel = channel.as_index() as i8;
+                    vst_event.__field0.midiCCOut.value = (pressure & 0x7F) as i8;
+                    vst_event.__field0.midiCCOut.value2 = 0;
+                }
+                MidiEvent::PolyAftertouch {
+                    channel,
+                    note,
+                    pressure,
+                } => {
+                    // Per-note pressure maps to a first-class VST3 poly-pressure event.
+                    vst_event.r#type = kPolyPressureEvent as u16;
+                    vst_event.__field0.polyPressure.channel = channel.as_index() as i16;
+                    vst_event.__field0.polyPressure.pitch = note as i16;
+                    vst_event.__field0.polyPressure.pressure = pressure as f32 / 127.0;
+                    vst_event.__field0.polyPressure.noteId = -1;
+                }
+                MidiEvent::ProgramChange { .. } => {
+                    // VST3 has no MIDI program-change event; programs are switched via
+                    // IUnitInfo program-list parameters, which requires per-plugin unit
+                    // handling not yet implemented.
                     return Err(Error::MidiError(
-                        "MIDI event type not yet implemented".to_string(),
+                        "ProgramChange is not supported yet (VST3 routes programs through \
+                         IUnitInfo program lists, not MIDI events)"
+                            .to_string(),
                     ));
                 }
             }

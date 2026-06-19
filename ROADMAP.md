@@ -55,8 +55,11 @@ examples compile, reached phase by phase.
   the controller's `getParamStringByValue` (verified against Dexed — e.g.
   `MonoMode = "POLY"`). Documented `Parameter` min/max as normalized and
   `format_value` as an approximation.
-- [x] 2e (partial). `get_output_levels` recovers a poisoned lock instead of panicking.
-  Remaining: implement ProgramChange/PitchBend/Aftertouch MIDI events.
+- [x] 2e. `get_output_levels` recovers a poisoned lock instead of panicking. Implemented
+  PitchBend + ChannelAftertouch (legacy controller channels 129/128), PolyAftertouch
+  (first-class `kPolyPressureEvent`) — all verified accepted by Dexed. ProgramChange
+  returns an honest "needs IUnitInfo program lists" error (deferred — not a MIDI event
+  in VST3).
 
 ## Phase 3 — Make process isolation real (safety pillar)
 - [ ] 3a. Extend IPC protocol with control verbs (share the enum from the lib).
