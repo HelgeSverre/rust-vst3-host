@@ -287,8 +287,9 @@ impl PluginHostProcess {
         }
 
         match self.responses.recv_timeout(self.timeout) {
-            Ok(line) => serde_json::from_str(&line)
-                .map_err(|e| format!("Failed to parse response: {}", e)),
+            Ok(line) => {
+                serde_json::from_str(&line).map_err(|e| format!("Failed to parse response: {}", e))
+            }
             Err(RecvTimeoutError::Timeout) => {
                 // The plugin is hung. Kill the child so it can't wedge us further.
                 self.dead = true;
@@ -342,9 +343,10 @@ impl PluginHostProcess {
         // Best-effort Shutdown command (no response expected — the helper just exits).
         // We do NOT use send_command here: it waits for a reply, and Shutdown has none.
         if !self.dead {
-            if let (Some(stdin), Ok(json)) =
-                (self.stdin.as_mut(), serde_json::to_string(&HostCommand::Shutdown))
-            {
+            if let (Some(stdin), Ok(json)) = (
+                self.stdin.as_mut(),
+                serde_json::to_string(&HostCommand::Shutdown),
+            ) {
                 let _ = writeln!(stdin, "{}", json);
                 let _ = stdin.flush();
             }

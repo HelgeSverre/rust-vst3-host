@@ -65,7 +65,9 @@ impl WindowsModule {
                     }
                 }
                 Err(_) => {
-                    log::debug!("InitDll function not found (this is OK, it's optional on Windows)");
+                    log::debug!(
+                        "InitDll function not found (this is OK, it's optional on Windows)"
+                    );
                 }
             }
 
@@ -79,7 +81,9 @@ impl WindowsModule {
                     Some(std::mem::transmute(func))
                 }
                 Err(_) => {
-                    log::debug!("ExitDll function not found (this is OK, it's optional on Windows)");
+                    log::debug!(
+                        "ExitDll function not found (this is OK, it's optional on Windows)"
+                    );
                     None
                 }
             };
@@ -96,7 +100,8 @@ impl WindowsModule {
 
             // SAFETY: We extend the lifetime to 'static because we're storing this in the struct
             // and will ensure it's dropped before the library is unloaded
-            let get_factory_fn: Symbol<'static, GetPluginFactoryFunc> = std::mem::transmute(get_factory_fn);
+            let get_factory_fn: Symbol<'static, GetPluginFactoryFunc> =
+                std::mem::transmute(get_factory_fn);
 
             log::info!("=== Windows VST3 MODULE LOADING COMPLETE ===");
             log::info!("DLL loaded successfully: {}", path.display());

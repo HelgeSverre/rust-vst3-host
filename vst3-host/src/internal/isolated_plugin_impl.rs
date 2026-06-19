@@ -79,8 +79,12 @@ impl PluginInternal for IsolatedPluginImpl {
     fn get_parameter(&self, id: u32) -> Result<f64> {
         match self.send_command(HostCommand::GetParameter { id })? {
             HostResponse::ParameterValue { value } => Ok(value),
-            HostResponse::Error { message } => Err(Error::Other(format!("GetParameter: {message}"))),
-            _ => Err(Error::Other("GetParameter: unexpected response".to_string())),
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("GetParameter: {message}")))
+            }
+            _ => Err(Error::Other(
+                "GetParameter: unexpected response".to_string(),
+            )),
         }
     }
 

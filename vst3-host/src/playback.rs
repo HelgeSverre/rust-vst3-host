@@ -34,7 +34,9 @@ impl AudioHandle {
     /// Recovers automatically if the audio thread previously panicked while holding
     /// the lock (poisoned mutex), so control calls keep working.
     pub fn lock(&self) -> MutexGuard<'_, Plugin> {
-        self.plugin.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.plugin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// A shared handle to the plugin, e.g. to move into another thread.

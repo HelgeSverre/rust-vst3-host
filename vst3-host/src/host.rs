@@ -47,7 +47,7 @@ impl Vst3Host {
     /// Discover VST3 plugins in configured scan paths
     pub fn discover_plugins(&mut self) -> Result<Vec<PluginInfo>> {
         let mut all_paths = self.custom_paths.clone();
-        
+
         // Add system paths if enabled
         if self.scan_default_paths {
             all_paths.extend(crate::discovery::scan_standard_paths());
@@ -55,7 +55,7 @@ impl Vst3Host {
 
         // Scan directories for VST3 plugins
         let plugin_paths = crate::discovery::scan_directories(&all_paths)?;
-        
+
         // Get plugin info for each found plugin
         let mut plugins = Vec::new();
         for path in plugin_paths {
@@ -67,7 +67,7 @@ impl Vst3Host {
                 }
             }
         }
-        
+
         Ok(plugins)
     }
 
@@ -219,11 +219,11 @@ impl Vst3Host {
                     vendor,
                     version,
                     category: "Audio Effect".to_string(), // Default category
-                    uid: "unknown".to_string(),            // Default UID
+                    uid: "unknown".to_string(),           // Default UID
                     has_gui,
                     audio_inputs: audio_inputs as u32,
                     audio_outputs: audio_outputs as u32,
-                    has_midi_input: true,  // Default MIDI info
+                    has_midi_input: true, // Default MIDI info
                     has_midi_output: false,
                 }
             }

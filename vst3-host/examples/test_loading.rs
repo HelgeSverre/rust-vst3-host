@@ -64,7 +64,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         eprintln!("");
         eprintln!("Examples:");
         eprintln!("  {} /Library/Audio/Plug-Ins/VST3/SomePlugin.vst3", args[0]);
-        eprintln!("  {} \"C:\\Program Files\\Common Files\\VST3\\SomePlugin.vst3\"", args[0]);
+        eprintln!(
+            "  {} \"C:\\Program Files\\Common Files\\VST3\\SomePlugin.vst3\"",
+            args[0]
+        );
         eprintln!("");
         eprintln!("This tool will:");
         eprintln!("  • Load the specified VST3 plugin");
@@ -120,14 +123,17 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("Vendor:         {}", info.vendor);
     println!("Version:        {}", info.version);
     println!("Category:       {}", info.category);
-    println!("Has GUI:        {}", if info.has_gui { "Yes" } else { "No" });
-    
+    println!(
+        "Has GUI:        {}",
+        if info.has_gui { "Yes" } else { "No" }
+    );
+
     // Audio capabilities
     println!();
     println!("🎵 Audio Capabilities");
     println!("Audio Inputs:   {} channels", info.audio_inputs);
     println!("Audio Outputs:  {} channels", info.audio_outputs);
-    
+
     // Determine plugin type
     let plugin_type = if info.audio_inputs == 0 && info.audio_outputs > 0 && info.has_midi_input {
         "Virtual Instrument (Synthesizer)"
@@ -139,12 +145,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         "Unknown Type"
     };
     println!("Plugin Type:    {}", plugin_type);
-    
+
     // MIDI capabilities
     println!();
     println!("🎹 MIDI Capabilities");
-    println!("MIDI Input:     {}", if info.has_midi_input { "Yes" } else { "No" });
-    println!("MIDI Output:    {}", if info.has_midi_output { "Yes" } else { "No" });
+    println!(
+        "MIDI Input:     {}",
+        if info.has_midi_input { "Yes" } else { "No" }
+    );
+    println!(
+        "MIDI Output:    {}",
+        if info.has_midi_output { "Yes" } else { "No" }
+    );
 
     // Step 4: Parameter Discovery
     println!();
@@ -157,18 +169,22 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("Found {} parameter(s):", params.len());
                 println!();
-                
+
                 // Show first 10 parameters with detailed info
                 for (i, param) in params.iter().take(10).enumerate() {
                     println!("  {}. {}", i + 1, param.name);
                     println!("     ID: {}", param.id);
-                    println!("     Value: {:.3} ({:.1}%)", param.value, param.value * 100.0);
+                    println!(
+                        "     Value: {:.3} ({:.1}%)",
+                        param.value,
+                        param.value * 100.0
+                    );
                     if param.unit.len() > 0 {
                         println!("     Unit: {}", param.unit);
                     }
                     println!();
                 }
-                
+
                 if params.len() > 10 {
                     println!("  ... and {} more parameters", params.len() - 10);
                     println!("     (showing first 10 only)");
@@ -177,7 +193,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => {
             println!("⚠️  Could not retrieve parameters: {}", e);
-            println!("   This is normal for some plugins that require processing to be started first");
+            println!(
+                "   This is normal for some plugins that require processing to be started first"
+            );
         }
     }
 
@@ -185,12 +203,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("🔄 Testing Plugin Lifecycle");
     println!("===========================");
-    
+
     println!("Starting processing...");
     match plugin.start_processing() {
         Ok(()) => {
             println!("✅ Processing started successfully");
-            
+
             // Try to get parameters again after processing started
             if let Ok(params) = plugin.get_parameters() {
                 if !params.is_empty() {
@@ -210,7 +228,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         println!();
         println!("🎹 Testing MIDI Input");
         println!("=====================");
-        
+
         println!("Sending test MIDI note (C4, velocity 100)...");
         match plugin.send_midi_event(MidiEvent::NoteOn {
             channel: MidiChannel::Ch1,
@@ -219,10 +237,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }) {
             Ok(()) => {
                 println!("✅ MIDI note sent successfully");
-                
+
                 // Wait a bit, then send note off
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                
+
                 println!("Sending note off...");
                 match plugin.send_midi_event(MidiEvent::NoteOff {
                     channel: MidiChannel::Ch1,
@@ -248,19 +266,19 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             println!();
             println!("🎛️  Testing Parameter Changes");
             println!("=============================");
-            
+
             let test_param = &params[0];
             let original_value = test_param.value;
-            
+
             println!("Testing parameter: {}", test_param.name);
             println!("Original value: {:.3}", original_value);
-            
+
             // Test setting a new value
             let new_value = if original_value < 0.5 { 0.8 } else { 0.2 };
             match plugin.set_parameter(test_param.id, new_value) {
                 Ok(()) => {
                     println!("✅ Successfully set parameter to {:.3}", new_value);
-                    
+
                     // Restore original value
                     let _ = plugin.set_parameter(test_param.id, original_value);
                     println!("✅ Restored original value");
@@ -276,7 +294,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("🛑 Cleanup");
     println!("==========");
-    
+
     match plugin.stop_processing() {
         Ok(()) => println!("✅ Processing stopped successfully"),
         Err(e) => println!("⚠️  Error stopping processing: {}", e),

@@ -13,12 +13,12 @@
 use super::{ModuleLoader, VstModule};
 use crate::error::{Error, Result};
 use core_foundation::{
-    base::{CFRelease, CFTypeRef, Boolean},
+    base::{Boolean, CFRelease, CFTypeRef},
     bundle::{CFBundleCreate, CFBundleRef},
     url::CFURLCreateFromFileSystemRepresentation,
 };
 use std::{
-    ffi::{CString, c_void},
+    ffi::{c_void, CString},
     path::Path,
     ptr,
 };
@@ -52,7 +52,10 @@ impl PrivateNamespaceModule {
     fn load_internal(path: &Path) -> Result<Self> {
         unsafe {
             log::info!("=== PRIVATE NAMESPACE VST3 MODULE LOADING START ===");
-            log::info!("Loading VST3 bundle with symbol isolation: {}", path.display());
+            log::info!(
+                "Loading VST3 bundle with symbol isolation: {}",
+                path.display()
+            );
 
             // Handle both bundle paths and direct binary paths
             let bundle_path = if path.extension().and_then(|s| s.to_str()) == Some("vst3") {
@@ -68,9 +71,11 @@ impl PrivateNamespaceModule {
                     }
                     match current.parent() {
                         Some(parent) => current = parent,
-                        None => return Err(Error::PluginLoadFailed(
-                            "Could not find .vst3 bundle in path hierarchy".to_string()
-                        ))
+                        None => {
+                            return Err(Error::PluginLoadFailed(
+                                "Could not find .vst3 bundle in path hierarchy".to_string(),
+                            ))
+                        }
                     }
                 }
             };
@@ -91,18 +96,21 @@ impl PrivateNamespaceModule {
             log::debug!("Step 3: Loading with dlopen RTLD_LOCAL...");
             let executable_cstring = CString::new(executable_path.to_string_lossy().as_bytes())
                 .map_err(|e| Error::PluginLoadFailed(format!("Invalid executable path: {}", e)))?;
-            
+
             // RTLD_LOCAL = 0x4, RTLD_LAZY = 0x1
             const RTLD_LOCAL: i32 = 0x4;
             const RTLD_LAZY: i32 = 0x1;
             let dl_handle = libc::dlopen(executable_cstring.as_ptr(), RTLD_LOCAL | RTLD_LAZY);
-            
+
             if dl_handle.is_null() {
                 CFRelease(bundle as CFTypeRef);
                 let error_msg = std::ffi::CStr::from_ptr(libc::dlerror())
                     .to_string_lossy()
                     .to_string();
-                return Err(Error::PluginLoadFailed(format!("dlopen failed: {}", error_msg)));
+                return Err(Error::PluginLoadFailed(format!(
+                    "dlopen failed: {}",
+                    error_msg
+                )));
             }
             log::debug!("✅ dlopen successful with private namespace");
 
@@ -110,7 +118,7 @@ impl PrivateNamespaceModule {
             log::debug!("Step 4: Getting bundleEntry function...");
             let bundle_entry_name = CString::new("bundleEntry").unwrap();
             let bundle_entry_ptr = libc::dlsym(dl_handle, bundle_entry_name.as_ptr());
-            
+
             if bundle_entry_ptr.is_null() {
                 libc::dlclose(dl_handle);
                 CFRelease(bundle as CFTypeRef);
@@ -118,7 +126,7 @@ impl PrivateNamespaceModule {
                     "Bundle does not export required 'bundleEntry' function".to_string(),
                 ));
             }
-            
+
             let bundle_entry: BundleEntryFunc = std::mem::transmute(bundle_entry_ptr);
             log::debug!("✅ bundleEntry function found");
 
@@ -126,7 +134,7 @@ impl PrivateNamespaceModule {
             log::debug!("Step 5: Getting bundleExit function...");
             let bundle_exit_name = CString::new("bundleExit").unwrap();
             let bundle_exit_ptr = libc::dlsym(dl_handle, bundle_exit_name.as_ptr());
-            
+
             let bundle_exit: Option<BundleExitFunc> = if bundle_exit_ptr.is_null() {
                 log::warn!("⚠️ bundleExit function not found (unusual but proceeding)");
                 None
@@ -151,7 +159,7 @@ impl PrivateNamespaceModule {
             log::debug!("Step 7: Getting GetPluginFactory function...");
             let factory_name = CString::new("GetPluginFactory").unwrap();
             let factory_ptr = libc::dlsym(dl_handle, factory_name.as_ptr());
-            
+
             let get_factory_fn: Option<GetPluginFactoryFunc> = if factory_ptr.is_null() {
                 // Cleanup on failure
                 if let Some(exit_fn) = bundle_exit {
@@ -168,7 +176,10 @@ impl PrivateNamespaceModule {
             };
 
             log::info!("=== PRIVATE NAMESPACE VST3 MODULE LOADING COMPLETE ===");
-            log::info!("Bundle loaded with symbol isolation: {}", bundle_path.display());
+            log::info!(
+                "Bundle loaded with symbol isolation: {}",
+                bundle_path.display()
+            );
 
             Ok(PrivateNamespaceModule {
                 dl_handle,
@@ -214,7 +225,7 @@ impl PrivateNamespaceModule {
     fn find_bundle_executable(bundle_path: &Path) -> Result<std::path::PathBuf> {
         // Standard macOS bundle structure: Contents/MacOS/
         let macos_dir = bundle_path.join("Contents").join("MacOS");
-        
+
         if !macos_dir.exists() {
             return Err(Error::PluginLoadFailed(
                 "VST3 bundle missing Contents/MacOS directory".to_string(),
@@ -289,8 +300,7 @@ impl Drop for PrivateNamespaceModule {
             // Step 2: Close the dlopen handle
             log::debug!("Closing dlopen handle...");
             if libc::dlclose(self.dl_handle) != 0 {
-                let error_msg = std::ffi::CStr::from_ptr(libc::dlerror())
-                    .to_string_lossy();
+                let error_msg = std::ffi::CStr::from_ptr(libc::dlerror()).to_string_lossy();
                 log::warn!("⚠️ dlclose failed: {}", error_msg);
             } else {
                 log::debug!("✅ dlopen handle closed successfully");

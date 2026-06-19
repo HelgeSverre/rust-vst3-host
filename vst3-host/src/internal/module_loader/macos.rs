@@ -9,19 +9,15 @@
 use super::{ModuleLoader, VstModule};
 use crate::error::{Error, Result};
 use core_foundation::{
-    base::{CFRelease, CFRetain, CFTypeRef, TCFType, Boolean},
+    base::{Boolean, CFRelease, CFRetain, CFTypeRef, TCFType},
     bundle::{
-        CFBundleCreate, CFBundleGetFunctionPointerForName, CFBundleLoadExecutable,
-        CFBundleRef, CFBundleUnloadExecutable,
+        CFBundleCreate, CFBundleGetFunctionPointerForName, CFBundleLoadExecutable, CFBundleRef,
+        CFBundleUnloadExecutable,
     },
     string::CFString,
     url::CFURLCreateFromFileSystemRepresentation,
 };
-use std::{
-    ffi::CString,
-    path::Path,
-    ptr,
-};
+use std::{ffi::CString, path::Path, ptr};
 use vst3::Steinberg::IPluginFactory;
 
 /// Function signature for bundleEntry
@@ -69,9 +65,11 @@ impl MacOSModule {
                     }
                     match current.parent() {
                         Some(parent) => current = parent,
-                        None => return Err(Error::PluginLoadFailed(
-                            "Could not find .vst3 bundle in path hierarchy".to_string()
-                        ))
+                        None => {
+                            return Err(Error::PluginLoadFailed(
+                                "Could not find .vst3 bundle in path hierarchy".to_string(),
+                            ))
+                        }
                     }
                 }
             };
@@ -126,7 +124,8 @@ impl MacOSModule {
             // Step 3: Get bundleEntry function pointer (REQUIRED)
             log::debug!("Step 3: Getting bundleEntry function...");
             let bundle_entry_name = CFString::new("bundleEntry");
-            let bundle_entry_ptr = CFBundleGetFunctionPointerForName(bundle, bundle_entry_name.as_concrete_TypeRef());
+            let bundle_entry_ptr =
+                CFBundleGetFunctionPointerForName(bundle, bundle_entry_name.as_concrete_TypeRef());
 
             if bundle_entry_ptr.is_null() {
                 CFBundleUnloadExecutable(bundle);
@@ -142,7 +141,8 @@ impl MacOSModule {
             // Step 4: Get bundleExit function pointer (REQUIRED)
             log::debug!("Step 4: Getting bundleExit function...");
             let bundle_exit_name = CFString::new("bundleExit");
-            let bundle_exit_ptr = CFBundleGetFunctionPointerForName(bundle, bundle_exit_name.as_concrete_TypeRef());
+            let bundle_exit_ptr =
+                CFBundleGetFunctionPointerForName(bundle, bundle_exit_name.as_concrete_TypeRef());
 
             if bundle_exit_ptr.is_null() {
                 CFBundleUnloadExecutable(bundle);
@@ -173,7 +173,8 @@ impl MacOSModule {
             // Step 6: Get GetPluginFactory function pointer
             log::debug!("Step 6: Getting GetPluginFactory function...");
             let factory_name = CFString::new("GetPluginFactory");
-            let factory_ptr = CFBundleGetFunctionPointerForName(bundle, factory_name.as_concrete_TypeRef());
+            let factory_ptr =
+                CFBundleGetFunctionPointerForName(bundle, factory_name.as_concrete_TypeRef());
 
             if factory_ptr.is_null() {
                 // Cleanup on failure
@@ -235,7 +236,7 @@ impl Drop for MacOSModule {
     fn drop(&mut self) {
         unsafe {
             log::debug!("=== macOS VST3 MODULE CLEANUP START ===");
-            
+
             // Step 1: Call bundleExit if available
             if let Some(bundle_exit) = self.bundle_exit.take() {
                 log::debug!("Calling bundleExit...");
@@ -245,7 +246,7 @@ impl Drop for MacOSModule {
                 } else {
                     log::warn!("⚠️ bundleExit returned false");
                 }
-                
+
                 // Release the retain from bundleEntry
                 CFRelease(self.bundle as CFTypeRef);
             }

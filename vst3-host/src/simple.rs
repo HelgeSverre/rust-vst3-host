@@ -226,9 +226,7 @@ pub fn discover_plugins() -> Result<Vec<PluginInfo>> {
 /// # }
 /// ```
 pub fn discover_plugins_in<P: AsRef<Path>>(path: P) -> Result<Vec<PluginInfo>> {
-    let mut host = Vst3Host::builder()
-        .add_scan_path(path)
-        .build()?;
+    let mut host = Vst3Host::builder().add_scan_path(path).build()?;
 
     host.discover_plugins()
 }
@@ -258,14 +256,14 @@ pub fn discover_plugins_in<P: AsRef<Path>>(path: P) -> Result<Vec<PluginInfo>> {
 /// ```
 pub fn get_plugin_info<P: AsRef<Path>>(path: P) -> Result<PluginInfo> {
     let path = path.as_ref();
-    
+
     if !path.exists() {
         return Err(Error::PluginNotFound(path.display().to_string()));
     }
 
     // Create a minimal host just for info gathering
     let mut host = Vst3Host::builder().build()?;
-    
+
     // Load plugin to get info, then immediately drop it
     let plugin = host.load_plugin(path)?;
     Ok(plugin.info().clone())
@@ -294,19 +292,19 @@ pub fn get_plugin_info<P: AsRef<Path>>(path: P) -> Result<PluginInfo> {
 /// ```
 pub fn is_valid_plugin<P: AsRef<Path>>(path: P) -> bool {
     let path = path.as_ref();
-    
+
     // Basic checks
     if !path.exists() {
         return false;
     }
-    
+
     // Check for .vst3 extension
     if let Some(extension) = path.extension() {
         if extension.to_string_lossy().to_lowercase() == "vst3" {
             return true;
         }
     }
-    
+
     false
 }
 
@@ -318,11 +316,11 @@ mod tests {
     fn test_is_valid_plugin() {
         // Test non-existent path
         assert!(!is_valid_plugin("/nonexistent/path.vst3"));
-        
+
         // Test wrong extension
         assert!(!is_valid_plugin("plugin.dll"));
         assert!(!is_valid_plugin("plugin.so"));
-        
+
         // Would need actual plugin files to test positive cases
     }
 
@@ -334,7 +332,7 @@ mod tests {
             .block_size(512)
             .build();
         assert!(host1.is_ok());
-        
+
         let host2 = Vst3Host::builder()
             .sample_rate(48000.0)
             .block_size(256)

@@ -51,8 +51,14 @@ fn test_discovery_callback() {
     // but it tests the callback mechanism
     let _ = host.discover_plugins().map(|_plugins| {
         // TODO: Replace with actual callback when implemented
-        events_clone.lock().unwrap().push("Started: 0 plugins".to_string());
-        events_clone.lock().unwrap().push("Completed: 0 found".to_string());
+        events_clone
+            .lock()
+            .unwrap()
+            .push("Started: 0 plugins".to_string());
+        events_clone
+            .lock()
+            .unwrap()
+            .push("Completed: 0 found".to_string());
     });
 
     /*let _ = host.discover_plugins_with_callback(move |progress| {

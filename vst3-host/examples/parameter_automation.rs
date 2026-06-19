@@ -41,22 +41,22 @@
 //! ```
 //! VST3 Parameter Automation Demo
 //! ==============================
-//! 
+//!
 //! 🎹 Loaded: SomeSynth v1.0 by VendorName
 //! 🎵 Audio: 44.1kHz, 512 samples, 0→2 channels
 //! 🎛️  Found 23 parameters for automation
-//! 
+//!
 //! ▶️  Starting automation performance...
-//! 
+//!
 //! [00:05] Pattern: Chord Progression | CPU: 12.3% | Peak: -8.2dB
 //! [00:10] Pattern: Arpeggio Sweep    | CPU: 15.1% | Peak: -6.1dB
 //! [00:15] Pattern: Filter Resonance  | CPU: 11.8% | Peak: -9.4dB
-//! 
+//!
 //! Controls: [1-5] Patterns | [Space] Pause | [R] Reset | [Q] Quit
 //! ```
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use vst3_host::prelude::*;
@@ -115,7 +115,7 @@ impl AutomationDemo {
         } else {
             println!("🔍 Discovering plugins...");
             let plugins = self.host.discover_plugins()?;
-            
+
             if plugins.is_empty() {
                 eprintln!("❌ No VST3 plugins found!");
                 eprintln!("   Please install some VST3 plugins or specify a path.");
@@ -123,12 +123,16 @@ impl AutomationDemo {
             }
 
             // Find a suitable plugin (prefer instruments)
-            let suitable_plugin = plugins.iter()
+            let suitable_plugin = plugins
+                .iter()
                 .find(|p| p.has_midi_input && p.audio_outputs > 0)
                 .or_else(|| plugins.iter().find(|p| p.audio_outputs > 0))
                 .unwrap_or(&plugins[0]);
 
-            println!("🎯 Using plugin: {} by {}", suitable_plugin.name, suitable_plugin.vendor);
+            println!(
+                "🎯 Using plugin: {} by {}",
+                suitable_plugin.name, suitable_plugin.vendor
+            );
             self.host.load_plugin(&suitable_plugin.path)?
         };
 
@@ -137,9 +141,14 @@ impl AutomationDemo {
         plugin.start_processing()?;
 
         let info = plugin.info();
-        println!("🎹 Loaded: {} v{} by {}", info.name, info.version, info.vendor);
-        println!("🎵 Audio: {}kHz, {} samples, {}→{} channels", 
-                 44.1, 512, info.audio_inputs, info.audio_outputs);
+        println!(
+            "🎹 Loaded: {} v{} by {}",
+            info.name, info.version, info.vendor
+        );
+        println!(
+            "🎵 Audio: {}kHz, {} samples, {}→{} channels",
+            44.1, 512, info.audio_inputs, info.audio_outputs
+        );
 
         // Step 3: Discover parameters for automation
         let parameters = plugin.get_parameters().unwrap_or_default();
@@ -160,7 +169,8 @@ impl AutomationDemo {
     fn setup_audio(&mut self, plugin: Plugin) -> Result<(), Box<dyn std::error::Error>> {
         // Create audio backend
         let backend = CpalBackend::new()?;
-        let device = backend.default_output_device()
+        let device = backend
+            .default_output_device()
             .ok_or("No audio output device found")?;
 
         let config = AudioConfig {
@@ -228,27 +238,29 @@ impl AutomationDemo {
             // Handle status updates
             while let Ok(status) = status_rx.try_recv() {
                 match status {
-                    StatusMessage::PerformanceUpdate { 
-                        pattern, 
-                        cpu_usage, 
-                        peak_level, 
-                        automation_active 
+                    StatusMessage::PerformanceUpdate {
+                        pattern,
+                        cpu_usage,
+                        peak_level,
+                        automation_active,
                     } => {
                         if last_status_time.elapsed() > Duration::from_millis(500) {
                             let elapsed = start_time.elapsed();
                             let minutes = elapsed.as_secs() / 60;
                             let seconds = elapsed.as_secs() % 60;
-                            
+
                             let status_icon = if automation_active { "🎵" } else { "⏸️" };
                             let peak_db = if peak_level > 0.0001 {
                                 format!("{:.1}dB", 20.0 * peak_level.log10())
                             } else {
                                 "-∞dB".to_string()
                             };
-                            
-                            println!("[{:02}:{:02}] {} Pattern: {} | CPU: {:.1}% | Peak: {}",
-                                   minutes, seconds, status_icon, pattern, cpu_usage, peak_db);
-                            
+
+                            println!(
+                                "[{:02}:{:02}] {} Pattern: {} | CPU: {:.1}% | Peak: {}",
+                                minutes, seconds, status_icon, pattern, cpu_usage, peak_db
+                            );
+
                             last_status_time = Instant::now();
                         }
                     }
@@ -267,16 +279,22 @@ impl AutomationDemo {
                         break;
                     }
                     b' ' => {
-                        control_tx.send(ControlMessage::TogglePause).map_err(|_| Error::Other("Control channel closed".to_string()))?;
+                        control_tx
+                            .send(ControlMessage::TogglePause)
+                            .map_err(|_| Error::Other("Control channel closed".to_string()))?;
                     }
                     b'r' | b'R' => {
                         println!("🔄 Resetting parameters...");
-                        control_tx.send(ControlMessage::Reset).map_err(|_| Error::Other("Control channel closed".to_string()))?;
+                        control_tx
+                            .send(ControlMessage::Reset)
+                            .map_err(|_| Error::Other("Control channel closed".to_string()))?;
                     }
                     b'1'..=b'5' => {
                         let pattern_id = (input_buffer[0] - b'1') as usize;
                         println!("🎵 Switching to pattern {}", pattern_id + 1);
-                        control_tx.send(ControlMessage::ChangePattern(pattern_id)).map_err(|_| Error::Other("Control channel closed".to_string()))?;
+                        control_tx
+                            .send(ControlMessage::ChangePattern(pattern_id))
+                            .map_err(|_| Error::Other("Control channel closed".to_string()))?;
                     }
                     _ => {}
                 }
@@ -304,7 +322,7 @@ struct AutomationPerformance {
 impl AutomationPerformance {
     fn new(plugin: Plugin) -> Self {
         let parameters = plugin.get_parameters().unwrap_or_default();
-        
+
         Self {
             plugin,
             parameters,
@@ -322,7 +340,7 @@ impl AutomationPerformance {
         }
 
         let pattern_time = elapsed.as_secs_f64();
-        
+
         // Apply current automation pattern
         if let Some(pattern) = self.automation_patterns.get(self.current_pattern).cloned() {
             self.apply_automation_pattern(&pattern, pattern_time)?;
@@ -337,14 +355,16 @@ impl AutomationPerformance {
     }
 
     fn apply_automation_pattern(
-        &mut self, 
-        pattern: &AutomationPattern, 
-        time: f64
+        &mut self,
+        pattern: &AutomationPattern,
+        time: f64,
     ) -> Result<(), vst3_host::Error> {
         for automation in &pattern.automations {
-            if let Some(param) = self.parameters.iter().find(|p| 
-                p.name.to_lowercase().contains(&automation.parameter_name.to_lowercase())
-            ) {
+            if let Some(param) = self.parameters.iter().find(|p| {
+                p.name
+                    .to_lowercase()
+                    .contains(&automation.parameter_name.to_lowercase())
+            }) {
                 let value = automation.curve.calculate_value(time);
                 self.plugin.set_parameter(param.id, value as f64)?;
             }
@@ -353,19 +373,19 @@ impl AutomationPerformance {
     }
 
     fn play_midi_sequence(
-        &mut self, 
-        sequence: &MidiSequence, 
-        time: f64
+        &mut self,
+        sequence: &MidiSequence,
+        time: f64,
     ) -> Result<(), vst3_host::Error> {
         // Simple note triggering based on time
         let beat_time = (time * sequence.tempo / 60.0) % sequence.length;
-        
+
         for event in &sequence.events {
             if (beat_time - event.time).abs() < 0.1 {
                 self.plugin.send_midi_event(event.event.clone())?;
             }
         }
-        
+
         Ok(())
     }
 
@@ -408,10 +428,24 @@ struct ParameterAutomation {
 
 #[derive(Debug, Clone)]
 enum AutomationCurve {
-    Linear { start: f32, end: f32 },
-    Sine { center: f32, amplitude: f32, frequency: f64 },
-    Exponential { start: f32, end: f32, factor: f64 },
-    Steps { values: Vec<f32>, step_duration: f64 },
+    Linear {
+        start: f32,
+        end: f32,
+    },
+    Sine {
+        center: f32,
+        amplitude: f32,
+        frequency: f64,
+    },
+    Exponential {
+        start: f32,
+        end: f32,
+        factor: f64,
+    },
+    Steps {
+        values: Vec<f32>,
+        step_duration: f64,
+    },
 }
 
 impl AutomationCurve {
@@ -421,15 +455,20 @@ impl AutomationCurve {
                 let progress = (time % 10.0) / 10.0; // 10-second cycle
                 start + (end - start) * progress as f32
             }
-            AutomationCurve::Sine { center, amplitude, frequency } => {
-                center + amplitude * (time * frequency * 2.0 * std::f64::consts::PI).sin() as f32
-            }
+            AutomationCurve::Sine {
+                center,
+                amplitude,
+                frequency,
+            } => center + amplitude * (time * frequency * 2.0 * std::f64::consts::PI).sin() as f32,
             AutomationCurve::Exponential { start, end, factor } => {
                 let progress = (time % 8.0) / 8.0; // 8-second cycle
                 let exp_progress = (progress * factor).exp() / factor.exp();
                 start + (end - start) * exp_progress as f32
             }
-            AutomationCurve::Steps { values, step_duration } => {
+            AutomationCurve::Steps {
+                values,
+                step_duration,
+            } => {
                 let step_index = ((time / step_duration) as usize) % values.len();
                 values[step_index]
             }
@@ -440,7 +479,7 @@ impl AutomationCurve {
 /// MIDI sequence definition
 #[derive(Debug, Clone)]
 struct MidiSequence {
-    tempo: f64, // BPM
+    tempo: f64,  // BPM
     length: f64, // beats
     events: Vec<TimedMidiEvent>,
 }
@@ -479,7 +518,7 @@ fn audio_callback(
     config: AudioConfig,
 ) {
     let start_time = Instant::now();
-    
+
     // Clear output buffer
     output.fill(0.0);
 
@@ -494,7 +533,7 @@ fn audio_callback(
 
         // Create audio buffers
         let mut buffers = AudioBuffers::new(0, 2, config.block_size, config.sample_rate);
-        
+
         // Process audio
         if perf.plugin.process_audio(&mut buffers).is_ok() {
             // Copy to output buffer (interleaved)
@@ -502,7 +541,7 @@ fn audio_callback(
                 if frame_idx >= config.block_size {
                     break;
                 }
-                
+
                 for (ch_idx, output_sample) in output_frame.iter_mut().enumerate() {
                     if ch_idx < buffers.outputs.len() && frame_idx < buffers.outputs[ch_idx].len() {
                         *output_sample = buffers.outputs[ch_idx][frame_idx];
@@ -511,15 +550,19 @@ fn audio_callback(
             }
 
             // Calculate peak level
-            let peak = buffers.outputs.iter()
+            let peak = buffers
+                .outputs
+                .iter()
                 .flat_map(|channel| channel.iter())
                 .map(|&sample| sample.abs())
                 .fold(0.0f32, f32::max);
 
             // Calculate CPU usage
             let processing_time = start_time.elapsed();
-            let buffer_duration = Duration::from_secs_f64(config.block_size as f64 / config.sample_rate);
-            let cpu_usage = (processing_time.as_secs_f64() / buffer_duration.as_secs_f64() * 100.0) as f32;
+            let buffer_duration =
+                Duration::from_secs_f64(config.block_size as f64 / config.sample_rate);
+            let cpu_usage =
+                (processing_time.as_secs_f64() / buffer_duration.as_secs_f64() * 100.0) as f32;
 
             // Send status update
             if let Some(pattern) = perf.automation_patterns.get(perf.current_pattern) {
@@ -540,7 +583,7 @@ fn automation_controller(
     control_rx: mpsc::Receiver<ControlMessage>,
 ) {
     let mut running = true;
-    
+
     while running {
         // Handle control messages
         if let Ok(message) = control_rx.recv_timeout(Duration::from_millis(100)) {
@@ -573,30 +616,31 @@ fn create_automation_patterns() -> Vec<AutomationPattern> {
             automations: vec![
                 ParameterAutomation {
                     parameter_name: "cutoff".to_string(),
-                    curve: AutomationCurve::Sine { 
-                        center: 0.6, 
-                        amplitude: 0.3, 
-                        frequency: 0.1 
+                    curve: AutomationCurve::Sine {
+                        center: 0.6,
+                        amplitude: 0.3,
+                        frequency: 0.1,
                     },
                 },
                 ParameterAutomation {
                     parameter_name: "resonance".to_string(),
-                    curve: AutomationCurve::Linear { start: 0.2, end: 0.8 },
+                    curve: AutomationCurve::Linear {
+                        start: 0.2,
+                        end: 0.8,
+                    },
                 },
             ],
         },
         AutomationPattern {
             name: "Rhythmic Tremolo".to_string(),
             duration: 8.0,
-            automations: vec![
-                ParameterAutomation {
-                    parameter_name: "volume".to_string(),
-                    curve: AutomationCurve::Steps { 
-                        values: vec![0.8, 0.3, 0.8, 0.3, 0.8, 0.5], 
-                        step_duration: 0.25 
-                    },
+            automations: vec![ParameterAutomation {
+                parameter_name: "volume".to_string(),
+                curve: AutomationCurve::Steps {
+                    values: vec![0.8, 0.3, 0.8, 0.3, 0.8, 0.5],
+                    step_duration: 0.25,
                 },
-            ],
+            }],
         },
         AutomationPattern {
             name: "Exponential Build".to_string(),
@@ -604,15 +648,18 @@ fn create_automation_patterns() -> Vec<AutomationPattern> {
             automations: vec![
                 ParameterAutomation {
                     parameter_name: "gain".to_string(),
-                    curve: AutomationCurve::Exponential { 
-                        start: 0.1, 
-                        end: 0.9, 
-                        factor: 3.0 
+                    curve: AutomationCurve::Exponential {
+                        start: 0.1,
+                        end: 0.9,
+                        factor: 3.0,
                     },
                 },
                 ParameterAutomation {
                     parameter_name: "reverb".to_string(),
-                    curve: AutomationCurve::Linear { start: 0.0, end: 0.6 },
+                    curve: AutomationCurve::Linear {
+                        start: 0.0,
+                        end: 0.6,
+                    },
                 },
             ],
         },
@@ -622,18 +669,18 @@ fn create_automation_patterns() -> Vec<AutomationPattern> {
             automations: vec![
                 ParameterAutomation {
                     parameter_name: "cutoff".to_string(),
-                    curve: AutomationCurve::Sine { 
-                        center: 0.5, 
-                        amplitude: 0.4, 
-                        frequency: 0.3 
+                    curve: AutomationCurve::Sine {
+                        center: 0.5,
+                        amplitude: 0.4,
+                        frequency: 0.3,
                     },
                 },
                 ParameterAutomation {
                     parameter_name: "delay".to_string(),
-                    curve: AutomationCurve::Sine { 
-                        center: 0.3, 
-                        amplitude: 0.2, 
-                        frequency: 0.1 
+                    curve: AutomationCurve::Sine {
+                        center: 0.3,
+                        amplitude: 0.2,
+                        frequency: 0.1,
                     },
                 },
             ],
@@ -641,15 +688,13 @@ fn create_automation_patterns() -> Vec<AutomationPattern> {
         AutomationPattern {
             name: "Stepped Sequence".to_string(),
             duration: 16.0,
-            automations: vec![
-                ParameterAutomation {
-                    parameter_name: "pitch".to_string(),
-                    curve: AutomationCurve::Steps { 
-                        values: vec![0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4, 0.2], 
-                        step_duration: 0.5 
-                    },
+            automations: vec![ParameterAutomation {
+                parameter_name: "pitch".to_string(),
+                curve: AutomationCurve::Steps {
+                    values: vec![0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4, 0.2],
+                    step_duration: 0.5,
                 },
-            ],
+            }],
         },
     ]
 }
@@ -659,52 +704,90 @@ fn create_midi_sequences() -> HashMap<usize, MidiSequence> {
     let mut sequences = HashMap::new();
 
     // Pattern 0: Simple chord progression
-    sequences.insert(0, MidiSequence {
-        tempo: 120.0,
-        length: 16.0,
-        events: vec![
-            TimedMidiEvent {
-                time: 0.0,
-                event: MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 60, velocity: 80 },
-            },
-            TimedMidiEvent {
-                time: 4.0,
-                event: MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 64, velocity: 80 },
-            },
-            TimedMidiEvent {
-                time: 8.0,
-                event: MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 67, velocity: 80 },
-            },
-            TimedMidiEvent {
-                time: 12.0,
-                event: MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 72, velocity: 80 },
-            },
-        ],
-    });
+    sequences.insert(
+        0,
+        MidiSequence {
+            tempo: 120.0,
+            length: 16.0,
+            events: vec![
+                TimedMidiEvent {
+                    time: 0.0,
+                    event: MidiEvent::NoteOn {
+                        channel: MidiChannel::Ch1,
+                        note: 60,
+                        velocity: 80,
+                    },
+                },
+                TimedMidiEvent {
+                    time: 4.0,
+                    event: MidiEvent::NoteOn {
+                        channel: MidiChannel::Ch1,
+                        note: 64,
+                        velocity: 80,
+                    },
+                },
+                TimedMidiEvent {
+                    time: 8.0,
+                    event: MidiEvent::NoteOn {
+                        channel: MidiChannel::Ch1,
+                        note: 67,
+                        velocity: 80,
+                    },
+                },
+                TimedMidiEvent {
+                    time: 12.0,
+                    event: MidiEvent::NoteOn {
+                        channel: MidiChannel::Ch1,
+                        note: 72,
+                        velocity: 80,
+                    },
+                },
+            ],
+        },
+    );
 
     // Pattern 1: Rhythmic pattern
-    sequences.insert(1, MidiSequence {
-        tempo: 140.0,
-        length: 8.0,
-        events: vec![
-            TimedMidiEvent {
-                time: 0.0,
-                event: MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 60, velocity: 100 },
-            },
-            TimedMidiEvent {
-                time: 1.0,
-                event: MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 60, velocity: 70 },
-            },
-            TimedMidiEvent {
-                time: 2.0,
-                event: MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 60, velocity: 100 },
-            },
-            TimedMidiEvent {
-                time: 3.5,
-                event: MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 60, velocity: 90 },
-            },
-        ],
-    });
+    sequences.insert(
+        1,
+        MidiSequence {
+            tempo: 140.0,
+            length: 8.0,
+            events: vec![
+                TimedMidiEvent {
+                    time: 0.0,
+                    event: MidiEvent::NoteOn {
+                        channel: MidiChannel::Ch1,
+                        note: 60,
+                        velocity: 100,
+                    },
+                },
+                TimedMidiEvent {
+                    time: 1.0,
+                    event: MidiEvent::NoteOn {
+                        channel: MidiChannel::Ch1,
+                        note: 60,
+                        velocity: 70,
+                    },
+                },
+                TimedMidiEvent {
+                    time: 2.0,
+                    event: MidiEvent::NoteOn {
+                        channel: MidiChannel::Ch1,
+                        note: 60,
+                        velocity: 100,
+                    },
+                },
+                TimedMidiEvent {
+                    time: 3.5,
+                    event: MidiEvent::NoteOn {
+                        channel: MidiChannel::Ch1,
+                        note: 60,
+                        velocity: 90,
+                    },
+                },
+            ],
+        },
+    );
 
     sequences
 }

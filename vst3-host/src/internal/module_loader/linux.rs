@@ -44,8 +44,9 @@ impl LinuxModule {
 
             // Step 1: Load the library
             log::debug!("Step 1: Loading shared object...");
-            let library = Library::new(path)
-                .map_err(|e| Error::PluginLoadFailed(format!("Failed to load shared object: {}", e)))?;
+            let library = Library::new(path).map_err(|e| {
+                Error::PluginLoadFailed(format!("Failed to load shared object: {}", e))
+            })?;
             log::debug!("✅ Shared object loaded successfully");
 
             // Step 2: Get ModuleEntry function (REQUIRED)
@@ -54,20 +55,19 @@ impl LinuxModule {
                 .get::<ModuleEntryFunc>(b"ModuleEntry")
                 .map_err(|_| {
                     Error::PluginLoadFailed(
-                        "Shared object does not export the required 'ModuleEntry' function".to_string(),
+                        "Shared object does not export the required 'ModuleEntry' function"
+                            .to_string(),
                     )
                 })?;
             log::debug!("✅ ModuleEntry function found");
 
             // Step 3: Get ModuleExit function (REQUIRED)
             log::debug!("Step 3: Getting ModuleExit function...");
-            let module_exit = library
-                .get::<ModuleExitFunc>(b"ModuleExit")
-                .map_err(|_| {
-                    Error::PluginLoadFailed(
-                        "Shared object does not export the required 'ModuleExit' function".to_string(),
-                    )
-                })?;
+            let module_exit = library.get::<ModuleExitFunc>(b"ModuleExit").map_err(|_| {
+                Error::PluginLoadFailed(
+                    "Shared object does not export the required 'ModuleExit' function".to_string(),
+                )
+            })?;
             log::debug!("✅ ModuleExit function found");
 
             // Step 4: Call ModuleEntry (MUST be called before GetPluginFactory)
@@ -95,7 +95,8 @@ impl LinuxModule {
             // SAFETY: We extend the lifetime to 'static because we're storing these in the struct
             // and will ensure they're dropped before the library is unloaded
             let module_exit: Symbol<'static, ModuleExitFunc> = std::mem::transmute(module_exit);
-            let get_factory_fn: Symbol<'static, GetPluginFactoryFunc> = std::mem::transmute(get_factory_fn);
+            let get_factory_fn: Symbol<'static, GetPluginFactoryFunc> =
+                std::mem::transmute(get_factory_fn);
 
             log::info!("=== Linux VST3 MODULE LOADING COMPLETE ===");
             log::info!("Shared object loaded successfully: {}", path.display());

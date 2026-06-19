@@ -255,68 +255,44 @@ impl App {
                 buffer_size: cpal::BufferSize::Default,
             };
 
-            let stream = device.build_output_stream(
-                &stream_config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    static mut COUNTER: usize = 0;
-                    unsafe { 
-                        COUNTER += 1;
-                        if COUNTER % 1000 == 0 {
-                            eprintln!("Audio callback #{}, buffer size: {}", COUNTER, data.len());
-                        }
-                    }
-                    
-                    // Clear output buffer first
-                    data.fill(0.0);
-                    
-                    if let Some(ref plugin) = plugin_clone {
-                        if let Ok(mut plugin_lock) = plugin.lock() {
-                            // Create audio buffers for processing
-                            let frames = data.len() / channels;
-                            let mut audio_buffers = AudioBuffers::new(0, channels, frames, sample_rate);
-                            
-                            // Debug buffer setup
-                            unsafe {
-                                static mut DEBUG_COUNT: usize = 0;
-                                DEBUG_COUNT += 1;
-                                if DEBUG_COUNT % 2000 == 0 {
-                                    eprintln!("Buffer setup: {} channels, {} frames, sample_rate: {}, inputs: {}, outputs: {}", 
-                                        channels, frames, sample_rate, audio_buffers.inputs.len(), audio_buffers.outputs.len());
+            let stream = device
+                .build_output_stream(
+                    &stream_config,
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        // Clear output buffer first
+                        data.fill(0.0);
+
+                        if let Some(ref plugin) = plugin_clone {
+                            if let Ok(mut plugin_lock) = plugin.lock() {
+                                let frames = data.len() / channels;
+                                let mut audio_buffers =
+                                    AudioBuffers::new(0, channels, frames, sample_rate);
+
+                                // Process audio through the plugin
+                                if let Err(e) = plugin_lock.process_audio(&mut audio_buffers) {
+                                    eprintln!("Audio processing error: {}", e);
+                                    return;
                                 }
-                            }
-                            
-                            // Process audio through the plugin
-                            if let Err(e) = plugin_lock.process_audio(&mut audio_buffers) {
-                                eprintln!("Audio processing error: {}", e);
-                                return;
-                            }
-                            
-                            // Check if we got any non-zero audio BEFORE copying
-                            let max_sample = audio_buffers.outputs.iter()
-                                .flat_map(|ch| ch.iter())
-                                .map(|&sample| sample.abs())
-                                .fold(0.0f32, f32::max);
-                            
-                            if max_sample > 0.001 {
-                                eprintln!("Got audio output from plugin! Max sample: {:.6}", max_sample);
-                            }
-                            
-                            // Copy processed audio to output buffer
-                            for channel in 0..channels.min(audio_buffers.outputs.len()) {
-                                for (frame, sample) in audio_buffers.outputs[channel].iter().enumerate() {
-                                    if frame * channels + channel < data.len() {
-                                        data[frame * channels + channel] = *sample;
+
+                                // Copy processed audio to output buffer
+                                for channel in 0..channels.min(audio_buffers.outputs.len()) {
+                                    for (frame, sample) in
+                                        audio_buffers.outputs[channel].iter().enumerate()
+                                    {
+                                        if frame * channels + channel < data.len() {
+                                            data[frame * channels + channel] = *sample;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                },
-                |err| {
-                    eprintln!("Audio stream error: {}", err);
-                },
-                None,
-            ).expect("Failed to create audio stream");
+                    },
+                    |err| {
+                        eprintln!("Audio stream error: {}", err);
+                    },
+                    None,
+                )
+                .expect("Failed to create audio stream");
 
             if let Err(e) = stream.play() {
                 eprintln!("Failed to start audio stream: {}", e);

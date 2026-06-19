@@ -122,7 +122,9 @@ fn test_plugin_parameters() {
             .expect("Failed to set parameter");
 
         // Verify it was set
-        let updated_params = plugin.get_parameters().expect("Failed to get updated parameters");
+        let updated_params = plugin
+            .get_parameters()
+            .expect("Failed to get updated parameters");
         let updated = updated_params
             .iter()
             .find(|p| p.id == first_param.id)
@@ -208,10 +210,7 @@ fn test_audio_processing() {
     // The plugin should have produced some non-silent output by now. We read the
     // levels the bridge populated on the audio thread.
     let levels = audio.lock().get_output_levels();
-    let any_activity = levels
-        .channels
-        .iter()
-        .any(|c| c.peak > 0.0 || c.rms > 0.0);
+    let any_activity = levels.channels.iter().any(|c| c.peak > 0.0 || c.rms > 0.0);
 
     audio
         .lock()
@@ -222,7 +221,10 @@ fn test_audio_processing() {
 
     // Synth plugins should drive the meters; pure effects fed silence may not, so
     // this is a soft check rather than a hard assert.
-    println!("Audio processing test completed (level activity: {})", any_activity);
+    println!(
+        "Audio processing test completed (level activity: {})",
+        any_activity
+    );
 }
 
 #[test]
@@ -239,7 +241,9 @@ fn test_plugin_state_save_restore() {
         .expect("Failed to load plugin");
 
     // Get initial parameters
-    let initial_params = plugin.get_parameters().expect("Failed to get initial parameters");
+    let initial_params = plugin
+        .get_parameters()
+        .expect("Failed to get initial parameters");
 
     // Modify some parameters
     if let Some(param) = initial_params.first() {
@@ -250,7 +254,9 @@ fn test_plugin_state_save_restore() {
     }
 
     // Get current state by reading parameters
-    let modified_params = plugin.get_parameters().expect("Failed to get modified parameters");
+    let modified_params = plugin
+        .get_parameters()
+        .expect("Failed to get modified parameters");
 
     // Reset parameters to different values
     if let Some(param) = initial_params.first() {
@@ -267,7 +273,9 @@ fn test_plugin_state_save_restore() {
     }
 
     // Verify parameters were restored
-    let restored_params = plugin.get_parameters().expect("Failed to get restored parameters");
+    let restored_params = plugin
+        .get_parameters()
+        .expect("Failed to get restored parameters");
     if let (Some(modified), Some(restored)) = (modified_params.first(), restored_params.first()) {
         assert!(
             (modified.value - restored.value).abs() < 0.01,
@@ -308,12 +316,19 @@ fn test_process_isolation() {
 
     // Parameter set/get round-trips across the boundary.
     let id = params[0].id;
-    plugin.set_parameter(id, 0.5).expect("set_parameter over IPC");
+    plugin
+        .set_parameter(id, 0.5)
+        .expect("set_parameter over IPC");
     let got = plugin.get_parameter(id).expect("get_parameter over IPC");
-    assert!((got - 0.5).abs() < 0.05, "parameter did not round-trip: {got}");
+    assert!(
+        (got - 0.5).abs() < 0.05,
+        "parameter did not round-trip: {got}"
+    );
 
     // Audio crosses the boundary.
-    plugin.start_processing().expect("start_processing over IPC");
+    plugin
+        .start_processing()
+        .expect("start_processing over IPC");
     plugin
         .send_midi_note(60, 110, MidiChannel::Ch1)
         .expect("send MIDI over IPC");
@@ -321,7 +336,9 @@ fn test_process_isolation() {
     let mut max_peak = 0.0f32;
     for _ in 0..20 {
         let mut buffers = AudioBuffers::new(0, 2, 512, 48000.0);
-        plugin.process_audio(&mut buffers).expect("process over IPC");
+        plugin
+            .process_audio(&mut buffers)
+            .expect("process over IPC");
         for ch in &buffers.outputs {
             for &s in ch {
                 max_peak = max_peak.max(s.abs());
@@ -396,7 +413,10 @@ fn test_specific_free_plugins() {
                         "  - MIDI: {}",
                         if plugin.has_midi_input { "Yes" } else { "No" }
                     );
-                    println!("  - Parameters: {}", loaded.get_parameters().unwrap_or_default().len());
+                    println!(
+                        "  - Parameters: {}",
+                        loaded.get_parameters().unwrap_or_default().len()
+                    );
 
                     // Test basic operations
                     if loaded.start_processing().is_ok() {

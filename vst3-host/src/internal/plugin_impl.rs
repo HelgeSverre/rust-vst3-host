@@ -15,7 +15,6 @@ use vst3::Steinberg::Vst::MediaTypes_::*;
 use vst3::Steinberg::{IPlugView, IPlugViewTrait};
 use vst3::{ComPtr, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 
-
 use super::{
     com_implementations::{create_event_list, ComponentHandler, HostEventList, ParameterChanges},
     module_loader::{load_module, VstModule},
@@ -265,21 +264,44 @@ impl PluginImpl {
                 let mut class_info: PClassInfo = std::mem::zeroed();
                 if factory.getClassInfo(i, &mut class_info) == kResultOk {
                     let category = crate::internal::utils::c_str_to_string(&class_info.category);
-                    
+
                     if category.contains("Audio Module Class") {
                         let name = crate::internal::utils::c_str_to_string(&class_info.name);
                         let cid = class_info.cid;
-                        let uid = format!("{:08X}{:08X}{:08X}{:08X}", 
-                            u32::from_be_bytes([cid[0] as u8, cid[1] as u8, cid[2] as u8, cid[3] as u8]),
-                            u32::from_be_bytes([cid[4] as u8, cid[5] as u8, cid[6] as u8, cid[7] as u8]),
-                            u32::from_be_bytes([cid[8] as u8, cid[9] as u8, cid[10] as u8, cid[11] as u8]),
-                            u32::from_be_bytes([cid[12] as u8, cid[13] as u8, cid[14] as u8, cid[15] as u8])
+                        let uid = format!(
+                            "{:08X}{:08X}{:08X}{:08X}",
+                            u32::from_be_bytes([
+                                cid[0] as u8,
+                                cid[1] as u8,
+                                cid[2] as u8,
+                                cid[3] as u8
+                            ]),
+                            u32::from_be_bytes([
+                                cid[4] as u8,
+                                cid[5] as u8,
+                                cid[6] as u8,
+                                cid[7] as u8
+                            ]),
+                            u32::from_be_bytes([
+                                cid[8] as u8,
+                                cid[9] as u8,
+                                cid[10] as u8,
+                                cid[11] as u8
+                            ]),
+                            u32::from_be_bytes([
+                                cid[12] as u8,
+                                cid[13] as u8,
+                                cid[14] as u8,
+                                cid[15] as u8
+                            ])
                         );
 
                         // Count audio buses
-                        let audio_inputs = component.getBusCount(kAudio as i32, kInput as i32) as u32;
-                        let audio_outputs = component.getBusCount(kAudio as i32, kOutput as i32) as u32;
-                        
+                        let audio_inputs =
+                            component.getBusCount(kAudio as i32, kInput as i32) as u32;
+                        let audio_outputs =
+                            component.getBusCount(kAudio as i32, kOutput as i32) as u32;
+
                         return Ok(PluginInfo {
                             path: path.to_path_buf(),
                             name,
@@ -289,15 +311,17 @@ impl PluginImpl {
                             uid,
                             audio_inputs,
                             audio_outputs,
-                            has_gui: false, // Will be updated by caller
-                            has_midi_input: true, // Default - could be refined
+                            has_gui: false,         // Will be updated by caller
+                            has_midi_input: true,   // Default - could be refined
                             has_midi_output: false, // Default - could be refined
                         });
                     }
                 }
             }
-            
-            Err(Error::PluginLoadFailed("No audio component found".to_string()))
+
+            Err(Error::PluginLoadFailed(
+                "No audio component found".to_string(),
+            ))
         }
     }
 

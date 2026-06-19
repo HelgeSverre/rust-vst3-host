@@ -330,8 +330,7 @@ fn main() {
 
             // Scan for available plugins
             let prefs = Preferences::load();
-            inspector.discovered_plugins =
-                discover_vst3_paths(&prefs.custom_plugin_paths);
+            inspector.discovered_plugins = discover_vst3_paths(&prefs.custom_plugin_paths);
 
             // Try to load the default plugin
             let binary_path = match get_vst3_binary_path(&inspector.plugin_path) {
@@ -1676,9 +1675,8 @@ impl VST3Inspector {
             ui.horizontal(|ui| {
                 ui.label(format!("Found {} plugins", self.discovered_plugins.len()));
                 if ui.button("Refresh").clicked() {
-                    self.discovered_plugins = discover_vst3_paths(
-                        &self.preferences.custom_plugin_paths,
-                    );
+                    self.discovered_plugins =
+                        discover_vst3_paths(&self.preferences.custom_plugin_paths);
                 }
 
                 // Add custom path button
@@ -1695,9 +1693,7 @@ impl VST3Inspector {
                             }
                             // Refresh plugin list
                             self.discovered_plugins =
-                                discover_vst3_paths(
-                                    &self.preferences.custom_plugin_paths,
-                                );
+                                discover_vst3_paths(&self.preferences.custom_plugin_paths);
                         }
                     }
                 }
@@ -1727,9 +1723,7 @@ impl VST3Inspector {
                         }
                         // Refresh plugin list
                         self.discovered_plugins =
-                            discover_vst3_paths(
-                                &self.preferences.custom_plugin_paths,
-                            );
+                            discover_vst3_paths(&self.preferences.custom_plugin_paths);
                     }
                 });
 

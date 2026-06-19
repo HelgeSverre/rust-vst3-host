@@ -192,8 +192,7 @@ fn test_detailed_plugin_info_dexed() {
         println!("Dexed not present, skipping");
         return;
     }
-    let d = vst3_host::get_detailed_plugin_info(std::path::Path::new(path))
-        .expect("detailed info");
+    let d = vst3_host::get_detailed_plugin_info(std::path::Path::new(path)).expect("detailed info");
     println!(
         "name={} vendor={} url={} classes={} audio_out_buses={} event_in_buses={}",
         d.info.name,
@@ -203,7 +202,10 @@ fn test_detailed_plugin_info_dexed() {
         d.buses.audio_outputs.len(),
         d.buses.event_inputs.len(),
     );
-    assert!(!d.factory.vendor.is_empty(), "factory vendor should be populated");
+    assert!(
+        !d.factory.vendor.is_empty(),
+        "factory vendor should be populated"
+    );
     assert!(!d.classes.is_empty(), "should enumerate at least one class");
     assert!(
         !d.buses.audio_outputs.is_empty(),

@@ -81,10 +81,35 @@ fn main() -> vst3_host::Result<()> {
     use vst3_host::MidiEvent;
     audio.lock().send_midi_note(64, 100, MidiChannel::Ch1)?;
     let events = [
-        ("PitchBend", MidiEvent::PitchBend { channel: MidiChannel::Ch1, value: 10000 }),
-        ("ChannelAftertouch", MidiEvent::ChannelAftertouch { channel: MidiChannel::Ch1, pressure: 80 }),
-        ("PolyAftertouch", MidiEvent::PolyAftertouch { channel: MidiChannel::Ch1, note: 64, pressure: 80 }),
-        ("ProgramChange", MidiEvent::ProgramChange { channel: MidiChannel::Ch1, program: 1 }),
+        (
+            "PitchBend",
+            MidiEvent::PitchBend {
+                channel: MidiChannel::Ch1,
+                value: 10000,
+            },
+        ),
+        (
+            "ChannelAftertouch",
+            MidiEvent::ChannelAftertouch {
+                channel: MidiChannel::Ch1,
+                pressure: 80,
+            },
+        ),
+        (
+            "PolyAftertouch",
+            MidiEvent::PolyAftertouch {
+                channel: MidiChannel::Ch1,
+                note: 64,
+                pressure: 80,
+            },
+        ),
+        (
+            "ProgramChange",
+            MidiEvent::ProgramChange {
+                channel: MidiChannel::Ch1,
+                program: 1,
+            },
+        ),
     ];
     for (name, ev) in events {
         match audio.lock().send_midi_event(ev) {

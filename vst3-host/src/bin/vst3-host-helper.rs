@@ -87,7 +87,11 @@ fn err<E: std::fmt::Display>(prefix: &str, e: E) -> HostResponse {
     }
 }
 
-fn handle(command: HostCommand, plugin: &mut Option<Plugin>, sample_rate: &mut f64) -> HostResponse {
+fn handle(
+    command: HostCommand,
+    plugin: &mut Option<Plugin>,
+    sample_rate: &mut f64,
+) -> HostResponse {
     match command {
         HostCommand::LoadPlugin {
             path,

@@ -295,8 +295,8 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
 /// [`crate::Plugin::get_parameters`].
 pub fn get_detailed_plugin_info(path: &Path) -> Result<DetailedPluginInfo> {
     use vst3::Steinberg::Vst::BusDirections_::*;
-    use vst3::Steinberg::Vst::MediaTypes_::*;
     use vst3::Steinberg::Vst::BusInfo as VstBusInfo;
+    use vst3::Steinberg::Vst::MediaTypes_::*;
     use vst3::{ComPtr, Interface, Steinberg::Vst::*, Steinberg::*};
 
     // Reuse the lightweight pass for the basic info.
@@ -327,7 +327,11 @@ pub fn get_detailed_plugin_info(path: &Path) -> Result<DetailedPluginInfo> {
             let mut ci: PClassInfo = std::mem::zeroed();
             if factory.getClassInfo(i, &mut ci) == kResultOk {
                 let category = crate::internal::utils::c_str_to_string(&ci.category);
-                let class_id = ci.cid.iter().map(|b| format!("{:02X}", b)).collect::<String>();
+                let class_id = ci
+                    .cid
+                    .iter()
+                    .map(|b| format!("{:02X}", b))
+                    .collect::<String>();
                 if category.contains("Audio Module Class") && audio_cid.is_none() {
                     audio_cid = Some(ci.cid);
                 }
