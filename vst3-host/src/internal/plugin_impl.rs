@@ -1102,6 +1102,9 @@ impl PluginInternal for PluginImpl {
 /// Convert a raw VST3 `Event` (as a plugin emits into its output event list) into a safe
 /// [`MidiEvent`]. Returns `None` for event types this library doesn't model.
 #[allow(non_upper_case_globals)] // kNoteOnEvent etc. are VST3 SDK constants
+// `as u8` casts on the legacy-MIDI fields are required where `c_char` is `i8` (macOS); on
+// platforms where it's already `u8` clippy flags them as redundant. Keep for portability.
+#[allow(clippy::unnecessary_cast)]
 pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
     unsafe {
         match e.r#type as u32 {

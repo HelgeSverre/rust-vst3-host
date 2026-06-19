@@ -39,7 +39,9 @@ pub fn has_objc_conflicts(path: &Path) -> bool {
     false
 }
 
-/// Detect if a plugin requires private namespace loading due to C symbol conflicts
+/// Detect if a plugin requires private namespace loading due to C symbol conflicts.
+/// Only consulted by the macOS loader (private namespaces are a dyld feature).
+#[cfg(target_os = "macos")]
 fn requires_private_namespace(path: &Path) -> bool {
     if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
         let filename_lower = filename.to_lowercase();

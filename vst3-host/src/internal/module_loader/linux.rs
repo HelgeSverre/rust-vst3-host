@@ -25,7 +25,10 @@ type GetPluginFactoryFunc = unsafe extern "C" fn() -> *mut IPluginFactory;
 
 /// Linux VST3 module implementation
 pub struct LinuxModule {
-    /// libloading Library handle
+    /// libloading Library handle. Never read directly, but MUST outlive the symbols below:
+    /// `module_exit`/`get_factory_fn` are transmuted to `'static` and point into this
+    /// library, so dropping it early would dangle them. Kept to own its lifetime.
+    #[allow(dead_code)]
     library: Library,
     /// Path to the module
     path: std::path::PathBuf,
