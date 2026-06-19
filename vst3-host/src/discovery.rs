@@ -223,8 +223,8 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
                     // Try to create component to get more info
                     let mut component_ptr: *mut IComponent = ptr::null_mut();
                     let result = factory.createInstance(
-                        class_info.cid.as_ptr() as *const i8,
-                        IComponent::IID.as_ptr() as *const i8,
+                        class_info.cid.as_ptr() as *const std::os::raw::c_char,
+                        IComponent::IID.as_ptr() as *const std::os::raw::c_char,
                         &mut component_ptr as *mut _ as *mut _,
                     );
 
@@ -322,7 +322,7 @@ pub fn get_detailed_plugin_info(path: &Path) -> Result<DetailedPluginInfo> {
         // Exported classes + locate the audio component class id.
         let num_classes = factory.countClasses();
         let mut classes = Vec::new();
-        let mut audio_cid: Option<[i8; 16]> = None;
+        let mut audio_cid: Option<[std::os::raw::c_char; 16]> = None;
         for i in 0..num_classes {
             let mut ci: PClassInfo = std::mem::zeroed();
             if factory.getClassInfo(i, &mut ci) == kResultOk {
@@ -351,7 +351,7 @@ pub fn get_detailed_plugin_info(path: &Path) -> Result<DetailedPluginInfo> {
             let mut component_ptr: *mut IComponent = ptr::null_mut();
             let result = factory.createInstance(
                 cid.as_ptr(),
-                IComponent::IID.as_ptr() as *const i8,
+                IComponent::IID.as_ptr() as *const std::os::raw::c_char,
                 &mut component_ptr as *mut _ as *mut _,
             );
             if result == kResultOk && !component_ptr.is_null() {

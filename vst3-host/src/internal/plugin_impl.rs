@@ -204,7 +204,7 @@ impl PluginImpl {
 
             let has_gui = controller.is_some() && {
                 if let Some(ref ctrl) = controller {
-                    let view_type = b"editor\0".as_ptr() as *const i8;
+                    let view_type = b"editor\0".as_ptr() as *const std::os::raw::c_char;
                     let view_ptr = ctrl.createView(view_type);
                     if !view_ptr.is_null() {
                         // Clean up the test view immediately
@@ -343,8 +343,8 @@ impl PluginImpl {
                     let mut component_ptr: *mut IComponent = ptr::null_mut();
 
                     let result = factory.createInstance(
-                        class_info.cid.as_ptr() as *const i8,
-                        IComponent::IID.as_ptr() as *const i8,
+                        class_info.cid.as_ptr() as *const std::os::raw::c_char,
+                        IComponent::IID.as_ptr() as *const std::os::raw::c_char,
                         &mut component_ptr as *mut _ as *mut _,
                     );
 
@@ -788,17 +788,20 @@ impl PluginInternal for PluginImpl {
                     vst_event.r#type = kLegacyMIDICCOutEvent as u16;
                     vst_event.__field0.midiCCOut.controlNumber =
                         ControllerNumbers_::kPitchBend as u8;
-                    vst_event.__field0.midiCCOut.channel = channel.as_index() as i8;
-                    vst_event.__field0.midiCCOut.value = (value & 0x7F) as i8;
-                    vst_event.__field0.midiCCOut.value2 = ((value >> 7) & 0x7F) as i8;
+                    vst_event.__field0.midiCCOut.channel =
+                        channel.as_index() as std::os::raw::c_char;
+                    vst_event.__field0.midiCCOut.value = (value & 0x7F) as std::os::raw::c_char;
+                    vst_event.__field0.midiCCOut.value2 =
+                        ((value >> 7) & 0x7F) as std::os::raw::c_char;
                 }
                 MidiEvent::ChannelAftertouch { channel, pressure } => {
                     // Channel pressure via legacy controller channel kAfterTouch (128).
                     vst_event.r#type = kLegacyMIDICCOutEvent as u16;
                     vst_event.__field0.midiCCOut.controlNumber =
                         ControllerNumbers_::kAfterTouch as u8;
-                    vst_event.__field0.midiCCOut.channel = channel.as_index() as i8;
-                    vst_event.__field0.midiCCOut.value = (pressure & 0x7F) as i8;
+                    vst_event.__field0.midiCCOut.channel =
+                        channel.as_index() as std::os::raw::c_char;
+                    vst_event.__field0.midiCCOut.value = (pressure & 0x7F) as std::os::raw::c_char;
                     vst_event.__field0.midiCCOut.value2 = 0;
                 }
                 MidiEvent::PolyAftertouch {
@@ -887,7 +890,7 @@ impl PluginInternal for PluginImpl {
         if let Some(ref controller) = self.controller {
             unsafe {
                 // Check if controller can create an editor view
-                let view_type = b"editor\0".as_ptr() as *const i8;
+                let view_type = b"editor\0".as_ptr() as *const std::os::raw::c_char;
                 let view_ptr = controller.createView(view_type);
                 if !view_ptr.is_null() {
                     // Clean up the test view
@@ -911,7 +914,7 @@ impl PluginInternal for PluginImpl {
         if let Some(ref controller) = self.controller {
             unsafe {
                 // Create editor view
-                let view_type = b"editor\0".as_ptr() as *const i8;
+                let view_type = b"editor\0".as_ptr() as *const std::os::raw::c_char;
                 let view_ptr = controller.createView(view_type);
                 if view_ptr.is_null() {
                     return Err(Error::Other("Failed to create editor view".to_string()));
@@ -934,11 +937,11 @@ impl PluginInternal for PluginImpl {
 
                 // Platform-specific attachment
                 #[cfg(target_os = "macos")]
-                let platform_type = b"NSView\0".as_ptr() as *const i8;
+                let platform_type = b"NSView\0".as_ptr() as *const std::os::raw::c_char;
                 #[cfg(target_os = "windows")]
-                let platform_type = b"HWND\0".as_ptr() as *const i8;
+                let platform_type = b"HWND\0".as_ptr() as *const std::os::raw::c_char;
                 #[cfg(target_os = "linux")]
-                let platform_type = b"X11EmbedWindowID\0".as_ptr() as *const i8;
+                let platform_type = b"X11EmbedWindowID\0".as_ptr() as *const std::os::raw::c_char;
 
                 // Check platform support
                 if view.isPlatformTypeSupported(platform_type) != kResultOk {
@@ -975,7 +978,7 @@ impl PluginInternal for PluginImpl {
         if let Some(ref controller) = self.controller {
             unsafe {
                 // Create a temporary view to get size
-                let view_type = b"editor\0".as_ptr() as *const i8;
+                let view_type = b"editor\0".as_ptr() as *const std::os::raw::c_char;
                 let view_ptr = controller.createView(view_type);
                 if view_ptr.is_null() {
                     return Err(Error::Other(
@@ -1144,8 +1147,8 @@ mod output_midi_tests {
         pb.r#type = kLegacyMIDICCOutEvent as u16;
         pb.__field0.midiCCOut.controlNumber = ControllerNumbers_::kPitchBend as u8;
         pb.__field0.midiCCOut.channel = 0;
-        pb.__field0.midiCCOut.value = (10000 & 0x7F) as i8;
-        pb.__field0.midiCCOut.value2 = ((10000 >> 7) & 0x7F) as i8;
+        pb.__field0.midiCCOut.value = (10000 & 0x7F) as std::os::raw::c_char;
+        pb.__field0.midiCCOut.value2 = ((10000 >> 7) & 0x7F) as std::os::raw::c_char;
         assert_eq!(
             event_to_midi(&pb),
             Some(MidiEvent::PitchBend {
@@ -1180,8 +1183,8 @@ impl PluginImpl {
             event.r#type = kLegacyMIDICCOutEvent as u16;
 
             event.__field0.midiCCOut.controlNumber = controller;
-            event.__field0.midiCCOut.channel = channel.as_index() as i8;
-            event.__field0.midiCCOut.value = value as i8;
+            event.__field0.midiCCOut.channel = channel.as_index() as std::os::raw::c_char;
+            event.__field0.midiCCOut.value = value as std::os::raw::c_char;
             event.__field0.midiCCOut.value2 = 0;
             event
         };
@@ -1248,7 +1251,7 @@ impl PluginImpl {
 
         // If not single component, try to get separate controller
         log::debug!("Component is separate from controller, getting controller class ID...");
-        let mut controller_cid = [0i8; 16];
+        let mut controller_cid: [std::os::raw::c_char; 16] = [0; 16];
         let result = component.getControllerClassId(&mut controller_cid);
 
         if result != kResultOk {
@@ -1260,7 +1263,7 @@ impl PluginImpl {
         let mut controller_ptr: *mut IEditController = ptr::null_mut();
         let create_result = factory.createInstance(
             controller_cid.as_ptr(),
-            IEditController::IID.as_ptr() as *const i8,
+            IEditController::IID.as_ptr() as *const std::os::raw::c_char,
             &mut controller_ptr as *mut _ as *mut _,
         );
 

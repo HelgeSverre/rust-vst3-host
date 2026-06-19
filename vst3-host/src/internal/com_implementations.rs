@@ -56,7 +56,7 @@ impl IComponentHandler2Trait for ComponentHandler {
         kResultOk
     }
 
-    unsafe fn requestOpenEditor(&self, _name: *const i8) -> i32 {
+    unsafe fn requestOpenEditor(&self, _name: *const std::os::raw::c_char) -> i32 {
         log::debug!("Host: Plugin requested editor open");
         kResultOk
     }
