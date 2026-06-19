@@ -2,8 +2,12 @@
 
 use thiserror::Error;
 
-/// Main error type for vst3-host operations
+/// Main error type for vst3-host operations.
+///
+/// Marked `#[non_exhaustive]`: match with a wildcard arm, as new variants may be added in
+/// future versions without it being a breaking change.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Plugin file not found
     #[error("Plugin not found: {0}")]
