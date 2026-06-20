@@ -252,10 +252,10 @@ The only build-time native dependency is `libclang`, used by `cpal`'s `coreaudio
 
 ## Documentation
 
-Full guides (Diátaxis: tutorials, how-to, reference, explanation) are in the
+Full guides (tutorials, how-to, reference, explanation) are in the
 [`docs/`](https://github.com/HelgeSverre/rust-vst3-host/tree/main/docs) directory of the
 repository. API reference is on [docs.rs](https://docs.rs/vst3-host).
 
 ## License
 
-MIT OR Apache-2.0
+MIT — see [LICENSE](LICENSE).

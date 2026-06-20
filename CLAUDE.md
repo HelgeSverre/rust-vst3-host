@@ -92,7 +92,7 @@ needed for `cpal`'s `coreaudio-sys`/`alsa-sys` bindgen on macOS/Linux.)
 
 ## Documentation
 
-User-facing docs are in [`docs/`](docs/) (Diátaxis: tutorials / how-to / reference /
+User-facing docs are in [`docs/`](docs/) (tutorials / how-to / reference /
 explanation), indexed by [`docs/README.md`](docs/README.md). Working notes, the roadmap,
 design history, and VST3 SDK internals notes are in [`docs/internal/`](docs/internal/) —
 not user-facing.
