@@ -61,6 +61,7 @@ pub mod midi;
 pub mod parameters;
 pub mod playback;
 pub mod plugin;
+pub mod realtime;
 pub mod simple;
 pub mod window;
 
@@ -89,6 +90,7 @@ pub use midi::{cc, MidiChannel, MidiEvent};
 pub use parameters::{Parameter, ParameterAutomation, ParameterChange};
 pub use playback::{play_with_backend, AudioHandle};
 pub use plugin::{Plugin, PluginInfo, WindowHandle};
+pub use realtime::{RealtimePluginRunner, RtControl};
 pub use window::PluginWindow;
 
 /// Prelude module for convenient imports

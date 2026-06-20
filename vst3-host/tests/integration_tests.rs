@@ -742,3 +742,62 @@ fn test_probe_and_auto_isolate() {
         println!("WaveShell contained: host survived");
     }
 }
+
+/// M3: the RealtimePluginRunner applies control commands from its lock-free queue and
+/// renders audio, driven offline (no device).
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_realtime_runner_applies_commands_and_renders() {
+    use vst3_host::realtime::RealtimePluginRunner;
+
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(path).exists() {
+        println!("Test plugin not found, skipping");
+        return;
+    }
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .build()
+        .unwrap();
+    let plugin = host.load_plugin(path).unwrap();
+    let params = plugin.get_parameters().unwrap();
+    let cutoff = params
+        .iter()
+        .find(|p| p.name.to_lowercase().contains("cutoff"))
+        .map(|p| p.id)
+        .unwrap_or(params[0].id);
+
+    let (mut runner, mut control) = RealtimePluginRunner::new(plugin, 256);
+    runner.start().unwrap();
+
+    // Queue control changes through the lock-free handle (as a control thread would).
+    assert!(control.set_parameter(cutoff, 0.9));
+    assert!(control.send_midi(MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 110
+    }));
+
+    // Render offline; the runner drains the queue + processes with no locks.
+    let mut peak = 0.0f32;
+    for _ in 0..40 {
+        let mut b = AudioBuffers::new(0, 2, 512, 48000.0);
+        runner.process(&mut b).unwrap();
+        for ch in &b.outputs {
+            for &s in ch {
+                peak = peak.max(s.abs());
+            }
+        }
+    }
+    assert!(peak > 0.0, "runner produced no audio from the queued note");
+
+    // The queued parameter change was applied.
+    let mut plugin = runner.into_plugin();
+    let v = plugin.get_parameter(cutoff).unwrap();
+    assert!(
+        (v - 0.9).abs() < 0.05,
+        "queued parameter change not applied: {v}"
+    );
+    println!("Realtime runner OK: peak {peak:.3}, cutoff {v}");
+}

@@ -27,6 +27,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 libc = "0.2"
+# Lock-free SPSC ring for the real-time plugin runner's command queue.
+rtrb = "0.3"
 
 # Optional dependencies
 cpal = { version = "0.16.0", optional = true }
