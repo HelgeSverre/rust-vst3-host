@@ -143,23 +143,44 @@ fn test_plugin(path: &Path) -> Row {
 }
 
 fn test_state(plugin: &mut vst3_host::Plugin, params: &[vst3_host::Parameter]) -> Cell {
-    let Some(p) = params
-        .iter()
-        .find(|p| p.can_automate && !p.is_read_only && !p.is_bypass)
-    else {
+    // Pick a representative automatable parameter, skipping meta/version flags (e.g. OB-Xd's
+    // "CompatibilityVersion") that aren't meant to round-trip like normal controls.
+    let is_meta = |name: &str| {
+        let n = name.to_lowercase();
+        n.contains("version") || n.contains("compat") || n.contains("program")
+    };
+    let pick = |meta_ok: bool| {
+        params.iter().find(|p| {
+            p.can_automate && !p.is_read_only && !p.is_bypass && (meta_ok || !is_meta(&p.name))
+        })
+    };
+    let Some(p) = pick(false).or_else(|| pick(true)) else {
         return Cell::Na;
     };
     let id = p.id;
+
+    // Parameter changes reach the *processor* (and thus the component's saved state) via the
+    // per-block input queue, so process a block after each set — otherwise separate-component
+    // plugins serialize the pre-change value and the round-trip looks broken.
+    let _ = plugin.start_processing();
+    fn pump(plugin: &mut vst3_host::Plugin) {
+        let mut b = AudioBuffers::new(0, 2, 512, 48000.0);
+        let _ = plugin.process_audio(&mut b);
+    }
+
     if plugin.set_parameter(id, 0.25).is_err() {
         return Cell::Na;
     }
+    pump(plugin);
     let Ok(snapshot) = plugin.save_state() else {
         return Cell::No;
     };
     let _ = plugin.set_parameter(id, 0.75);
+    pump(plugin);
     if plugin.load_state(&snapshot).is_err() {
         return Cell::No;
     }
+    pump(plugin);
     match plugin.get_parameter(id) {
         Ok(v) if (v - 0.25).abs() < 0.05 => Cell::Yes(String::new()),
         _ => Cell::No,
