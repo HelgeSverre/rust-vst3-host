@@ -6,6 +6,8 @@ authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 description = "A VST3 plugin inspector and testing application"
 license = "MIT"
 repository = "https://github.com/HelgeSverre/rust-vst3-host/"
+# The inspector is a consumer app, not a published crate.
+publish = false
 
 [[bin]]
 name = "vst3-inspector"

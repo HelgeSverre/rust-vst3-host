@@ -49,13 +49,16 @@ runtime-verified.
 vst3-host = "0.1"
 ```
 
-Building from source requires the VST3 SDK (included as a submodule):
+No VST3 SDK or extra setup is required — the `vst3` dependency ships pre-generated bindings.
+Building from source is just:
 
 ```bash
-git clone --recursive https://github.com/HelgeSverre/rust-vst3-host.git
+git clone https://github.com/HelgeSverre/rust-vst3-host.git
 cd rust-vst3-host
 cargo build --release
 ```
+
+(`libclang` must be installed for `cpal`'s bindgen-based audio deps on macOS/Linux.)
 
 ## Documentation
 

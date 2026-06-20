@@ -4,7 +4,7 @@ All notable changes to `vst3-host` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] - 2026-06-20
 
 First usable release of the safe VST3 hosting library, extracted from the inspector app.
 
@@ -56,8 +56,8 @@ First usable release of the safe VST3 hosting library, extracted from the inspec
   variants can be added without a breaking change.
 
 ### Known limitations
-- Building requires the VST3 SDK and the `VST3_SDK_DIR` environment variable (inherited
-  from the `vst3` dependency). See the README.
+- `libclang` is required at build time (for `cpal`'s `coreaudio-sys`/`alsa-sys` bindgen).
+  No VST3 SDK is needed — `vst3` 0.3 ships pre-generated bindings.
 - The audio path is correctness-first, not yet lock-free/real-time-tuned.
 - Plugins that crash from their own packaging (e.g. Waves/WaveShell) are *contained* via
   isolation, not loadable in-process.
