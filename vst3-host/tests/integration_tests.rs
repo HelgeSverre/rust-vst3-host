@@ -835,3 +835,73 @@ fn test_play_realtime_smoke() {
     // Reaching here means the realtime callback ran without crashing.
     println!("play_realtime smoke OK");
 }
+
+/// M-automation: a ParameterAutomation curve, scheduled sample-accurately each block via
+/// set_parameter_at, audibly evolves the output over a timeline (offline render).
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_sample_accurate_automation_evolves_output() {
+    use vst3_host::parameters::{AutomationCurve, ParameterAutomation};
+
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(path).exists() {
+        println!("Test plugin not found, skipping");
+        return;
+    }
+    let sr = 48000.0;
+    let block = 512usize;
+    let mut host = Vst3Host::builder()
+        .sample_rate(sr)
+        .block_size(block)
+        .build()
+        .unwrap();
+    let mut plugin = host.load_plugin(path).unwrap();
+    plugin.start_processing().unwrap();
+
+    let cutoff = plugin
+        .get_parameters()
+        .unwrap()
+        .iter()
+        .find(|p| p.name.to_lowercase().contains("cutoff"))
+        .map(|p| p.id)
+        .expect("Dexed has a cutoff param");
+    plugin.send_midi_note(60, 110, MidiChannel::Ch1).unwrap();
+
+    // Cutoff ramps closed -> open over one second.
+    let auto = ParameterAutomation::new()
+        .add_point(0.0, 0.05)
+        .add_point(1.0, 0.95)
+        .with_curve(AutomationCurve::Linear);
+
+    let blocks = sr as usize / block; // ~1 second
+    let (mut early, mut late) = (0.0f64, 0.0f64);
+    let mut t = 0.0;
+    for b in 0..blocks {
+        // Schedule this block's sub-block automation points (sample-accurate).
+        for (offset, value) in auto.points_for_block(t, block, sr, 8) {
+            plugin.set_parameter_at(cutoff, value, offset).unwrap();
+        }
+        let mut buf = AudioBuffers::new(0, 2, block, sr);
+        plugin.process_audio(&mut buf).unwrap();
+        let sumsq: f64 = buf
+            .outputs
+            .iter()
+            .flat_map(|c| c.iter())
+            .map(|&s| (s as f64) * (s as f64))
+            .sum();
+        let rms = (sumsq / (block as f64 * 2.0)).sqrt();
+        if b < blocks / 4 {
+            early += rms;
+        } else if b >= 3 * blocks / 4 {
+            late += rms;
+        }
+        t += block as f64 / sr;
+    }
+    plugin.stop_processing().ok();
+
+    println!("automation timeline: early-quarter energy {early:.4}, late-quarter {late:.4}");
+    assert!(
+        late > early,
+        "opening the cutoff over the timeline should raise output energy: early={early:.4} late={late:.4}"
+    );
+}
