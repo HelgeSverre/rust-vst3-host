@@ -167,7 +167,7 @@ impl PluginGuiApp {
             if let Some(device) = &self.audio_device {
                 let config = cpal::StreamConfig {
                     channels: 2,
-                    sample_rate: cpal::SampleRate(self.sample_rate as u32),
+                    sample_rate: self.sample_rate as u32,
                     buffer_size: cpal::BufferSize::Fixed(self.block_size as u32),
                 };
 
@@ -181,7 +181,7 @@ impl PluginGuiApp {
 
                 let stream = device
                     .build_output_stream(
-                        &config,
+                        config,
                         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                             // Clear output buffer
                             for sample in data.iter_mut() {
