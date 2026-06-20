@@ -1,124 +1,97 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository.
 
-## Project Overview
+## What this is
 
-This is a VST3 plugin host application written in Rust. It provides a graphical interface for loading, inspecting, and testing VST3 plugins with real-time parameter manipulation and MIDI event monitoring.
+A Cargo workspace with two members:
 
-## Essential Commands
+- **`vst3-host/`** — a safe Rust library for hosting VST3 plugins. **This is the product.**
+- **`vst3-inspector/`** — an egui app for browsing/inspecting/testing plugins, built
+  entirely on the library's public API (it contains no VST3/COM code of its own — it's the
+  proof that the public surface is sufficient, and a worked example of consuming it).
 
-### Build and Run
+The library wraps the VST3 C++/COM API behind a safe Rust surface: callers never write
+`unsafe` and never see a COM pointer.
+
+## Commands
+
+Common tasks are wrapped in a [`justfile`](justfile) (`just --list` to see all):
+
 ```bash
-# Build the project
-cargo build
-
-# Build in release mode (recommended for VST3 plugin loading)
-cargo build --release
-
-# Run the application
-cargo run --release
-
-# Check for compilation errors
-cargo check
-
-# Format code
-cargo fmt
-
-# Run linter
-cargo clippy
+just build              # cargo build --workspace
+just test               # cargo test --workspace --all-features
+just lint               # cargo clippy --workspace --all-features  (alias: just clippy)
+just check              # fmt-check + clippy + test (pre-merge gate)
+just fmt                # cargo fmt
+just inspector          # run the egui app
+just play [PLUGIN]      # play_synth example (defaults to test_plugins/Dexed.vst3)
+just isolated [PLUGIN]  # run a plugin in an isolated process
+just selftest [PLUGIN]  # headless: drive the library through the inspector binary, no GUI
+just helper             # build the process-isolation helper binary
+just test-isolation     # run the (ignored) isolation capstone tests
 ```
 
-### Testing
-```bash
-# Run tests (if any exist)
-cargo test
+`just selftest` is the fastest way to verify the end-to-end path (discover → load →
+params → play → audio) without a GUI; use it as a smoke test after changes.
 
-# Run tests with output
-cargo test -- --nocapture
-```
+## Library architecture (`vst3-host/src/`)
 
-## Architecture Overview
+Public modules expose only safe types:
 
-The application is structured with a main file (`src/main.rs`, ~4500 lines) and several supporting modules:
+- `simple` — one-call helpers (`load_plugin`, `play`, `discover_plugins`).
+- `host` — `Vst3Host` + `Vst3HostBuilder` (sample rate, block size, isolation, scan paths).
+- `plugin` — `Plugin` (the loaded plugin handle), `PluginInfo`.
+- `playback` — `AudioHandle`, `play_with_backend` (the cpal→plugin bridge).
+- `parameters`, `midi`, `audio`, `error`, `discovery`, `backends` (CpalBackend),
+  `process_isolation`, `window`.
 
-### Core Components
+All `unsafe`/COM lives in **`src/internal/`** (not exported):
 
-1. **VST3Inspector** - Main application state containing:
-   - Plugin discovery and listing
-   - Current plugin state and metadata
-   - GUI state management
-   - Parameter values and bus configurations
+- `plugin_impl` — in-process VST3 COM lifecycle (the real work; RAII cleanup).
+- `com_implementations` — host-side COM objects (event lists, component handler).
+- `module_loader/` — platform bundle loading (CFBundle on macOS, etc.).
+- `isolated_plugin_impl` — IPC client for the out-of-process path.
 
-2. **Platform-specific Window Management**:
-   - **macOS**: Uses Cocoa/NSWindow for native window creation
-   - **Windows**: Uses Win32 API for window management
-   - Implements `IPlugFrame` for VST3 plugin GUI embedding
+`Plugin` holds a boxed `PluginInternal` trait object; `PluginImpl` (in-process) and
+`IsolatedPluginImpl` (IPC to the helper) both implement it, so `load_plugin` returns the
+same `Plugin` type either way. See `docs/explanation/architecture.md`.
 
-3. **Plugin Loading System**:
-   - Dynamic library loading via `libloading`
-   - Automatic discovery of VST3 plugins from standard directories
-   - Safe handling of VST3 COM interfaces
+## Key facts
 
-4. **Event Handling**:
-   - Custom `IEventList` implementation for MIDI events
-   - `MonitoredEventList` wrapper for immediate MIDI event capture
-   - `ComponentHandler` for parameter change notifications
-   - Real-time MIDI monitoring with event display
-   - MIDI channel selection (1-16) for multi-timbral plugins
+- **MIDI note convention: C3 = 60** (`midi::note_to_name`/`name_to_note`).
+- **Parameters are normalized** (`0.0–1.0`); use `Plugin::format_parameter` to render the
+  plugin's own display string.
+- **Audio**: `Vst3Host::play`/`simple::play` open the default device via `CpalBackend`. The
+  audio path is correctness-first (mutex on the callback) — not yet lock-free/RT-tuned.
+  `process_audio` handles variable block sizes (clamped to the configured max).
+- **Process isolation**: the `process-isolation` feature is on by default (so the
+  `vst3-host-helper` binary always builds), but the runtime default is in-process. Opt in
+  with `Vst3Host::builder().with_process_isolation(true)`. GUI-across-boundary and
+  auto-respawn are not implemented. See `docs/explanation/process-isolation.md`.
+- **`MidiEvent::ProgramChange` is unsupported** (VST3 uses `IUnitInfo` program lists).
+- Features: `cpal-backend` (default), `process-isolation` (default), `egui-widgets`
+  (planned, not yet a usable widget).
+- The `prelude` does NOT export `Result` (it would shadow `std::result::Result`); use
+  `vst3_host::Result`.
 
-### VST3 Plugin Paths
+## Build setup
 
-The application scans these standard directories:
+The VST3 SDK is the `vst3sdk` git submodule. `.cargo/config.toml` sets
+`VST3_SDK_DIR = "vst3sdk"`, so an in-tree build needs no extra config. Clone with
+`--recursive` or run `git submodule update --init --recursive`.
 
-**macOS**:
-- `/Library/Audio/Plug-Ins/VST3`
-- `~/Library/Audio/Plug-Ins/VST3`
+## Documentation
 
-**Windows**:
-- `C:\Program Files\Common Files\VST3`
-- `C:\Program Files (x86)\Common Files\VST3`
+User-facing docs are in [`docs/`](docs/) (Diátaxis: tutorials / how-to / reference /
+explanation), indexed by [`docs/README.md`](docs/README.md). Working notes, the roadmap,
+design history, and VST3 SDK internals notes are in [`docs/internal/`](docs/internal/) —
+not user-facing.
 
-### Key Implementation Details
+## Conventions
 
-- Uses `vst3` crate (0.1.2) for VST3 interface bindings
-- GUI built with egui/eframe with Catppuccin theme
-- Extensive use of unsafe Rust for VST3 COM interface interactions
-- Supports both single-component and separate controller VST3 architectures
-- Platform-specific binary path resolution within VST3 bundles
-- MIDI note convention: C3 = MIDI note 60
-- Virtual keyboard spans C1 to C6 (5 octaves) with MIDI note numbers displayed
-
-### Environment Configuration
-
-The project uses a `.cargo/config.toml` that sets:
-```toml
-[env]
-VST3_SDK_DIR = { value = "vst3sdk", relative = true }
-```
-
-This points to the VST3 SDK submodule included in the repository.
-
-## Development Workflow
-
-1. The application defaults to loading "HY-MPS3 free.vst3" on startup
-2. Main UI tabs:
-   - **Discovery**: Browse and select available VST3 plugins
-   - **Plugin**: View detailed plugin information and parameters
-   - **Processing**: Configure audio bus settings
-   - **MIDI Monitor**: Real-time MIDI event display
-
-3. When modifying the code:
-   - Main application logic is in `src/main.rs`
-   - COM implementations are in `src/com_implementations.rs`
-   - Audio processing structures in `src/audio_processing.rs`
-   - Data structures in `src/data_structures.rs`
-   - Follow existing patterns for VST3 COM interface handling
-   - Ensure proper cleanup of VST3 interfaces to prevent memory leaks
-
-## Important Notes
-
-- Always build in release mode when testing with actual VST3 plugins for better performance
-- The application uses detailed console logging - run from terminal to see diagnostic output
-- VST3 plugin initialization follows a specific sequence that must be maintained
-- String conversions between Rust strings and VST3's UTF-16 strings are handled by utility functions in the code
+- Run `just check` (or at least `cargo fmt` + `cargo test --workspace --all-features`)
+  before considering work done. Keep the tree compiling and the suite green per change.
+- Real plugins for testing live in `test_plugins/` (e.g. `Dexed.vst3`).
+- When adding library API, prefer extending the safe public surface over exposing COM;
+  keep all `unsafe` inside `src/internal/`.

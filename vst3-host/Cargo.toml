@@ -1,0 +1,102 @@
+[package]
+name = "vst3-host"
+version = "0.1.0"
+authors = ["Helge Sverre <helge.sverre@gmail.com>"]
+edition = "2021"
+description = "Safe, simple VST3 plugin hosting with real-time audio, MIDI support, and crash protection"
+documentation = "https://docs.rs/vst3-host"
+readme = "README.md"
+homepage = "https://github.com/HelgeSverre/rust-vst3-host/"
+repository = "https://github.com/HelgeSverre/rust-vst3-host/"
+license = "MIT OR Apache-2.0"
+keywords = ["vst3", "audio", "plugin", "host", "realtime"]
+categories = ["multimedia::audio", "api-bindings", "multimedia", "development-tools"]
+exclude = [
+    "tests/*",
+    "examples/*",
+    ".github/*",
+    ".gitignore",
+    ".cargo/*",
+]
+
+[dependencies]
+vst3 = { workspace = true }
+libloading = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+libc = "0.2"
+
+# Optional dependencies
+cpal = { version = "0.16.0", optional = true }
+egui = { version = "0.31.1", optional = true }
+
+# Platform-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry"] }
+core-foundation = "0.10"
+objc2-app-kit = { version = "0.3", features = [
+    "NSWindow",
+    "NSView",
+    "NSResponder",
+    "NSGraphics",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# X11 plugin-editor window support (ported from the khremeviuc1004 fork). Requires
+# libxcb dev headers at build time on Linux.
+xcb = "1.7"
+
+[features]
+# process-isolation is on by default so the helper binary is always built and the
+# opt-in `Vst3Host::builder().with_process_isolation(true)` works without extra flags.
+# Note: isolation is still opt-in at *runtime* (the default load path is in-process) —
+# enabling it by default would require shipping/locating the helper binary in the
+# consumer's environment, which is a deployment concern, not just a flag.
+default = ["cpal-backend", "process-isolation"]
+cpal-backend = ["cpal"]
+process-isolation = []
+egui-widgets = ["egui"]
+
+[dev-dependencies]
+env_logger = "0.11"
+rfd = "0.15"
+eframe = "0.31"
+
+[[example]]
+name = "play_synth"
+required-features = ["cpal-backend"]
+
+[[example]]
+name = "isolated_host"
+required-features = ["process-isolation"]
+
+[[example]]
+name = "plugin_scanner"
+
+[[example]]
+name = "plugin_gui"
+required-features = ["cpal-backend"]
+
+[[example]]
+name = "host"
+required-features = ["cpal-backend", "egui-widgets"]
+
+[[example]]
+name = "test_loading"
+
+[[example]]
+name = "debug_loader"
+
+[[bin]]
+name = "vst3-host-helper"
+required-features = ["process-isolation"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

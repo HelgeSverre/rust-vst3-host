@@ -4,7 +4,27 @@
       "Bash(rg:*)",
       "Bash(cargo:*)",
       "Bash(git add:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:steinbergmedia.github.io)",
+      "Bash(find:*)",
+      "Bash(./target/debug/examples/host \"/Users/helge/code/vst-host/test_plugins/Dexed.vst3\")",
+      "Bash(RUST_LOG=debug cargo run --example test_loading -- \"/Users/helge/code/vst-host/test_plugins/Dexed.vst3\")",
+      "Bash(RUST_LOG=vst3_host=debug cargo run --example test_loading -- \"/Users/helge/code/vst-host/test_plugins/Dexed.vst3\")",
+      "WebSearch",
+      "WebSearch",
+      "Bash(./target/release/examples/host \"/Users/helge/code/vst-host/test_plugins/Dexed.vst3\")",
+      "Bash(RUST_LOG=debug cargo run --example host --features \"cpal-backend,egui-widgets\" -- \"/Users/helge/code/vst-host/test_plugins/Dexed.vst3\")",
+      "Bash(RUST_LOG=info timeout 10s cargo run --example host --features \"cpal-backend,egui-widgets\" -- \"/Users/helge/code/vst-host/test_plugins/Dexed.vst3\")",
+      "Bash(RUST_LOG=debug timeout 15s cargo run --example host --features \"cpal-backend,egui-widgets\" -- \"/Library/Audio/Plug-Ins/VST3/WaveShell1-VST3 14.12.vst3\")",
+      "WebFetch(domain:stackoverflow.com)",
+      "Bash(RUST_LOG=info cargo run --example host --features \"cpal-backend,egui-widgets,process-isolation\" -- \"/Library/Audio/Plug-Ins/VST3/WaveShell1-VST3 14.12.vst3\")",
+      "Bash(RUST_LOG=info cargo run --example host --features \"cpal-backend,egui-widgets\" -- \"/Library/Audio/Plug-Ins/VST3/WaveShell1-VST3 14.12.vst3\")",
+      "Bash(RUST_LOG=debug timeout 10s cargo run --example host --features \"cpal-backend,egui-widgets\" -- \"/Users/helge/code/vst-host/test_plugins/Dexed.vst3\")",
+      "Bash(RUST_LOG=info timeout 10s cargo run --example host --features \"cpal-backend,egui-widgets\" -- \"/Library/Audio/Plug-Ins/VST3/WaveShell1-VST3 14.12.vst3\")",
+      "Bash(timeout 15s cargo run --release --example plugin_scanner --features \"cpal-backend\")"
     ],
     "deny": []
   }

@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The `vst3` dependency's build script requires this; point it at the bundled SDK submodule.
+  VST3_SDK_DIR: ${{ github.workspace }}/vst3sdk
+
+jobs:
+  # Primary platform: full workspace, formatting, lint, tests, examples.
+  macos:
+    name: macOS (full)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - run: cargo build --workspace --all-features --examples
+
+  # The published crate must build and pass its tests on Linux (incl. the X11/XCB path).
+  linux:
+    name: Linux (vst3-host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install build deps (libclang, libxcb, ALSA)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev clang libxcb1-dev libxcb-util-dev libasound2-dev pkg-config
+      - run: cargo build -p vst3-host --all-features
+      - run: cargo test -p vst3-host --all-features
+      - run: cargo clippy -p vst3-host --all-features -- -D warnings
+
+  # The published crate must at least build on Windows (bindgen needs LLVM).
+  windows:
+    name: Windows (vst3-host)
+    runs-on: windows-latest
+    env:
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install LLVM (for bindgen)
+        run: choco install llvm -y
+      - run: cargo build -p vst3-host

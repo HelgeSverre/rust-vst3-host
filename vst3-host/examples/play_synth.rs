@@ -1,0 +1,130 @@
+//! Load a VST3 instrument and play a note through the default audio device.
+//!
+//! This is the "batteries-included" happy path end to end:
+//!
+//! ```text
+//! cargo run --example play_synth --features cpal-backend -- /path/to/synth.vst3
+//! ```
+//!
+//! Pass a `.vst3` path, or run with no args to play the first discovered plugin.
+
+use std::time::Duration;
+use vst3_host::{midi::MidiChannel, simple};
+
+fn main() -> vst3_host::Result<()> {
+    env_logger::init();
+
+    let path = std::env::args().nth(1);
+
+    let plugin = match path {
+        Some(p) => {
+            println!("Loading {p}");
+            simple::load_plugin(&p)?
+        }
+        None => {
+            println!("No path given; discovering plugins...");
+            let mut found = simple::discover_plugins()?;
+            let info = found
+                .drain(..)
+                .next()
+                .ok_or_else(|| vst3_host::Error::Other("No VST3 plugins found".into()))?;
+            println!("Playing first discovered: {} by {}", info.name, info.vendor);
+            simple::load_plugin(&info.path)?
+        }
+    };
+
+    println!(
+        "Loaded: {} ({} in / {} out, midi_in: {})",
+        plugin.info().name,
+        plugin.info().audio_inputs,
+        plugin.info().audio_outputs,
+        plugin.info().has_midi_input,
+    );
+
+    // Show how the plugin formats a few of its own parameters (accurate display),
+    // contrasted with the normalized-space approximation.
+    if let Ok(params) = plugin.get_parameters() {
+        println!("First parameters (plugin-formatted vs approximate):");
+        for p in params.iter().take(5) {
+            let accurate = plugin
+                .format_parameter(p.id, p.value)
+                .unwrap_or_else(|_| "<n/a>".into());
+            println!(
+                "  {:<24} {:>12}   (approx: {})",
+                p.name,
+                accurate,
+                p.format_value(p.value)
+            );
+        }
+    }
+
+    // Start streaming audio to the default output device.
+    let audio = simple::play(plugin)?;
+    println!("Audio stream started. Sending middle C...");
+
+    // Play a short C-major arpeggio so an instrument makes audible sound, sampling
+    // the output meters *while* each note rings (peak decays once notes stop).
+    let mut max_peak = 0.0f32;
+    for note in [60u8, 64, 67, 72] {
+        audio.lock().send_midi_note(note, 110, MidiChannel::Ch1)?;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(25));
+            let levels = audio.lock().get_output_levels();
+            for c in &levels.channels {
+                max_peak = max_peak.max(c.peak);
+            }
+        }
+        audio.lock().send_midi_note_off(note, MidiChannel::Ch1)?;
+    }
+
+    // Exercise the full MIDI event surface (held note + expression).
+    use vst3_host::MidiEvent;
+    audio.lock().send_midi_note(64, 100, MidiChannel::Ch1)?;
+    let events = [
+        (
+            "PitchBend",
+            MidiEvent::PitchBend {
+                channel: MidiChannel::Ch1,
+                value: 10000,
+            },
+        ),
+        (
+            "ChannelAftertouch",
+            MidiEvent::ChannelAftertouch {
+                channel: MidiChannel::Ch1,
+                pressure: 80,
+            },
+        ),
+        (
+            "PolyAftertouch",
+            MidiEvent::PolyAftertouch {
+                channel: MidiChannel::Ch1,
+                note: 64,
+                pressure: 80,
+            },
+        ),
+        (
+            "ProgramChange",
+            MidiEvent::ProgramChange {
+                channel: MidiChannel::Ch1,
+                program: 1,
+            },
+        ),
+    ];
+    for (name, ev) in events {
+        match audio.lock().send_midi_event(ev) {
+            Ok(()) => println!("  MIDI {name:<18} accepted"),
+            Err(e) => println!("  MIDI {name:<18} -> {e}"),
+        }
+    }
+    audio.lock().send_midi_note_off(64, MidiChannel::Ch1)?;
+
+    println!("Done. Max output peak while playing: {max_peak:.4}");
+    if max_peak > 0.0 {
+        println!("✅ Plugin produced audio through the CPAL backend.");
+    } else {
+        println!("⚠️  No output observed (effect fed silence, or no active output device).");
+    }
+
+    Ok(())
+}
