@@ -50,6 +50,11 @@ play PLUGIN_PATH=PLUGIN:
 selftest PLUGIN_PATH=PLUGIN:
     cargo run -p vst3-inspector --bin vst3-inspector -- --selftest "{{ PLUGIN_PATH }}"
 
+# Generate a plugin compatibility matrix (Markdown) for installed plugins (crash-safe)
+[group('test')]
+compat *PLUGINS: helper
+    cargo run -p vst3-host --example compatibility_matrix --features cpal-backend,process-isolation -- {{ PLUGINS }}
+
 # Compile + unit-test the library on Linux in Docker — verifies cross-platform builds
 # (c_char signedness) and that the X11/XCB editor path compiles. Needs Docker.
 [group('test')]

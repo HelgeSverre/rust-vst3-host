@@ -25,6 +25,7 @@ Focused recipes. They assume you've done the getting-started tutorial.
 - [API overview](reference/api-overview.md) — map of the public types; full signatures on [docs.rs](https://docs.rs/vst3-host).
 - [Feature flags](reference/feature-flags.md)
 - [Platform support](reference/platform-support.md)
+- [Plugin compatibility](reference/compatibility.md) — how real plugins fare, by capability.
 
 ## Explanation — understand how it works
 
