@@ -47,7 +47,7 @@ impl IHostApplicationTrait for HostApplication {
             if i + 1 >= dst.len() {
                 break;
             }
-            dst[i] = ch as i16;
+            dst[i] = ch;
             i += 1;
         }
         dst[i] = 0;
@@ -100,7 +100,7 @@ enum AttrValue {
     Int(i64),
     Float(f64),
     /// UTF-16 (TChar) string, not null-terminated.
-    Str(Vec<i16>),
+    Str(Vec<u16>),
     Bin(Vec<u8>),
 }
 
@@ -165,7 +165,7 @@ impl IAttributeListTrait for HostAttributeList {
             _ => kResultFalse,
         }
     }
-    unsafe fn setString(&self, id: *const std::os::raw::c_char, string: *const i16) -> tresult {
+    unsafe fn setString(&self, id: *const std::os::raw::c_char, string: *const u16) -> tresult {
         if string.is_null() {
             return kResultFalse;
         }
@@ -181,7 +181,7 @@ impl IAttributeListTrait for HostAttributeList {
     unsafe fn getString(
         &self,
         id: *const std::os::raw::c_char,
-        string: *mut i16,
+        string: *mut u16,
         size_in_bytes: u32,
     ) -> tresult {
         match self.get_value(&attr_key(id)) {

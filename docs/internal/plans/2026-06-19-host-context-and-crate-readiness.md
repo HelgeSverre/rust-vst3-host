@@ -17,7 +17,7 @@ host-side; the only robust handling is process isolation, which we already have.
 roadmap completes (1), makes (2) automatic and recoverable, and then does the crate-quality
 work (CI, warnings, metadata) to publish.
 
-**Tech stack:** Rust, the `vst3` crate (0.1.2, bindgen over the VST3 SDK), `cpal`, `xcb`
+**Tech stack:** Rust, the `vst3` crate (0.3.0, bindgen over the VST3 SDK), `cpal`, `xcb`
 (Linux), Docker for cross-platform CI.
 
 ## Global constraints

@@ -47,6 +47,9 @@ First usable release of the safe VST3 hosting library, extracted from the inspec
 - Native plugin editor windows (macOS/Windows; Linux via X11/XCB).
 - Cross-platform: builds and unit-tests pass on macOS and Linux (incl. aarch64).
 - Declared MSRV (`rust-version = "1.81"`, the floor of the optional `egui` dependency).
+- Upgraded the `vst3` binding 0.1.2 -> 0.3.0 (its `TChar` widened from `i16` to `u16`);
+  verified end-to-end against Dexed and TyrellN6 (load, params, audio, state round-trip).
+- Bumped `cpal` 0.16 -> 0.18 and `rfd` 0.15 -> 0.17.
 
 ### API stability
 - `Error` and `MidiEvent` are `#[non_exhaustive]` — match them with a wildcard arm; new
