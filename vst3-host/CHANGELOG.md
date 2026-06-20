@@ -4,6 +4,14 @@ All notable changes to `vst3-host` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-06-20
+
+### Changed
+- Relicensed to **MIT only** (was `MIT OR Apache-2.0`). A single `LICENSE` file now sits at
+  the repo root and in the crate.
+- Expanded the README with a full set of examples (discovery, parameters, state, isolation,
+  realtime) and a complete end-to-end "putting it all together" walkthrough.
+
 ## [0.1.0] - 2026-06-20
 
 First usable release of the safe VST3 hosting library, extracted from the inspector app.
