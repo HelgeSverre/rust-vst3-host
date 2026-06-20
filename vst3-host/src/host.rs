@@ -24,9 +24,14 @@ pub struct Vst3Host {
 }
 
 impl Vst3Host {
-    /// Create a new VST3 host with default settings
+    /// Create a new VST3 host with default settings.
+    ///
+    /// Discovery scans the standard system VST3 directories (consistent with
+    /// [`Vst3Host::default`]). For explicit control use [`Vst3Host::builder`]; the builder
+    /// does **not** scan system paths unless you opt in with
+    /// [`Vst3HostBuilder::scan_default_paths`].
     pub fn new() -> Result<Self> {
-        Self::builder().build()
+        Self::builder().scan_default_paths().build()
     }
 
     /// Create a new VST3 host builder
