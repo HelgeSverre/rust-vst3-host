@@ -93,8 +93,12 @@ impl fmt::Display for MidiChannel {
     }
 }
 
-/// High-level MIDI event types
+/// High-level MIDI event types.
+///
+/// Marked `#[non_exhaustive]`: match with a wildcard arm, as new event kinds (e.g. SysEx)
+/// may be added in future versions without it being a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MidiEvent {
     /// Note On event
     NoteOn {

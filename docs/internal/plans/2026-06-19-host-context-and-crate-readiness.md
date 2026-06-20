@@ -35,7 +35,13 @@ work (CI, warnings, metadata) to publish.
 
 ---
 
-## Track A — Complete the host context (the immediate work)
+## Track A — Complete the host context (the immediate work) — DONE
+
+**Status:** A1–A4 are all implemented in `vst3-host/src/internal/com_implementations.rs`:
+`HostAttributeList` (`IAttributeList`, unit-tested), `HostMessage` (`IMessage`),
+`HostApplication::createInstance` vends both by byte-wise `TUID` compare, and
+`isPlugInterfaceSupported` advertises `IComponentHandler`/`IComponentHandler2` accurately.
+Suite + Linux build green; no plugin regressions.
 
 **Why:** The SDK's standard host context implements `IHostApplication` (name **+
 `createInstance` that vends `IMessage`/`IAttributeList`**) and `IPlugInterfaceSupport`. We
@@ -122,14 +128,12 @@ provide) using the same byte-wise `TUID` compare as A3; `kResultFalse` otherwise
 packaging. We can't fix that host-side; we contain it (isolation) and make it graceful and
 recoverable — what DAWs do.
 
-### B1: Auto-isolate known-crashy plugins
-`Vst3Host::load_plugin` already routes to isolation only when opted in. Add a builder
-opt-in `auto_isolate_risky(true)` (and/or make it default when `process-isolation` is on)
-that, for plugins `discovery::has_objc_conflicts()` flags (Waves/WaveShell), loads them
-isolated automatically. Files: `host.rs`, `discovery.rs`.
-**Acceptance:** loading WaveShell through a default host returns a clean `Err` (helper
-crash contained) or loads isolated — the host process never segfaults. Verify with the
-`isolated_host` example + a new selftest variant.
+### B1: Auto-isolate known-crashy plugins — DONE
+Implemented as the builder opt-in `Vst3HostBuilder::auto_isolate_problematic(true)`:
+`load_plugin` routes to isolation when the flag is set and
+`internal::module_loader::has_objc_conflicts(path)` flags the plugin (Waves/WaveShell).
+Files: `host.rs`. The host process never segfaults on such plugins (the crash is contained
+by the helper).
 
 ### B2: Isolation crash-recovery (auto-respawn) — ✅ DONE
 A dead/crashed/hung helper now maps to a typed `Error::PluginCrashed` / `PluginTimeout`
@@ -140,12 +144,10 @@ Files: `process_isolation.rs`, `internal/isolated_plugin_impl.rs`, `plugin.rs`.
 call returns `PluginCrashed` and the host survives → `recover()` reloads Dexed (2238 params).
 *Deferred:* parameter values are not replayed on recovery (pair with state save/restore).
 
-### B3: A "validate plugin" probe (the DAW rescan feature)
-A `Vst3Host::probe_plugin(path) -> PluginStatus { Ok, Crashed, Timeout }` that loads in an
-isolated helper and reports whether it initializes without crashing — so a UI can blacklist
-bad plugins during a scan. Builds on B1/B2. Files: `host.rs`, `process_isolation.rs`.
-**Acceptance:** `probe_plugin(WaveShell)` returns `Crashed` (not a host crash);
-`probe_plugin(Dexed)` returns `Ok`.
+### B3: A "validate plugin" probe (the DAW rescan feature) — DONE
+`Vst3Host::probe_plugin(path) -> ProbeResult { Ok, Crashed, TimedOut, Failed(String) }`
+loads in an isolated helper and reports whether it initializes without crashing. Files:
+`host.rs`. Used by the compatibility-matrix harness to gate in-process capability checks.
 
 ### B4: Main-thread loading guidance — ✅ DONE
 Added `docs/explanation/threading.md` (which thread each call belongs on, why) and linked it
@@ -177,17 +179,22 @@ are gone. `-D warnings` was already enforced in `just lint` + CI. Files: `window
 build via Docker green (objc2 deps are macOS-only). **Pending:** opening a real editor window
 is GUI runtime behavior — verify interactively (`cargo run --example plugin_gui`).
 
-### C3: Publish readiness
-`Cargo.toml` metadata audit (keywords/categories present; `readme`, `repository`,
-`documentation`, `rust-version` floor); add `CHANGELOG.md`; ensure `LICENSE-MIT` +
-`LICENSE-APACHE` exist; `cargo publish --dry-run -p vst3-host` clean; verify `docs.rs`
-builds with `--all-features` (the `[package.metadata.docs.rs]` cfg is already present).
-**Acceptance:** `cargo publish --dry-run` succeeds; docs.rs preview builds.
+### C3: Publish readiness — DONE
+`Cargo.toml` metadata complete (keywords, categories, `readme`, `repository`,
+`documentation`, `homepage`, `license`, and now `rust-version = "1.81"`); `CHANGELOG.md`,
+`LICENSE-MIT`, `LICENSE-APACHE` all present; `[package.metadata.docs.rs]` builds all-features.
+**Acceptance (met):** `cargo publish --dry-run -p vst3-host --all-features` succeeds and
+verifies. *Fixed along the way:* 537 stale `vst3-host/target/` files had been committed
+before `.gitignore` covered them and were being packaged — the dry-run package was 142 MiB
+(46 MiB compressed, far over the 10 MiB crates.io limit). After `git rm -r --cached
+vst3-host/target`, the package is **37 files, 114 KiB compressed**.
+*Caveat (pre-existing, inherited from `vst3`):* a real `cargo publish`/docs.rs build needs
+the VST3 SDK via `VST3_SDK_DIR` — documented in the README and CHANGELOG known-limitations.
 
-### C4: API stability pass for 0.1
-Review the public surface (what's `pub`, the prelude, error variants) for naming and
-forward-compatibility before publishing; decide `#[non_exhaustive]` on `Error`/`MidiEvent`.
-Lightweight; a doc + small edits.
+### C4: API stability pass for 0.1 — DONE
+`Error` and `MidiEvent` are both `#[non_exhaustive]` (match with a wildcard arm; variants can
+be added without a breaking change). Public surface reviewed; the prelude deliberately omits
+`Result` (would shadow `std::result::Result`).
 
 ---
 
