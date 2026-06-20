@@ -102,6 +102,10 @@ pub(crate) trait PluginInternal: Send {
     fn take_editor_resize_request(&self) -> Option<(i32, i32)> {
         None
     }
+    /// Total output audio channels across the plugin's output buses. Defaults to 2.
+    fn output_channel_count(&self) -> usize {
+        2
+    }
 }
 
 impl Plugin {
@@ -445,6 +449,17 @@ impl Plugin {
     /// in-process. Useful for monitoring an isolated plugin's resource use.
     pub fn isolation_pid(&self) -> Option<u32> {
         self.internal.as_ref().and_then(|i| i.helper_pid())
+    }
+
+    /// Total number of output audio channels across the plugin's output buses.
+    ///
+    /// Reflects the plugin's actual bus layout (mono / stereo / surround / multi-bus), not a
+    /// stereo assumption — useful for sizing meters or output buffers. Returns 2 if unknown.
+    pub fn output_channel_count(&self) -> usize {
+        self.internal
+            .as_ref()
+            .map(|i| i.output_channel_count())
+            .unwrap_or(2)
     }
 
     /// Poll for an editor resize the plugin requested via VST3's `IPlugFrame` since the last

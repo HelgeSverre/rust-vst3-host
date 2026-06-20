@@ -345,18 +345,43 @@ impl PluginImpl {
                         let audio_outputs =
                             component.getBusCount(kAudio as i32, kOutput as i32) as u32;
 
+                        // Real version + sub-categories via IPluginFactory2 when the factory
+                        // provides it; left empty (honest) rather than faked when it doesn't.
+                        let (version, category) = factory
+                            .cast::<IPluginFactory2>()
+                            .and_then(|f2| {
+                                let mut info2: PClassInfo2 = std::mem::zeroed();
+                                if f2.getClassInfo2(i, &mut info2) == kResultOk {
+                                    Some((
+                                        crate::internal::utils::c_str_to_string(&info2.version),
+                                        crate::internal::utils::c_str_to_string(
+                                            &info2.subCategories,
+                                        ),
+                                    ))
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default();
+
+                        // MIDI capability from the presence of event buses, not a guess.
+                        let has_midi_input =
+                            component.getBusCount(kEvent as i32, kInput as i32) > 0;
+                        let has_midi_output =
+                            component.getBusCount(kEvent as i32, kOutput as i32) > 0;
+
                         return Ok(PluginInfo {
                             path: path.to_path_buf(),
                             name,
                             vendor,
-                            version: "1.0.0".to_string(), // Default version
-                            category: "Audio Effect".to_string(), // Default, could be refined
+                            version,
+                            category,
                             uid,
                             audio_inputs,
                             audio_outputs,
-                            has_gui: false,         // Will be updated by caller
-                            has_midi_input: true,   // Default - could be refined
-                            has_midi_output: false, // Default - could be refined
+                            has_gui: false, // Will be updated by caller
+                            has_midi_input,
+                            has_midi_output,
                         });
                     }
                 }
@@ -1100,6 +1125,24 @@ impl PluginInternal for PluginImpl {
 
     fn take_editor_resize_request(&self) -> Option<(i32, i32)> {
         self.editor_resize.lock().ok().and_then(|mut s| s.take())
+    }
+
+    fn output_channel_count(&self) -> usize {
+        unsafe {
+            let bus_count = self.component.getBusCount(kAudio as i32, kOutput as i32);
+            let mut total = 0usize;
+            for i in 0..bus_count {
+                let mut info: BusInfo = std::mem::zeroed();
+                if self
+                    .component
+                    .getBusInfo(kAudio as i32, kOutput as i32, i, &mut info)
+                    == kResultOk
+                {
+                    total += info.channelCount.max(0) as usize;
+                }
+            }
+            total
+        }
     }
 
     fn save_state(&self) -> Result<Vec<u8>> {

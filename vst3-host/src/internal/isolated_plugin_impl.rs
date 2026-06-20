@@ -27,6 +27,8 @@ pub struct IsolatedPluginImpl {
     is_processing: bool,
     /// Whether the plugin has an open editor
     has_open_editor: bool,
+    /// Total output audio channels (reported by the helper's introspection).
+    output_channels: usize,
     /// MIDI the plugin has emitted across the boundary, buffered for the host to poll
     /// (mirrors PluginImpl::output_midi). Capped to bound growth if never read.
     output_midi: Mutex<Vec<MidiEvent>>,
@@ -42,6 +44,7 @@ impl IsolatedPluginImpl {
         info: PluginInfo,
         sample_rate: f64,
         block_size: usize,
+        output_channels: usize,
     ) -> Self {
         Self {
             process: Mutex::new(process),
@@ -50,6 +53,7 @@ impl IsolatedPluginImpl {
             block_size,
             is_processing: false,
             has_open_editor: false,
+            output_channels,
             output_midi: Mutex::new(Vec::new()),
         }
     }
@@ -281,6 +285,10 @@ impl PluginInternal for IsolatedPluginImpl {
             .lock()
             .map(|mut o| std::mem::take(&mut *o))
             .unwrap_or_default()
+    }
+
+    fn output_channel_count(&self) -> usize {
+        self.output_channels
     }
 
     fn helper_pid(&self) -> Option<u32> {

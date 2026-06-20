@@ -1,7 +1,10 @@
 //! # vst3-host
 //!
-//! A safe, simple, and lightweight Rust library for hosting VST3 plugins with
-//! real-time audio processing, MIDI support, and advanced plugin compatibility features.
+//! A safe, simple, and lightweight Rust library for hosting VST3 plugins with audio
+//! playback, MIDI, and advanced plugin compatibility features.
+//!
+//! The audio path is correctness-first, not yet lock-free/real-time-tuned — see the
+//! [audio processing](https://docs.rs/vst3-host) notes for the current model and limits.
 //!
 //! ## Quick Start (Simple API)
 //!
@@ -115,6 +118,21 @@ mod tests {
     fn test_host_creation() {
         let host = Vst3Host::new();
         assert!(host.is_ok());
+    }
+
+    #[test]
+    fn new_scans_default_paths_like_default() {
+        // Regression: new() used to inherit the builder's scan_default_paths=false, while
+        // Vst3Host::default() set it true — a subtle inconsistency. They must agree now.
+        let via_new = Vst3Host::new().unwrap();
+        assert!(
+            via_new.scan_default_paths,
+            "Vst3Host::new() should scan standard system paths"
+        );
+        assert_eq!(
+            via_new.scan_default_paths,
+            Vst3Host::default().scan_default_paths
+        );
     }
 
     #[test]
