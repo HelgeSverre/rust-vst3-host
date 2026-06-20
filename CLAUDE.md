@@ -42,9 +42,14 @@ Public modules expose only safe types:
 - `simple` — one-call helpers (`load_plugin`, `play`, `discover_plugins`).
 - `host` — `Vst3Host` + `Vst3HostBuilder` (sample rate, block size, isolation, scan paths).
 - `plugin` — `Plugin` (the loaded plugin handle), `PluginInfo`.
-- `playback` — `AudioHandle`, `play_with_backend` (the cpal→plugin bridge).
-- `parameters`, `midi`, `audio`, `error`, `discovery`, `backends` (CpalBackend),
-  `process_isolation`, `window`.
+- `playback` — `AudioHandle`, `play_with_backend` (the cpal→plugin bridge), plus the
+  lock-free `RtAudioHandle` / `play_realtime_with_backend`.
+- `realtime` — `RealtimePluginRunner` + `RtControl`: owns the plugin on the audio thread,
+  control commands over a lock-free SPSC ring (no lock in the callback).
+- `embed` — `EmbeddedEditor` (feature `egui-widgets`): parent a plugin editor into a host
+  (egui) window. macOS only so far.
+- `parameters`, `midi`, `audio`, `error`, `discovery` (incl. `PluginReport` JSON export),
+  `backends` (CpalBackend), `process_isolation`, `window`.
 
 All `unsafe`/COM lives in **`src/internal/`** (not exported):
 
@@ -62,16 +67,19 @@ same `Plugin` type either way. See `docs/explanation/architecture.md`.
 - **MIDI note convention: C3 = 60** (`midi::note_to_name`/`name_to_note`).
 - **Parameters are normalized** (`0.0–1.0`); use `Plugin::format_parameter` to render the
   plugin's own display string.
-- **Audio**: `Vst3Host::play`/`simple::play` open the default device via `CpalBackend`. The
-  audio path is correctness-first (mutex on the callback) — not yet lock-free/RT-tuned.
+- **Audio**: two paths. `Vst3Host::play`/`simple::play` (mutex on the callback,
+  correctness-first) and `Vst3Host::play_realtime`/`RealtimePluginRunner` (lock-free command
+  ring, no lock on the callback). Neither is a fully zero-allocation RT engine yet.
   `process_audio` handles variable block sizes (clamped to the configured max).
 - **Process isolation**: the `process-isolation` feature is on by default (so the
   `vst3-host-helper` binary always builds), but the runtime default is in-process. Opt in
-  with `Vst3Host::builder().with_process_isolation(true)`. GUI-across-boundary and
-  auto-respawn are not implemented. See `docs/explanation/process-isolation.md`.
+  with `Vst3Host::builder().with_process_isolation(true)`. Crashes surface as
+  `Error::PluginCrashed` and `Plugin::recover()` respawns+reloads; GUI-across-boundary is
+  still not implemented. Parameters/audio/state/output-MIDI all marshal across the boundary.
+  See `docs/explanation/process-isolation.md`.
 - **`MidiEvent::ProgramChange` is unsupported** (VST3 uses `IUnitInfo` program lists).
 - Features: `cpal-backend` (default), `process-isolation` (default), `egui-widgets`
-  (planned, not yet a usable widget).
+  (`EmbeddedEditor` — embed a plugin editor in an egui window, macOS).
 - The `prelude` does NOT export `Result` (it would shadow `std::result::Result`); use
   `vst3_host::Result`.
 

@@ -9,6 +9,21 @@ All notable changes to `vst3-host` are documented here. The format follows
 First usable release of the safe VST3 hosting library, extracted from the inspector app.
 
 ### Added
+- Lock-free real-time audio path alongside the mutex-based `play`: `RealtimePluginRunner` +
+  `RtControl` (lock-free SPSC command queue), wired to CPAL via `Vst3Host::play_realtime` /
+  `play_realtime_with_backend`.
+- Editor embedding into an egui/eframe window (`EmbeddedEditor`, `egui-widgets` feature,
+  macOS), plus `IPlugFrame` so plugins can request host resizes
+  (`Plugin::take_editor_resize_request`). macOS window creation migrated to `objc2`.
+- Accurate plugin metadata — real version + sub-categories (`getClassInfo2`) and MIDI in/out
+  from event-bus presence; bus-aware output channel count (`Plugin::output_channel_count`).
+- JSON export: serializable introspection types + `PluginReport { detailed, parameters }`
+  with `to_json()` (the inspector's "Copy JSON").
+- Compatibility-matrix harness (`just compat` / `examples/compatibility_matrix.rs`) and
+  `docs/reference/compatibility.md`.
+- macOS loader diagnoses architecture mismatch (e.g. an x86_64-only plugin on an arm64 host)
+  with an actionable error instead of a bare failure.
+- Cross-platform CI (macOS / Linux / Windows) on every push.
 - Safe plugin loading and discovery (`Vst3Host`, `simple::load_plugin`, `discover_plugins`,
   `scan_plugin_paths`, `get_detailed_plugin_info`).
 - Batteries-included audio: `Vst3Host::play` / `simple::play` drive a plugin through the

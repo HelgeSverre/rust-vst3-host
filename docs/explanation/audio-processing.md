@@ -33,20 +33,43 @@ reaches it through `AudioHandle::lock()`, which takes the same mutex the audio c
 uses. A `set_parameter` or `send_midi_note` call therefore briefly contends with the audio
 thread for the lock; the change is applied on the next block.
 
-## What this model does *not* guarantee yet
+## Two paths: convenient (mutex) vs. real-time (lock-free)
 
-The current implementation is **correctness-first, not real-time-tuned**. Be aware:
+There are two ways to drive a plugin, and you pick by how much you care about the audio
+thread blocking:
 
-- **The audio callback takes a mutex.** Locking on the audio thread risks priority
-  inversion and, under contention, dropouts. It's fine for interactive use and development;
-  it is not a hard-real-time guarantee.
-- **Some allocation happens off the steady-state path.** The scratch buffer is reused, but
-  the design hasn't been audited for zero-allocation on the audio thread.
-- **No dedicated real-time thread or lock-free parameter queue.** Those are the standard
-  next steps for professional low-latency hosting and are not implemented.
+- **`Vst3Host::play` / `simple::play` → `AudioHandle`** (above). Correctness-first and easy:
+  the callback locks the plugin, so control calls briefly contend for that lock. Great for
+  inspectors, tools, development, and "just hear it." **Not** a hard-real-time guarantee.
+- **`Vst3Host::play_realtime` / `RealtimePluginRunner` → `RtAudioHandle`.** The runner *owns*
+  the plugin on the audio thread; MIDI and parameter changes cross from your control thread
+  over a **lock-free SPSC ring** ([`RtControl`](https://docs.rs/vst3-host)) and are applied at
+  the start of each block. The callback never takes a lock a control thread could hold, so
+  `set_parameter`/`send_midi` can't block it.
 
-If you need hard real-time behavior, drive `process_audio` from your own audio thread with
-your own lock-free control plumbing rather than relying on `lock()`.
+```rust,no_run
+# use vst3_host::{Vst3Host, midi::{MidiEvent, MidiChannel}};
+# fn main() -> vst3_host::Result<()> {
+let mut host = Vst3Host::new()?;
+let plugin = host.load_plugin("/path/synth.vst3")?;
+let mut audio = host.play_realtime(plugin, 1024)?; // 1024 = command-queue capacity
+audio.control().send_midi(MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 60, velocity: 100 });
+# Ok(())
+# }
+```
+
+### Still correctness-first, not fully RT-audited
+
+Even the lock-free runner isn't a hard-real-time guarantee yet:
+
+- **Allocation hasn't been fully audited.** The scratch buffer is reused, but the steady-state
+  path isn't proven zero-allocation.
+- **The plugin's internal event list still uses an (uncontended) mutex.** Only the audio
+  thread touches it under the runner, so there's no cross-thread contention, but it isn't
+  strictly lock-free internally.
+
+The runner removes the *cross-thread* lock (the big win); the remaining items are refinements
+for strict low-latency work.
 
 ## Metering
 
