@@ -61,9 +61,9 @@ fn main() -> vst3_host::Result<()> {
 
     println!("Max output peak from isolated plugin: {max_peak:.4}");
     if max_peak > 0.0 {
-        println!("✅ Isolated plugin produced audio across the process boundary.");
+        println!("Isolated plugin produced audio across the process boundary.");
     } else {
-        println!("⚠️  No output (effect fed silence, or plugin produced none).");
+        println!("No output (effect fed silence, or plugin produced none).");
     }
 
     Ok(())

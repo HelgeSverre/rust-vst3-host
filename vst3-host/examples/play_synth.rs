@@ -121,9 +121,9 @@ fn main() -> vst3_host::Result<()> {
 
     println!("Done. Max output peak while playing: {max_peak:.4}");
     if max_peak > 0.0 {
-        println!("✅ Plugin produced audio through the CPAL backend.");
+        println!("Plugin produced audio through the CPAL backend.");
     } else {
-        println!("⚠️  No output observed (effect fed silence, or no active output device).");
+        println!("No output observed (effect fed silence, or no active output device).");
     }
 
     Ok(())

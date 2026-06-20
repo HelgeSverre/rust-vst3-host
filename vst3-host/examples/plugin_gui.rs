@@ -766,11 +766,11 @@ impl eframe::App for PluginGuiApp {
                 ui.vertical(|ui| {
                     ui.label("Emergency Controls:");
 
-                    if ui.button("🚨 MIDI Panic").clicked() {
+                    if ui.button("MIDI Panic").clicked() {
                         self.send_midi_panic();
                     }
 
-                    if ui.button("🔇 Audio Panic").clicked() {
+                    if ui.button("Audio Panic").clicked() {
                         self.audio_panic();
                     }
                 });

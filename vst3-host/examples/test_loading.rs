@@ -84,22 +84,22 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Step 1: Create VST3 Host
-    println!("🔧 Creating VST3 host...");
+    println!("Creating VST3 host...");
     let mut host = Vst3Host::builder()
         .sample_rate(44100.0)
         .block_size(512)
         .build()?;
-    println!("✅ Host created successfully");
+    println!("Host created successfully");
 
     // Step 2: Load Plugin
-    println!("🔄 Loading plugin...");
+    println!("Loading plugin...");
     let mut plugin = match host.load_plugin(plugin_path) {
         Ok(plugin) => {
-            println!("✅ Plugin loaded successfully!");
+            println!("Plugin loaded successfully!");
             plugin
         }
         Err(e) => {
-            eprintln!("❌ Failed to load plugin: {}", e);
+            eprintln!("Failed to load plugin: {}", e);
             eprintln!();
             eprintln!("Common causes:");
             eprintln!("  • Plugin file doesn't exist at specified path");
@@ -114,7 +114,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Step 3: Display Plugin Information
     println!();
-    println!("📋 Plugin Information");
+    println!("Plugin Information");
     println!("=====================");
     // Clone so we don't hold an immutable borrow of `plugin` across the later
     // `&mut plugin` lifecycle calls (start_processing / send_midi_event / ...).
@@ -130,7 +130,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Audio capabilities
     println!();
-    println!("🎵 Audio Capabilities");
+    println!("Audio Capabilities");
     println!("Audio Inputs:   {} channels", info.audio_inputs);
     println!("Audio Outputs:  {} channels", info.audio_outputs);
 
@@ -148,7 +148,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // MIDI capabilities
     println!();
-    println!("🎹 MIDI Capabilities");
+    println!("MIDI Capabilities");
     println!(
         "MIDI Input:     {}",
         if info.has_midi_input { "Yes" } else { "No" }
@@ -160,7 +160,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Step 4: Parameter Discovery
     println!();
-    println!("🎛️  Parameter Discovery");
+    println!("Parameter Discovery");
     println!("=======================");
     match plugin.get_parameters() {
         Ok(params) => {
@@ -192,7 +192,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(e) => {
-            println!("⚠️  Could not retrieve parameters: {}", e);
+            println!("Could not retrieve parameters: {}", e);
             println!(
                 "   This is normal for some plugins that require processing to be started first"
             );
@@ -201,23 +201,23 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Step 5: Test Plugin Lifecycle
     println!();
-    println!("🔄 Testing Plugin Lifecycle");
+    println!("Testing Plugin Lifecycle");
     println!("===========================");
 
     println!("Starting processing...");
     match plugin.start_processing() {
         Ok(()) => {
-            println!("✅ Processing started successfully");
+            println!("Processing started successfully");
 
             // Try to get parameters again after processing started
             if let Ok(params) = plugin.get_parameters() {
                 if !params.is_empty() {
-                    println!("📊 Parameters now available: {} total", params.len());
+                    println!("Parameters now available: {} total", params.len());
                 }
             }
         }
         Err(e) => {
-            println!("❌ Failed to start processing: {}", e);
+            println!("Failed to start processing: {}", e);
             println!("   Plugin may have specific requirements not met");
             return Err(e.into());
         }
@@ -226,7 +226,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Step 6: MIDI Test (if plugin supports MIDI)
     if info.has_midi_input {
         println!();
-        println!("🎹 Testing MIDI Input");
+        println!("Testing MIDI Input");
         println!("=====================");
 
         println!("Sending test MIDI note (C4, velocity 100)...");
@@ -236,7 +236,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             velocity: 100,
         }) {
             Ok(()) => {
-                println!("✅ MIDI note sent successfully");
+                println!("MIDI note sent successfully");
 
                 // Wait a bit, then send note off
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -247,24 +247,24 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     note: 60,
                     velocity: 0,
                 }) {
-                    Ok(()) => println!("✅ MIDI note off sent successfully"),
-                    Err(e) => println!("⚠️  Note off failed: {}", e),
+                    Ok(()) => println!("MIDI note off sent successfully"),
+                    Err(e) => println!("Note off failed: {}", e),
                 }
             }
             Err(e) => {
-                println!("❌ Failed to send MIDI: {}", e);
+                println!("Failed to send MIDI: {}", e);
             }
         }
     } else {
         println!();
-        println!("⏭️  Skipping MIDI test (plugin doesn't support MIDI input)");
+        println!("Skipping MIDI test (plugin doesn't support MIDI input)");
     }
 
     // Step 7: Parameter Test (if available)
     if let Ok(params) = plugin.get_parameters() {
         if !params.is_empty() {
             println!();
-            println!("🎛️  Testing Parameter Changes");
+            println!("Testing Parameter Changes");
             println!("=============================");
 
             let test_param = &params[0];
@@ -277,14 +277,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let new_value = if original_value < 0.5 { 0.8 } else { 0.2 };
             match plugin.set_parameter(test_param.id, new_value) {
                 Ok(()) => {
-                    println!("✅ Successfully set parameter to {:.3}", new_value);
+                    println!("Successfully set parameter to {:.3}", new_value);
 
                     // Restore original value
                     let _ = plugin.set_parameter(test_param.id, original_value);
-                    println!("✅ Restored original value");
+                    println!("Restored original value");
                 }
                 Err(e) => {
-                    println!("❌ Failed to set parameter: {}", e);
+                    println!("Failed to set parameter: {}", e);
                 }
             }
         }
@@ -292,27 +292,27 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Step 8: Cleanup
     println!();
-    println!("🛑 Cleanup");
+    println!("Cleanup");
     println!("==========");
 
     match plugin.stop_processing() {
-        Ok(()) => println!("✅ Processing stopped successfully"),
-        Err(e) => println!("⚠️  Error stopping processing: {}", e),
+        Ok(()) => println!("Processing stopped successfully"),
+        Err(e) => println!("Error stopping processing: {}", e),
     }
 
     // Final Summary
     println!();
-    println!("🎉 Plugin Test Summary");
+    println!("Plugin Test Summary");
     println!("======================");
     println!("Plugin Name:    {}", info.name);
     println!("Type:           {}", plugin_type);
-    println!("Load Status:    ✅ Success");
-    println!("Processing:     ✅ Started and stopped successfully");
+    println!("Load Status:    Success");
+    println!("Processing:     Started and stopped successfully");
     if info.has_midi_input {
-        println!("MIDI Test:      ✅ MIDI events sent successfully");
+        println!("MIDI Test:      MIDI events sent successfully");
     }
     println!();
-    println!("🎯 This plugin appears to be working correctly!");
+    println!("This plugin appears to be working correctly!");
     println!("   You can now use it in your VST3 host application.");
 
     Ok(())

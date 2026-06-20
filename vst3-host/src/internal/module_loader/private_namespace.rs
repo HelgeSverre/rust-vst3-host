@@ -86,12 +86,12 @@ impl PrivateNamespaceModule {
             // Step 1: Create CFBundle reference for VST3 compliance
             log::debug!("Step 1: Creating CFBundle reference...");
             let bundle = Self::create_cfbundle(&bundle_path)?;
-            log::debug!("✅ CFBundle created successfully");
+            log::debug!("CFBundle created successfully");
 
             // Step 2: Find the actual executable within the bundle
             log::debug!("Step 2: Finding executable binary...");
             let executable_path = Self::find_bundle_executable(&bundle_path)?;
-            log::debug!("✅ Found executable: {}", executable_path.display());
+            log::debug!("Found executable: {}", executable_path.display());
 
             // Step 3: Load with dlopen using RTLD_LOCAL for private namespace
             log::debug!("Step 3: Loading with dlopen RTLD_LOCAL...");
@@ -113,7 +113,7 @@ impl PrivateNamespaceModule {
                     error_msg
                 )));
             }
-            log::debug!("✅ dlopen successful with private namespace");
+            log::debug!("dlopen successful with private namespace");
 
             // Step 4: Get bundleEntry function (REQUIRED)
             log::debug!("Step 4: Getting bundleEntry function...");
@@ -129,7 +129,7 @@ impl PrivateNamespaceModule {
             }
 
             let bundle_entry: BundleEntryFunc = std::mem::transmute(bundle_entry_ptr);
-            log::debug!("✅ bundleEntry function found");
+            log::debug!("bundleEntry function found");
 
             // Step 5: Get bundleExit function (REQUIRED)
             log::debug!("Step 5: Getting bundleExit function...");
@@ -137,10 +137,10 @@ impl PrivateNamespaceModule {
             let bundle_exit_ptr = libc::dlsym(dl_handle, bundle_exit_name.as_ptr());
 
             let bundle_exit: Option<BundleExitFunc> = if bundle_exit_ptr.is_null() {
-                log::warn!("⚠️ bundleExit function not found (unusual but proceeding)");
+                log::warn!("bundleExit function not found (unusual but proceeding)");
                 None
             } else {
-                log::debug!("✅ bundleExit function found");
+                log::debug!("bundleExit function found");
                 Some(std::mem::transmute::<*mut c_void, BundleExitFunc>(
                     bundle_exit_ptr,
                 ))
@@ -156,7 +156,7 @@ impl PrivateNamespaceModule {
                     "bundleEntry function returned false".to_string(),
                 ));
             }
-            log::debug!("✅ bundleEntry called successfully");
+            log::debug!("bundleEntry called successfully");
 
             // Step 7: Get GetPluginFactory function (REQUIRED)
             log::debug!("Step 7: Getting GetPluginFactory function...");
@@ -174,7 +174,7 @@ impl PrivateNamespaceModule {
                     "Failed to find GetPluginFactory function".to_string(),
                 ));
             } else {
-                log::debug!("✅ GetPluginFactory function found");
+                log::debug!("GetPluginFactory function found");
                 Some(std::mem::transmute::<*mut c_void, GetPluginFactoryFunc>(
                     factory_ptr,
                 ))
@@ -296,9 +296,9 @@ impl Drop for PrivateNamespaceModule {
                 log::debug!("Calling bundleExit...");
                 let exit_result = bundle_exit();
                 if exit_result != 0 {
-                    log::debug!("✅ bundleExit called successfully");
+                    log::debug!("bundleExit called successfully");
                 } else {
-                    log::warn!("⚠️ bundleExit returned false");
+                    log::warn!("bundleExit returned false");
                 }
             }
 
@@ -306,15 +306,15 @@ impl Drop for PrivateNamespaceModule {
             log::debug!("Closing dlopen handle...");
             if libc::dlclose(self.dl_handle) != 0 {
                 let error_msg = std::ffi::CStr::from_ptr(libc::dlerror()).to_string_lossy();
-                log::warn!("⚠️ dlclose failed: {}", error_msg);
+                log::warn!("dlclose failed: {}", error_msg);
             } else {
-                log::debug!("✅ dlopen handle closed successfully");
+                log::debug!("dlopen handle closed successfully");
             }
 
             // Step 3: Release CFBundle
             log::debug!("Releasing CFBundle...");
             CFRelease(self.bundle as CFTypeRef);
-            log::debug!("✅ CFBundle released");
+            log::debug!("CFBundle released");
 
             log::debug!("=== PRIVATE NAMESPACE VST3 MODULE CLEANUP COMPLETE ===");
         }

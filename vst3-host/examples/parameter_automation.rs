@@ -42,11 +42,11 @@
 //! VST3 Parameter Automation Demo
 //! ==============================
 //!
-//! 🎹 Loaded: SomeSynth v1.0 by VendorName
-//! 🎵 Audio: 44.1kHz, 512 samples, 0→2 channels
-//! 🎛️  Found 23 parameters for automation
+//! Loaded: SomeSynth v1.0 by VendorName
+//! Audio: 44.1kHz, 512 samples, 0→2 channels
+//!  Found 23 parameters for automation
 //!
-//! ▶️  Starting automation performance...
+//! Starting automation performance...
 //!
 //! [00:05] Pattern: Chord Progression | CPU: 12.3% | Peak: -8.2dB
 //! [00:10] Pattern: Arpeggio Sweep    | CPU: 15.1% | Peak: -6.1dB
@@ -110,14 +110,14 @@ impl AutomationDemo {
     fn run(&mut self, plugin_path: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
         // Step 1: Find or load plugin
         let plugin = if let Some(path) = plugin_path {
-            println!("🔄 Loading specified plugin: {}", path);
+            println!("Loading specified plugin: {}", path);
             self.host.load_plugin(&path)?
         } else {
-            println!("🔍 Discovering plugins...");
+            println!("Discovering plugins...");
             let plugins = self.host.discover_plugins()?;
 
             if plugins.is_empty() {
-                eprintln!("❌ No VST3 plugins found!");
+                eprintln!("No VST3 plugins found!");
                 eprintln!("   Please install some VST3 plugins or specify a path.");
                 return Ok(());
             }
@@ -130,7 +130,7 @@ impl AutomationDemo {
                 .unwrap_or(&plugins[0]);
 
             println!(
-                "🎯 Using plugin: {} by {}",
+                "Using plugin: {} by {}",
                 suitable_plugin.name, suitable_plugin.vendor
             );
             self.host.load_plugin(&suitable_plugin.path)?
@@ -141,21 +141,18 @@ impl AutomationDemo {
         plugin.start_processing()?;
 
         let info = plugin.info();
+        println!("Loaded: {} v{} by {}", info.name, info.version, info.vendor);
         println!(
-            "🎹 Loaded: {} v{} by {}",
-            info.name, info.version, info.vendor
-        );
-        println!(
-            "🎵 Audio: {}kHz, {} samples, {}→{} channels",
+            "Audio: {}kHz, {} samples, {}→{} channels",
             44.1, 512, info.audio_inputs, info.audio_outputs
         );
 
         // Step 3: Discover parameters for automation
         let parameters = plugin.get_parameters().unwrap_or_default();
-        println!("🎛️  Found {} parameters for automation", parameters.len());
+        println!("Found {} parameters for automation", parameters.len());
 
         if parameters.is_empty() {
-            println!("⚠️  No parameters available for automation");
+            println!("No parameters available for automation");
             println!("   This plugin may not support parameter automation");
             return Ok(());
         }
@@ -199,7 +196,7 @@ impl AutomationDemo {
         )?;
 
         stream.play()?;
-        println!("🎵 Audio stream started");
+        println!("Audio stream started");
 
         // Start automation controller
         let automation_performance = performance.clone();
@@ -210,7 +207,7 @@ impl AutomationDemo {
 
         // Start the interactive controller
         println!();
-        println!("▶️  Starting automation performance...");
+        println!("Starting automation performance...");
         println!();
         self.run_interactive_controller(control_tx, status_rx)?;
 
@@ -249,7 +246,11 @@ impl AutomationDemo {
                             let minutes = elapsed.as_secs() / 60;
                             let seconds = elapsed.as_secs() % 60;
 
-                            let status_icon = if automation_active { "🎵" } else { "⏸️" };
+                            let status_icon = if automation_active {
+                                "[active]"
+                            } else {
+                                "[idle]"
+                            };
                             let peak_db = if peak_level > 0.0001 {
                                 format!("{:.1}dB", 20.0 * peak_level.log10())
                             } else {
@@ -265,7 +266,7 @@ impl AutomationDemo {
                         }
                     }
                     StatusMessage::Error(msg) => {
-                        println!("❌ Error: {}", msg);
+                        println!("Error: {}", msg);
                     }
                 }
             }
@@ -274,7 +275,7 @@ impl AutomationDemo {
             if let Ok(_) = stdin.read_exact(&mut input_buffer) {
                 match input_buffer[0] {
                     b'q' | b'Q' => {
-                        println!("🛑 Stopping automation...");
+                        println!("Stopping automation...");
                         control_tx.send(ControlMessage::Stop)?;
                         break;
                     }
@@ -284,14 +285,14 @@ impl AutomationDemo {
                             .map_err(|_| Error::Other("Control channel closed".to_string()))?;
                     }
                     b'r' | b'R' => {
-                        println!("🔄 Resetting parameters...");
+                        println!("Resetting parameters...");
                         control_tx
                             .send(ControlMessage::Reset)
                             .map_err(|_| Error::Other("Control channel closed".to_string()))?;
                     }
                     b'1'..=b'5' => {
                         let pattern_id = (input_buffer[0] - b'1') as usize;
-                        println!("🎵 Switching to pattern {}", pattern_id + 1);
+                        println!("Switching to pattern {}", pattern_id + 1);
                         control_tx
                             .send(ControlMessage::ChangePattern(pattern_id))
                             .map_err(|_| Error::Other("Control channel closed".to_string()))?;
@@ -303,7 +304,7 @@ impl AutomationDemo {
             thread::sleep(Duration::from_millis(50));
         }
 
-        println!("🎉 Automation demo completed!");
+        println!("Automation demo completed!");
         Ok(())
     }
 }

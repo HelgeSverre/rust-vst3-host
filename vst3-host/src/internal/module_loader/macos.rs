@@ -174,7 +174,7 @@ impl MacOSModule {
                 ));
             }
 
-            log::debug!("✅ CFBundle created successfully");
+            log::debug!("CFBundle created successfully");
 
             // Step 2: Load the bundle executable
             log::debug!("Step 2: Loading bundle executable...");
@@ -196,7 +196,7 @@ impl MacOSModule {
                 return Err(Error::PluginLoadFailed(detail));
             }
 
-            log::debug!("✅ Bundle executable loaded");
+            log::debug!("Bundle executable loaded");
 
             // Step 3: Get bundleEntry function pointer (REQUIRED)
             log::debug!("Step 3: Getting bundleEntry function...");
@@ -213,7 +213,7 @@ impl MacOSModule {
             }
 
             let bundle_entry: BundleEntryFunc = std::mem::transmute(bundle_entry_ptr);
-            log::debug!("✅ bundleEntry function found");
+            log::debug!("bundleEntry function found");
 
             // Step 4: Get bundleExit function pointer (REQUIRED)
             log::debug!("Step 4: Getting bundleExit function...");
@@ -230,7 +230,7 @@ impl MacOSModule {
             }
 
             let bundle_exit: BundleExitFunc = std::mem::transmute(bundle_exit_ptr);
-            log::debug!("✅ bundleExit function found");
+            log::debug!("bundleExit function found");
 
             // Step 5: Call bundleEntry (MUST be called before GetPluginFactory)
             log::debug!("Step 5: Calling bundleEntry...");
@@ -245,7 +245,7 @@ impl MacOSModule {
                 ));
             }
 
-            log::debug!("✅ bundleEntry called successfully");
+            log::debug!("bundleEntry called successfully");
 
             // Step 6: Get GetPluginFactory function pointer
             log::debug!("Step 6: Getting GetPluginFactory function...");
@@ -265,7 +265,7 @@ impl MacOSModule {
             }
 
             let get_factory_fn: GetPluginFactoryFunc = std::mem::transmute(factory_ptr);
-            log::debug!("✅ GetPluginFactory function found");
+            log::debug!("GetPluginFactory function found");
 
             log::info!("=== macOS VST3 MODULE LOADING COMPLETE ===");
             log::info!("Bundle loaded successfully: {}", path.display());
@@ -319,9 +319,9 @@ impl Drop for MacOSModule {
                 log::debug!("Calling bundleExit...");
                 let exit_result = bundle_exit();
                 if exit_result != 0 {
-                    log::debug!("✅ bundleExit called successfully");
+                    log::debug!("bundleExit called successfully");
                 } else {
-                    log::warn!("⚠️ bundleExit returned false");
+                    log::warn!("bundleExit returned false");
                 }
 
                 // Release the retain from bundleEntry
@@ -331,12 +331,12 @@ impl Drop for MacOSModule {
             // Step 2: Unload the bundle executable
             log::debug!("Unloading bundle executable...");
             CFBundleUnloadExecutable(self.bundle);
-            log::debug!("✅ Bundle executable unloaded");
+            log::debug!("Bundle executable unloaded");
 
             // Step 3: Release the bundle
             log::debug!("Releasing CFBundle...");
             CFRelease(self.bundle as CFTypeRef);
-            log::debug!("✅ CFBundle released");
+            log::debug!("CFBundle released");
 
             log::debug!("=== macOS VST3 MODULE CLEANUP COMPLETE ===");
         }

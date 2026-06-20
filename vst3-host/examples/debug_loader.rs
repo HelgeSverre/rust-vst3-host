@@ -17,29 +17,29 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let plugin_path = &args[1];
     let target_step = args.get(2).map(|s| s.as_str()).unwrap_or("all");
 
-    println!("🔧 DEBUG PLUGIN LOADER");
+    println!("DEBUG PLUGIN LOADER");
     println!("Plugin: {}", plugin_path);
     println!("Target step: {}", target_step);
     println!("=====================================");
 
     // Step 1: Host creation
     if should_run_step(target_step, "load") {
-        println!("\n📋 STEP 1: Creating VST3 Host");
+        println!("\nSTEP 1: Creating VST3 Host");
         let start = Instant::now();
         let mut host = Vst3Host::new()?;
-        println!("✅ Host created in {:?}", start.elapsed());
+        println!("Host created in {:?}", start.elapsed());
         wait_for_input("Continue to plugin loading?")?;
 
         // Step 2: Plugin loading
-        println!("\n🔌 STEP 2: Loading Plugin");
+        println!("\nSTEP 2: Loading Plugin");
         let start = Instant::now();
         let mut plugin = match host.load_plugin(plugin_path) {
             Ok(p) => {
-                println!("✅ Plugin loaded in {:?}", start.elapsed());
+                println!("Plugin loaded in {:?}", start.elapsed());
                 p
             }
             Err(e) => {
-                println!("❌ Plugin loading failed: {}", e);
+                println!("Plugin loading failed: {}", e);
                 return Err(e.into());
             }
         };
@@ -47,7 +47,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // Step 3: Plugin info inspection
         if should_run_step(target_step, "init") {
             wait_for_input("Continue to plugin inspection?")?;
-            println!("\n📊 STEP 3: Plugin Info");
+            println!("\nSTEP 3: Plugin Info");
             let info = plugin.info();
             println!("  Name: {}", info.name);
             println!("  Vendor: {}", info.vendor);
@@ -62,15 +62,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // Step 4: Parameter inspection
         if should_run_step(target_step, "controller") {
             wait_for_input("Continue to parameter inspection?")?;
-            println!("\n🎛️ STEP 4: Parameters");
+            println!("\nSTEP 4: Parameters");
             let start = Instant::now();
             match plugin.get_parameters() {
                 Ok(params) => {
-                    println!(
-                        "✅ Got {} parameters in {:?}",
-                        params.len(),
-                        start.elapsed()
-                    );
+                    println!("Got {} parameters in {:?}", params.len(), start.elapsed());
                     println!("First 10 parameters:");
                     for (i, param) in params.iter().take(10).enumerate() {
                         println!("  {}: {} = {:.3}", i, param.name, param.value);
@@ -80,7 +76,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Err(e) => {
-                    println!("❌ Failed to get parameters: {}", e);
+                    println!("Failed to get parameters: {}", e);
                 }
             }
         }
@@ -88,17 +84,17 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // Step 5: Processing test
         if should_run_step(target_step, "process") {
             wait_for_input("Continue to processing test?")?;
-            println!("\n🎵 STEP 5: Processing Test");
+            println!("\nSTEP 5: Processing Test");
             let start = Instant::now();
 
             match plugin.start_processing() {
                 Ok(()) => {
-                    println!("✅ Processing started in {:?}", start.elapsed());
+                    println!("Processing started in {:?}", start.elapsed());
 
                     // Test MIDI if supported
                     if plugin.info().has_midi_input && should_run_step(target_step, "test") {
                         wait_for_input("Continue to MIDI test?")?;
-                        println!("\n🎹 STEP 6: MIDI Test");
+                        println!("\nSTEP 6: MIDI Test");
 
                         for note in [60, 64, 67] {
                             // C major chord
@@ -108,9 +104,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                 note,
                                 velocity: 100,
                             }) {
-                                println!("    ❌ Failed: {}", e);
+                                println!("    Failed: {}", e);
                             } else {
-                                println!("    ✅ Note sent");
+                                println!("    Note sent");
                             }
 
                             std::thread::sleep(Duration::from_millis(100));
@@ -121,9 +117,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                 note,
                                 velocity: 0,
                             }) {
-                                println!("    ❌ Failed: {}", e);
+                                println!("    Failed: {}", e);
                             } else {
-                                println!("    ✅ Note off sent");
+                                println!("    Note off sent");
                             }
 
                             std::thread::sleep(Duration::from_millis(100));
@@ -131,20 +127,20 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // Stop processing
-                    println!("\n🛑 Stopping processing...");
+                    println!("\nStopping processing...");
                     if let Err(e) = plugin.stop_processing() {
-                        println!("❌ Failed to stop processing: {}", e);
+                        println!("Failed to stop processing: {}", e);
                     } else {
-                        println!("✅ Processing stopped cleanly");
+                        println!("Processing stopped cleanly");
                     }
                 }
                 Err(e) => {
-                    println!("❌ Failed to start processing: {}", e);
+                    println!("Failed to start processing: {}", e);
                 }
             }
         }
 
-        println!("\n🎉 DEBUG TEST COMPLETE");
+        println!("\nDEBUG TEST COMPLETE");
         println!("All tests passed! The plugin is working correctly.");
     }
 
