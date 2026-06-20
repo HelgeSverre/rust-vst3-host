@@ -98,6 +98,10 @@ pub(crate) trait PluginInternal: Send {
             "recovery is only supported for process-isolated plugins".to_string(),
         ))
     }
+    /// The size the plugin's editor has requested (via `IPlugFrame`) since the last poll.
+    fn take_editor_resize_request(&self) -> Option<(i32, i32)> {
+        None
+    }
 }
 
 impl Plugin {
@@ -441,6 +445,18 @@ impl Plugin {
     /// in-process. Useful for monitoring an isolated plugin's resource use.
     pub fn isolation_pid(&self) -> Option<u32> {
         self.internal.as_ref().and_then(|i| i.helper_pid())
+    }
+
+    /// Poll for an editor resize the plugin requested via VST3's `IPlugFrame` since the last
+    /// call, as `(width, height)` in pixels, or `None`.
+    ///
+    /// Plugins with resizable editors call back to ask the host to resize the window hosting
+    /// their view. Poll this on your UI thread (e.g. each frame) while the editor is open and
+    /// resize your editor container to match. Only the in-process editor path reports this.
+    pub fn take_editor_resize_request(&self) -> Option<(i32, i32)> {
+        self.internal
+            .as_ref()
+            .and_then(|i| i.take_editor_resize_request())
     }
 
     /// Recover a process-isolated plugin whose helper has crashed.

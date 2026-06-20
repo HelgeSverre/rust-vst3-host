@@ -443,6 +443,46 @@ pub fn create_memory_stream_from(data: Vec<u8>) -> ComWrapper<MemoryStream> {
     ComWrapper::new(MemoryStream::new(data))
 }
 
+// Host implementation of `IPlugFrame`. A plugin editor calls `resizeView` to ask the host
+// to resize the window hosting its view. We record the requested size; the host polls it
+// (take_editor_resize_request) and resizes its container on the UI thread.
+pub struct HostPlugFrame {
+    requested: Arc<Mutex<Option<(i32, i32)>>>,
+}
+
+impl HostPlugFrame {
+    pub fn new(requested: Arc<Mutex<Option<(i32, i32)>>>) -> Self {
+        Self { requested }
+    }
+}
+
+impl Class for HostPlugFrame {
+    type Interfaces = (IPlugFrame,);
+}
+
+impl IPlugFrameTrait for HostPlugFrame {
+    unsafe fn resizeView(&self, _view: *mut IPlugView, new_size: *mut ViewRect) -> tresult {
+        if new_size.is_null() {
+            return kResultFalse;
+        }
+        let r = &*new_size;
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        if let Ok(mut slot) = self.requested.lock() {
+            *slot = Some((w, h));
+        }
+        // The host resizes its container to (w, h) from take_editor_resize_request on the
+        // UI thread; acknowledging here is enough for the plugin to proceed.
+        kResultOk
+    }
+}
+
+/// Create a host plug-frame backed by a shared resize-request slot.
+pub fn create_host_plug_frame(
+    requested: Arc<Mutex<Option<(i32, i32)>>>,
+) -> ComWrapper<HostPlugFrame> {
+    ComWrapper::new(HostPlugFrame::new(requested))
+}
+
 // Component Handler implementation
 pub struct ComponentHandler {
     // Track parameter changes from the plugin
@@ -891,6 +931,31 @@ mod host_attr_tests {
         assert_eq!(list.get_value("s"), Some(AttrValue::Str(vec![72, 105])));
         assert_eq!(list.get_value("b"), Some(AttrValue::Bin(vec![1, 2, 3])));
         assert_eq!(list.get_value("missing"), None);
+    }
+}
+
+#[cfg(test)]
+mod plug_frame_tests {
+    use super::*;
+
+    #[test]
+    fn records_requested_size_from_view_rect() {
+        let slot = Arc::new(Mutex::new(None));
+        let frame = HostPlugFrame::new(slot.clone());
+        let mut rect = ViewRect {
+            left: 0,
+            top: 0,
+            right: 640,
+            bottom: 480,
+        };
+        let r = unsafe { frame.resizeView(std::ptr::null_mut(), &mut rect) };
+        assert_eq!(r, kResultOk);
+        assert_eq!(*slot.lock().unwrap(), Some((640, 480)));
+
+        // Null size is rejected and leaves the slot unchanged.
+        let r = unsafe { frame.resizeView(std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(r, kResultFalse);
+        assert_eq!(*slot.lock().unwrap(), Some((640, 480)));
     }
 }
 

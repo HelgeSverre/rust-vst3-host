@@ -672,13 +672,13 @@ impl eframe::App for PluginGuiApp {
                             };
 
                             let bar_value = if db_left.is_finite() {
-                                ((db_left - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                                ((db_left - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
 
                             let hold_value = if db_hold_left.is_finite() {
-                                ((db_hold_left - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                                ((db_hold_left - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
@@ -721,13 +721,13 @@ impl eframe::App for PluginGuiApp {
                             };
 
                             let bar_value = if db_right.is_finite() {
-                                ((db_right - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                                ((db_right - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
 
                             let hold_value = if db_hold_right.is_finite() {
-                                ((db_hold_right - MIN_DB) / -MIN_DB).max(0.0).min(1.0)
+                                ((db_hold_right - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };

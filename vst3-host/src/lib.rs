@@ -63,6 +63,9 @@ pub mod window;
 
 pub mod discovery;
 
+#[cfg(feature = "egui-widgets")]
+pub mod embed;
+
 #[cfg(feature = "cpal-backend")]
 pub mod backends;
 
@@ -74,6 +77,8 @@ pub use audio::{AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStrea
 pub use discovery::{
     get_detailed_plugin_info, BusInfo, BusLayout, ClassInfo, DetailedPluginInfo, FactoryInfo,
 };
+#[cfg(feature = "egui-widgets")]
+pub use embed::{EditorRect, EmbeddedEditor};
 pub use error::{Error, Result};
 pub use host::{DiscoveryProgress, ProbeResult, Vst3Host, Vst3HostBuilder};
 pub use midi::{cc, MidiChannel, MidiEvent};
