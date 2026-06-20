@@ -135,14 +135,24 @@ pub enum HostResponse {
         vendor: String,
         /// Plugin name.
         name: String,
-        /// Version string.
+        /// Version string (may be empty if the plugin doesn't report one).
         version: String,
+        /// Plugin sub-categories (e.g. "Fx", "Instrument|Synth"); may be empty.
+        category: String,
+        /// Unique plugin class id (hex).
+        uid: String,
         /// Whether the plugin has an editor.
         has_gui: bool,
         /// Audio input bus count.
         audio_inputs: i32,
         /// Audio output bus count.
         audio_outputs: i32,
+        /// Total output audio channels across all output buses.
+        output_channels: i32,
+        /// Whether the plugin has a MIDI/event input bus.
+        has_midi_input: bool,
+        /// Whether the plugin has a MIDI/event output bus.
+        has_midi_output: bool,
     },
 }
 

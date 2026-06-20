@@ -3,7 +3,7 @@
 use crate::{
     audio::AudioConfig,
     error::{Error, Result},
-    plugin::{Plugin, PluginInfo},
+    plugin::{Plugin, PluginInfo, PluginInternal},
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -205,11 +205,11 @@ impl Vst3Host {
         // Get the updated info from the plugin implementation (has_gui might have been updated)
         let updated_info = plugin_impl.info.clone();
 
-        // Create the plugin wrapper
-        let output_channels = if updated_info.audio_outputs > 0 {
-            updated_info.audio_outputs as usize * 2 // Assume stereo buses
-        } else {
-            2
+        // Size meters to the plugin's real output channel count (bus-aware), not a stereo
+        // assumption; fall back to 2 only when the plugin reports no output channels.
+        let output_channels = match plugin_impl.output_channel_count() {
+            0 => 2,
+            n => n,
         };
 
         let plugin = Plugin {
@@ -246,29 +246,41 @@ impl Vst3Host {
             })
             .map_err(|e| Error::Other(format!("Failed to load plugin in isolation: {}", e)))?;
 
-        // Verify the plugin loaded successfully
-        let loaded_info = match response {
+        // Verify the plugin loaded successfully. Metadata comes straight from the helper's
+        // accurate introspection, so the isolated path matches the in-process one.
+        let (loaded_info, output_channels) = match response {
             HostResponse::PluginInfo {
                 vendor,
                 name,
                 version,
+                category,
+                uid,
                 has_gui,
                 audio_inputs,
                 audio_outputs,
+                output_channels,
+                has_midi_input,
+                has_midi_output,
             } => {
-                PluginInfo {
+                let info = PluginInfo {
                     path: path.to_path_buf(),
                     name,
                     vendor,
                     version,
-                    category: "Audio Effect".to_string(), // Default category
-                    uid: "unknown".to_string(),           // Default UID
+                    category,
+                    uid,
                     has_gui,
                     audio_inputs: audio_inputs as u32,
                     audio_outputs: audio_outputs as u32,
-                    has_midi_input: true, // Default MIDI info
-                    has_midi_output: false,
-                }
+                    has_midi_input,
+                    has_midi_output,
+                };
+                let channels = if output_channels > 0 {
+                    output_channels as usize
+                } else {
+                    2
+                };
+                (info, channels)
             }
             HostResponse::Error { message } => {
                 return Err(Error::Other(format!("Failed to load plugin: {}", message)));
@@ -286,14 +298,8 @@ impl Vst3Host {
             loaded_info.clone(),
             self.config.sample_rate,
             self.config.block_size,
+            output_channels,
         );
-
-        // Create the plugin wrapper
-        let output_channels = if loaded_info.audio_outputs > 0 {
-            loaded_info.audio_outputs as usize * 2 // Assume stereo buses
-        } else {
-            2
-        };
 
         let plugin = Plugin {
             info: loaded_info,

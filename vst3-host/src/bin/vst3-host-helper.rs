@@ -110,14 +110,20 @@ fn handle(
             match host.load_plugin(&path) {
                 Ok(p) => {
                     let info = p.info().clone();
+                    let output_channels = p.output_channel_count() as i32;
                     *plugin = Some(p);
                     HostResponse::PluginInfo {
                         vendor: info.vendor,
                         name: info.name,
                         version: info.version,
+                        category: info.category,
+                        uid: info.uid,
                         has_gui: info.has_gui,
                         audio_inputs: info.audio_inputs as i32,
                         audio_outputs: info.audio_outputs as i32,
+                        output_channels,
+                        has_midi_input: info.has_midi_input,
+                        has_midi_output: info.has_midi_output,
                     }
                 }
                 Err(e) => err("Failed to load plugin", e),

@@ -312,6 +312,28 @@ fn test_process_isolation() {
         .load_plugin(plugin_path)
         .expect("Failed to load plugin in isolated process");
 
+    // Accurate metadata crosses the boundary (not the old "unknown"/default placeholders).
+    let info = plugin.info();
+    assert!(
+        info.category.to_lowercase().contains("inst")
+            || info.category.to_lowercase().contains("synth"),
+        "isolated metadata lost the real category: {:?}",
+        info.category
+    );
+    assert_ne!(
+        info.uid, "unknown",
+        "isolated plugin uid should marshal across IPC"
+    );
+    assert!(
+        info.has_midi_input,
+        "isolated Dexed should report MIDI input"
+    );
+    assert_eq!(
+        plugin.output_channel_count(),
+        2,
+        "isolated channel count should be real"
+    );
+
     // Parameters marshal across the process boundary.
     let params = plugin.get_parameters().expect("get_parameters over IPC");
     assert!(!params.is_empty(), "isolated plugin reported no parameters");
@@ -393,6 +415,30 @@ fn test_isolation_state_roundtrip() {
         "isolated state did not restore: {restored} (expected ~0.25)"
     );
     println!("Isolated state round-trip OK ({} bytes)", snapshot.len());
+}
+
+/// Review #2/#3: metadata is detected (version, category, MIDI capability, channel count),
+/// not hardcoded. Checked against bundled Dexed (an instrument synth).
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_plugin_metadata_is_detected() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(path).exists() {
+        println!("Test plugin not found, skipping");
+        return;
+    }
+    let mut host = Vst3Host::new().unwrap();
+    let plugin = host.load_plugin(path).unwrap();
+    let i = plugin.info();
+    assert!(!i.version.is_empty(), "version should be detected");
+    let cat = i.category.to_lowercase();
+    assert!(
+        cat.contains("inst") || cat.contains("synth"),
+        "Dexed is an instrument; got category {:?}",
+        i.category
+    );
+    assert!(i.has_midi_input, "Dexed accepts MIDI input");
+    assert_eq!(plugin.output_channel_count(), 2, "Dexed is stereo");
 }
 
 /// Track D: automating a parameter through the public API changes the rendered audio
