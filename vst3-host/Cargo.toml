@@ -67,6 +67,7 @@ egui-widgets = ["egui"]
 env_logger = "0.11"
 rfd = "0.15"
 eframe = "0.31"
+raw-window-handle = "0.6"
 
 [[example]]
 name = "play_synth"
