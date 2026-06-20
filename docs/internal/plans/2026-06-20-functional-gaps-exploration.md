@@ -8,8 +8,8 @@ approach, difficulty, the acceptance gate, and dependencies.
 
 | Task | Difficulty | Self-contained | Headless gate | Main risk / blocker |
 |------|-----------|----------------|---------------|---------------------|
-| MIDI-out in isolation | **S** | Yes | Mostly (needs an emitter plugin) | Needs a MIDI-emitting test plugin |
-| Parameter automation (apply) | **S–M** core | Yes (in-proc) | Yes (offline A/B render) | Plugins that also smooth params |
+| MIDI-out in isolation — ✅ **DONE** | **S** | Yes | serde wire test + parity | Needs a MIDI-emitting test plugin |
+| Parameter automation (apply) — ✅ **DONE** (core) | **S–M** core | Yes (in-proc) | mechanism test + A/B render | Plugins that also smooth params |
 | IPlugFrame + host resize | **S** | Yes (in-proc) | Partial | — (shared plumbing) |
 | Editor embed into egui | **M** mac/win, **L** linux | In-proc only | Partial (interactive) | eframe window-handle access (spike) |
 | GUI across isolation | **M** (helper-owned window) | Reuses window.rs | Partial (interactive) | Helper needs a UI run loop; macOS true-embed blocked |
