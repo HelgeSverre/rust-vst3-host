@@ -87,7 +87,20 @@ struct HostProcessData {
     process_context: ProcessContext,
     input_param_changes: ComWrapper<ParameterChanges>,
     output_param_changes: ComWrapper<ParameterChanges>,
+    // Preallocated channel-pointer arrays, built once in prepare_buffers. The audio buffers'
+    // addresses are stable after allocation, so process() reuses these instead of rebuilding
+    // them every block — keeping the steady-state audio path allocation-free.
+    input_channel_ptrs: SendChannelPtrs,
+    output_channel_ptrs: SendChannelPtrs,
 }
+
+/// Per-bus channel pointers into the (audio-thread-owned) audio buffers.
+///
+/// `Send` because the pointers are only ever dereferenced on the one thread that owns the
+/// `HostProcessData` (and thus the buffers they point into); the `Plugin` is moved to that
+/// thread as a unit. The raw pointers never escape to another thread.
+struct SendChannelPtrs(Vec<Vec<*mut f32>>);
+unsafe impl Send for SendChannelPtrs {}
 
 impl PluginImpl {
     /// Get parameter changes captured from the plugin GUI
@@ -466,6 +479,8 @@ impl PluginImpl {
                 process_context: std::mem::zeroed(),
                 input_param_changes: ComWrapper::new(ParameterChanges::default()),
                 output_param_changes: ComWrapper::new(ParameterChanges::default()),
+                input_channel_ptrs: SendChannelPtrs(Vec::new()),
+                output_channel_ptrs: SendChannelPtrs(Vec::new()),
             });
 
             // Initialize process context
@@ -587,6 +602,51 @@ impl PluginImpl {
         // Set up process data counts
         data.process_data.numInputs = data.input_bus_buffers.len() as i32;
         data.process_data.numOutputs = data.output_bus_buffers.len() as i32;
+
+        // Build the channel-pointer arrays ONCE and point each bus + the process data at the
+        // (now stable) buffers. process() reuses these without allocating per block.
+        let build_ptrs = |buffers: &mut [Vec<f32>], buses: &[AudioBusBuffers]| {
+            let mut per_bus: Vec<Vec<*mut f32>> = Vec::with_capacity(buses.len());
+            let mut chan = 0usize;
+            for bus in buses {
+                let mut ptrs = Vec::with_capacity(bus.numChannels as usize);
+                for _ in 0..bus.numChannels {
+                    if chan < buffers.len() {
+                        ptrs.push(buffers[chan].as_mut_ptr());
+                        chan += 1;
+                    }
+                }
+                per_bus.push(ptrs);
+            }
+            per_bus
+        };
+        data.input_channel_ptrs =
+            SendChannelPtrs(build_ptrs(&mut data.input_buffers, &data.input_bus_buffers));
+        data.output_channel_ptrs = SendChannelPtrs(build_ptrs(
+            &mut data.output_buffers,
+            &data.output_bus_buffers,
+        ));
+
+        for (i, bus) in data.input_bus_buffers.iter_mut().enumerate() {
+            if !data.input_channel_ptrs.0[i].is_empty() {
+                bus.__field0.channelBuffers32 = data.input_channel_ptrs.0[i].as_mut_ptr();
+            }
+        }
+        for (i, bus) in data.output_bus_buffers.iter_mut().enumerate() {
+            if !data.output_channel_ptrs.0[i].is_empty() {
+                bus.__field0.channelBuffers32 = data.output_channel_ptrs.0[i].as_mut_ptr();
+            }
+        }
+        data.process_data.inputs = if data.input_bus_buffers.is_empty() {
+            ptr::null_mut()
+        } else {
+            data.input_bus_buffers.as_mut_ptr()
+        };
+        data.process_data.outputs = if data.output_bus_buffers.is_empty() {
+            ptr::null_mut()
+        } else {
+            data.output_bus_buffers.as_mut_ptr()
+        };
 
         log::debug!(
             "Prepared buffers: {} input buses, {} output buses, {} input channels, {} output channels",
@@ -735,62 +795,9 @@ impl PluginInternal for PluginImpl {
                     buffer.fill(0.0);
                 }
 
-                // Set up input buffer pointers
-                let mut input_channel_ptrs: Vec<Vec<*mut f32>> = Vec::new();
-                let mut input_channel_offset = 0;
-
-                for bus in &data.input_bus_buffers {
-                    let mut bus_ptrs = Vec::new();
-                    for _ in 0..bus.numChannels {
-                        if input_channel_offset < data.input_buffers.len() {
-                            bus_ptrs.push(data.input_buffers[input_channel_offset].as_mut_ptr());
-                            input_channel_offset += 1;
-                        }
-                    }
-                    input_channel_ptrs.push(bus_ptrs);
-                }
-
-                // Set up output buffer pointers
-                let mut output_channel_ptrs: Vec<Vec<*mut f32>> = Vec::new();
-                let mut output_channel_offset = 0;
-
-                for bus in &data.output_bus_buffers {
-                    let mut bus_ptrs = Vec::new();
-                    for _ in 0..bus.numChannels {
-                        if output_channel_offset < data.output_buffers.len() {
-                            bus_ptrs.push(data.output_buffers[output_channel_offset].as_mut_ptr());
-                            output_channel_offset += 1;
-                        }
-                    }
-                    output_channel_ptrs.push(bus_ptrs);
-                }
-
-                // Update input bus buffer pointers
-                for (i, bus) in data.input_bus_buffers.iter_mut().enumerate() {
-                    if i < input_channel_ptrs.len() && !input_channel_ptrs[i].is_empty() {
-                        bus.__field0.channelBuffers32 = input_channel_ptrs[i].as_mut_ptr();
-                    }
-                }
-
-                // Update output bus buffer pointers
-                for (i, bus) in data.output_bus_buffers.iter_mut().enumerate() {
-                    if i < output_channel_ptrs.len() && !output_channel_ptrs[i].is_empty() {
-                        bus.__field0.channelBuffers32 = output_channel_ptrs[i].as_mut_ptr();
-                    }
-                }
-
-                // Update process data pointers
-                data.process_data.inputs = if data.input_bus_buffers.is_empty() {
-                    ptr::null_mut()
-                } else {
-                    data.input_bus_buffers.as_mut_ptr()
-                };
-
-                data.process_data.outputs = if data.output_bus_buffers.is_empty() {
-                    ptr::null_mut()
-                } else {
-                    data.output_bus_buffers.as_mut_ptr()
-                };
+                // Channel pointers and process-data input/output pointers were wired once in
+                // prepare_buffers (buffer addresses are stable), so there's nothing to rebuild
+                // here — keeping the steady-state path allocation-free.
 
                 // Process
                 let result = self.processor.process(&mut data.process_data);
