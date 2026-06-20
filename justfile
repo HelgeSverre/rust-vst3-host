@@ -62,7 +62,7 @@ linux-check:
     #!/usr/bin/env bash
     set -euo pipefail
     docker run --rm -v "$PWD":/work -w /work \
-      -e CARGO_TARGET_DIR=/tmp/target -e VST3_SDK_DIR=/work/vst3sdk \
+      -e CARGO_TARGET_DIR=/tmp/target \
       rust:bookworm bash -c '
         apt-get update -qq && \
         apt-get install -y -qq libclang-dev clang libxcb1-dev libxcb-util-dev libasound2-dev pkg-config && \

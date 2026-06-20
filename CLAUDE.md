@@ -85,9 +85,10 @@ same `Plugin` type either way. See `docs/explanation/architecture.md`.
 
 ## Build setup
 
-The VST3 SDK is the `vst3sdk` git submodule. `.cargo/config.toml` sets
-`VST3_SDK_DIR = "vst3sdk"`, so an in-tree build needs no extra config. Clone with
-`--recursive` or run `git submodule update --init --recursive`.
+No special setup: `git clone` then `cargo build`. The `vst3` dependency (0.3) ships
+pre-generated bindings, so there is **no VST3 SDK requirement and no `VST3_SDK_DIR`** — the
+old `vst3sdk` submodule and `.cargo/config.toml` have been removed. (`libclang` is still
+needed for `cpal`'s `coreaudio-sys`/`alsa-sys` bindgen on macOS/Linux.)
 
 ## Documentation
 

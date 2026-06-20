@@ -1,2 +1,0 @@
-[env]
-VST3_SDK_DIR = { value = "vst3sdk", relative = true }

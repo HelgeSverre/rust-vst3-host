@@ -232,27 +232,19 @@ The core is working and exercised against real plugins on macOS. What to be awar
 - `MidiEvent::ProgramChange` is unsupported (VST3 routes programs through `IUnitInfo`).
 - Windows/Linux build and test in CI but aren't interactively exercised (no plugin run or
   editor opened) — macOS is the exercised platform.
-- Not yet published to crates.io: building depends on the VST3 SDK via `VST3_SDK_DIR`
-  (see [Building from source](#building-from-source)).
 
 ## Building from source
 
-The `vst3` dependency generates bindings from the Steinberg VST3 SDK headers at build time,
-so it needs the SDK and the `VST3_SDK_DIR` environment variable pointing at it (plus
-`libclang` for bindgen).
-
-**In this repository** the SDK is the `vst3sdk` git submodule and `.cargo/config.toml`
-already sets `VST3_SDK_DIR`, so no extra setup is needed:
+No VST3 SDK or extra setup is required. The `vst3` dependency (0.3) ships pre-generated
+bindings, so building is just:
 
 ```bash
-git submodule update --init --recursive
 cargo build --release
 ```
 
-**As a dependency in your own project**, you must provide the SDK yourself — clone the
-[VST3 SDK](https://github.com/steinbergmedia/vst3sdk) and set `VST3_SDK_DIR` to its path
-before building (e.g. in your crate's `.cargo/config.toml` or the environment). This is why
-the crate isn't on crates.io yet; the Steinberg SDK's license prevents bundling its headers.
+The only build-time native dependency is `libclang`, used by `cpal`'s `coreaudio-sys`
+(macOS) and `alsa-sys` (Linux); on Linux you also need the ALSA and libxcb dev headers
+(`libasound2-dev`, `libxcb1-dev`, `libxcb-util-dev`).
 
 ## Documentation
 

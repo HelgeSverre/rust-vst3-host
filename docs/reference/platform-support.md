@@ -34,8 +34,8 @@ Add your own with `Vst3Host::builder().add_scan_path(...)`.
 
 ## Build requirements
 
-- The VST3 SDK, included as the `vst3sdk` git submodule. Clone with `--recursive`, or run
-  `git submodule update --init --recursive`.
-- `.cargo/config.toml` points `VST3_SDK_DIR` at the submodule, so no extra setup is needed
-  for an in-tree build.
+- No VST3 SDK needed. The `vst3` dependency (0.3) ships pre-generated bindings, so a plain
+  `cargo build` works — there is no `VST3_SDK_DIR` and no submodule to initialize.
+- `libclang` is required at build time for `cpal`'s `coreaudio-sys` (macOS) and `alsa-sys`
+  (Linux, which also needs the ALSA + libxcb dev headers).
 - Audio output requires a working device; `play` opens the system default.

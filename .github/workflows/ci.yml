@@ -7,8 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # The `vst3` dependency's build script requires this; point it at the bundled SDK submodule.
-  VST3_SDK_DIR: ${{ github.workspace }}/vst3sdk
 
 jobs:
   # Primary platform: full workspace, formatting, lint, tests, examples.
@@ -17,8 +15,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -33,8 +29,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -46,7 +40,8 @@ jobs:
       - run: cargo test -p vst3-host --all-features
       - run: cargo clippy -p vst3-host --all-features -- -D warnings
 
-  # The published crate must at least build on Windows (bindgen needs LLVM).
+  # The published crate must at least build on Windows. LLVM is kept for any -sys
+  # dependency that still runs bindgen (e.g. via cpal).
   windows:
     name: Windows (vst3-host)
     runs-on: windows-latest
@@ -54,9 +49,7 @@ jobs:
       LIBCLANG_PATH: C:\Program Files\LLVM\bin
     steps:
       - uses: actions/checkout@v5
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install LLVM (for bindgen)
+      - name: Install LLVM
         run: choco install llvm -y
       - run: cargo build -p vst3-host
