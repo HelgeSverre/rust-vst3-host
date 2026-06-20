@@ -17,8 +17,8 @@ use vst3::{ComPtr, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 
 use super::{
     com_implementations::{
-        create_event_list, create_host_application, create_memory_stream,
-        create_memory_stream_from, ComponentHandler, HostApplication, HostEventList,
+        create_event_list, create_host_application, create_host_plug_frame, create_memory_stream,
+        create_memory_stream_from, ComponentHandler, HostApplication, HostEventList, HostPlugFrame,
         ParameterChanges,
     },
     module_loader::{load_module, VstModule},
@@ -63,6 +63,11 @@ pub struct PluginImpl {
 
     // Plugin view
     plugin_view: Option<ComPtr<IPlugView>>,
+
+    // Editor resize plumbing: the IPlugFrame handed to the plugin's view, and the slot it
+    // writes requested sizes into (drained via take_editor_resize_request).
+    plug_frame: ComWrapper<HostPlugFrame>,
+    editor_resize: Arc<Mutex<Option<(i32, i32)>>>,
 
     // Host application context passed to initialize() — kept alive for the plugin's
     // lifetime because the plugin may retain a reference to it.
@@ -217,6 +222,10 @@ impl PluginImpl {
                 false
             };
 
+            // Editor resize plumbing (an IPlugFrame the view can call into).
+            let editor_resize = Arc::new(Mutex::new(None));
+            let plug_frame = create_host_plug_frame(editor_resize.clone());
+
             // Create event lists
             log::debug!("Step 13: Creating event lists...");
             let input_events = create_event_list();
@@ -271,6 +280,8 @@ impl PluginImpl {
                 output_events,
                 output_midi: Arc::new(Mutex::new(Vec::new())),
                 plugin_view: None,
+                plug_frame,
+                editor_resize,
                 _host_app: host_app,
                 _module: module,
             })
@@ -991,6 +1002,12 @@ impl PluginInternal for PluginImpl {
                     return Err(Error::Other("Failed to get view size".to_string()));
                 }
 
+                // Hand the plugin an IPlugFrame (before attach, per the SDK) so it can
+                // request host-side resizes; requests land in `editor_resize`.
+                if let Some(frame) = self.plug_frame.to_com_ptr::<IPlugFrame>() {
+                    view.setFrame(frame.as_ptr());
+                }
+
                 // Platform-specific attachment
                 #[cfg(target_os = "macos")]
                 let platform_type = c"NSView".as_ptr();
@@ -1079,6 +1096,10 @@ impl PluginInternal for PluginImpl {
             .lock()
             .map(|mut o| std::mem::take(&mut *o))
             .unwrap_or_default()
+    }
+
+    fn take_editor_resize_request(&self) -> Option<(i32, i32)> {
+        self.editor_resize.lock().ok().and_then(|mut s| s.take())
     }
 
     fn save_state(&self) -> Result<Vec<u8>> {
