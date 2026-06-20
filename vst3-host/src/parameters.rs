@@ -256,6 +256,37 @@ impl ParameterAutomation {
             }
         }
     }
+
+    /// Sample this automation across one audio block, returning `(sample_offset, value)`
+    /// points suitable for sample-accurate scheduling (e.g. [`Plugin::set_parameter_at`]).
+    ///
+    /// `block_start_secs` is the block's start on the automation timeline; `frames` is the
+    /// block length; `points_per_block` is the sub-block resolution (1 = one value at the
+    /// block start; higher = finer ramps, capped at `frames`). Returns empty if the
+    /// automation has no points.
+    ///
+    /// [`Plugin::set_parameter_at`]: crate::Plugin::set_parameter_at
+    pub fn points_for_block(
+        &self,
+        block_start_secs: f64,
+        frames: usize,
+        sample_rate: f64,
+        points_per_block: usize,
+    ) -> Vec<(i32, f64)> {
+        if self.points.is_empty() || frames == 0 {
+            return Vec::new();
+        }
+        let n = points_per_block.clamp(1, frames);
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let offset = (i * frames) / n;
+            let time = block_start_secs + offset as f64 / sample_rate;
+            if let Some(value) = self.value_at_time(time) {
+                out.push((offset as i32, value));
+            }
+        }
+        out
+    }
 }
 
 impl Default for ParameterAutomation {

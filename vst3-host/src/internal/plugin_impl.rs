@@ -602,17 +602,21 @@ impl PluginImpl {
 
 impl PluginInternal for PluginImpl {
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
+        self.set_parameter_at(id, value, 0)
+    }
+
+    fn set_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
         if let Some(ref controller) = self.controller {
             // VST3 requires both halves: tell the controller (for GUI/display/formatting)
             // AND feed the processor's input queue (so the change reaches the audio DSP).
-            // The processor side is applied at the start of the next process() block.
+            // The processor side is applied at `sample_offset` in the next process() block.
             unsafe {
                 controller.setParamNormalized(id, value);
             }
             self.pending_param_changes.push(ParameterChange {
                 id,
                 value,
-                sample_offset: 0,
+                sample_offset,
             });
             Ok(())
         } else {

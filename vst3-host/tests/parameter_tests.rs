@@ -286,3 +286,36 @@ fn test_bypass_parameter() {
     assert_eq!(bypass.format_value(0.0), "Off");
     assert_eq!(bypass.format_value(1.0), "On");
 }
+
+#[test]
+fn automation_points_for_block_samples_sub_block() {
+    // Linear ramp 0.0 -> 1.0 over 1 second.
+    let auto = ParameterAutomation::new()
+        .add_point(0.0, 0.0)
+        .add_point(1.0, 1.0)
+        .with_curve(AutomationCurve::Linear);
+
+    // A 512-frame block starting at t=0, at 512 Hz so 1 frame = 1/512 s, with 4 sub-points.
+    let pts = auto.points_for_block(0.0, 512, 512.0, 4);
+    let offsets: Vec<i32> = pts.iter().map(|(o, _)| *o).collect();
+    assert_eq!(offsets, vec![0, 128, 256, 384]);
+    // Values track the ramp: t = offset/512 → value == t.
+    for (offset, value) in pts {
+        let expected = offset as f64 / 512.0;
+        assert!(
+            (value - expected).abs() < 1e-9,
+            "at offset {offset}: {value} vs {expected}"
+        );
+    }
+
+    // points_per_block = 1 → a single block-start value.
+    let one = auto.points_for_block(0.25, 512, 512.0, 1);
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].0, 0);
+    assert!((one[0].1 - 0.25).abs() < 1e-9);
+
+    // Empty automation yields nothing.
+    assert!(ParameterAutomation::new()
+        .points_for_block(0.0, 512, 512.0, 4)
+        .is_empty());
+}

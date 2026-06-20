@@ -58,6 +58,12 @@ pub struct Plugin {
 // Internal trait for hiding implementation details
 pub(crate) trait PluginInternal: Send {
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
+    /// Schedule a parameter change at a sample offset within the next process block.
+    /// Defaults to a block-start change (ignores the offset) for implementations that don't
+    /// support sample-accurate scheduling (e.g. process isolation).
+    fn set_parameter_at(&mut self, id: u32, value: f64, _sample_offset: i32) -> Result<()> {
+        self.set_parameter(id, value)
+    }
     fn get_parameter(&self, id: u32) -> Result<f64>;
     fn get_all_parameters(&self) -> Result<Vec<Parameter>>;
     fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
@@ -142,6 +148,30 @@ impl Plugin {
         }
 
         Ok(())
+    }
+
+    /// Set a parameter value at a specific sample offset within the next process block.
+    ///
+    /// This is the sample-accurate building block for automation: call it once per
+    /// sub-block point (e.g. from [`ParameterAutomation::points_for_block`]) and the plugin
+    /// receives the changes at their offsets in the next `process_audio`. Like
+    /// [`Self::set_parameter`], `value` is normalized `0.0..=1.0`.
+    ///
+    /// `sample_offset` is clamped to the block. Under process isolation the offset is not
+    /// carried across the boundary (the change applies at the block start).
+    ///
+    /// [`ParameterAutomation::points_for_block`]: crate::parameters::ParameterAutomation::points_for_block
+    pub fn set_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
+        if !(0.0..=1.0).contains(&value) {
+            return Err(Error::InvalidParameter(format!(
+                "Value {} is out of range [0.0, 1.0]",
+                value
+            )));
+        }
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .set_parameter_at(id, value, sample_offset)
     }
 
     /// Get a parameter value by ID
