@@ -287,11 +287,18 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
                         has_midi_input = component.getBusCount(kEvent as i32, kInput as i32) > 0;
                         has_midi_output = component.getBusCount(kEvent as i32, kOutput as i32) > 0;
 
-                        // Check for GUI
-                        if let Some(controller) = component.cast::<IEditController>() {
-                            has_gui = true;
-                            controller.terminate();
-                        }
+                        // GUI detection (lightweight). A plugin has an editor when it provides
+                        // an edit controller — either the component itself implements
+                        // IEditController (single-component) or it names a separate controller
+                        // class. The previous check only handled the single-component case, so
+                        // it wrongly reported "no GUI" for the common separate-component
+                        // plugins. A precise createView probe needs the plugin's full setup
+                        // (component handler + activation) that only the load path performs;
+                        // controller presence is the reliable fast signal here.
+                        has_gui = component.cast::<IEditController>().is_some() || {
+                            let mut cid: [std::os::raw::c_char; 16] = [0; 16];
+                            component.getControllerClassId(&mut cid) == kResultOk
+                        };
 
                         // Cleanup
                         component.terminate();
