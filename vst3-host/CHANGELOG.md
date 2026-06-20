@@ -18,6 +18,11 @@ First usable release of the safe VST3 hosting library, extracted from the inspec
   aftertouch) and MIDI out capture (`take_output_midi`).
 - Plugin state save/restore (`Plugin::save_state` / `load_state`) via the plugin's own
   `getState`/`setState`; works in-process and across process isolation.
+- Parameter changes now reach the audio **processor** (fed into the per-block input
+  parameter queue), not only the edit controller — so set/automated values actually drive
+  the DSP. Applied at the start of the next process block.
+- MIDI output capture (`Plugin::take_output_midi`) now works under process isolation, not
+  just in-process.
 - Process isolation: opt-in out-of-process hosting with timeout/crash detection,
   `auto_isolate_problematic`, and `probe_plugin` to validate plugins safely. Crashes now
   surface as a typed `Error::PluginCrashed`; `Plugin::recover()` respawns and reloads, and
