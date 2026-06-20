@@ -395,6 +395,72 @@ fn test_isolation_state_roundtrip() {
     println!("Isolated state round-trip OK ({} bytes)", snapshot.len());
 }
 
+/// Track D: MIDI a plugin emits is captured across the process-isolation boundary.
+///
+/// Needs a MIDI-*emitting* plugin (arpeggiator/sequencer that produces output without GUI
+/// configuration). The bundled Dexed does not emit, and common installed sequencers
+/// (HY-MPS3, TranceEngine) emit nothing until a pattern is programmed in their GUI — so on
+/// most machines this can only assert the boundary doesn't *fabricate or drop* MIDI relative
+/// to the in-process path (parity), which it does by running the same capture code. If a
+/// real emitter is present it additionally asserts events actually cross. The wire format
+/// itself is covered deterministically by `process_isolation::wire_tests`.
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the helper binary; a real emitter only if one is installed"]
+fn test_isolation_output_midi_parity() {
+    // Drive the SAME plugin in-process and isolated with identical input; the isolated
+    // output MIDI must equal the in-process output MIDI (the boundary must be transparent).
+    let candidates = [
+        "/Library/Audio/Plug-Ins/VST3/HY-MPS3 free.vst3",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3"),
+    ];
+    let Some(path) = candidates.iter().find(|p| std::path::Path::new(p).exists()) else {
+        println!("No candidate plugin installed, skipping");
+        return;
+    };
+
+    fn drive(host: &mut Vst3Host, path: &str) -> Vec<MidiEvent> {
+        let mut plugin = host.load_plugin(path).expect("load");
+        plugin.start_processing().expect("start");
+        for note in [60, 64, 67] {
+            let _ = plugin.send_midi_note(note, 100, MidiChannel::Ch1);
+        }
+        let mut out = Vec::new();
+        for _ in 0..200 {
+            let mut buffers = AudioBuffers::new(0, 2, 512, 48000.0);
+            plugin.process_audio(&mut buffers).expect("process");
+            out.extend(plugin.take_output_midi());
+        }
+        plugin.stop_processing().ok();
+        out
+    }
+
+    let mut inproc = Vst3Host::builder().block_size(512).build().unwrap();
+    let in_events = drive(&mut inproc, path);
+
+    let mut iso = Vst3Host::builder()
+        .block_size(512)
+        .with_process_isolation(true)
+        .build()
+        .unwrap();
+    let iso_events = drive(&mut iso, path);
+
+    assert_eq!(
+        in_events, iso_events,
+        "isolated output MIDI must match in-process for the same input"
+    );
+    println!(
+        "Output-MIDI parity holds across the boundary ({} event(s)){}",
+        in_events.len(),
+        if in_events.is_empty() {
+            " — note: this plugin emits nothing without configuration, so the cross-boundary \
+             data path is exercised but not observed carrying events"
+        } else {
+            ""
+        }
+    );
+}
+
 /// B2: when an isolated helper dies mid-session, calls surface a typed `PluginCrashed`
 /// (the host stays alive) and `recover()` brings the plugin back.
 #[cfg(feature = "process-isolation")]

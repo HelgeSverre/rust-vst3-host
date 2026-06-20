@@ -101,10 +101,13 @@ pub enum HostResponse {
         /// Crash detail.
         message: String,
     },
-    /// Per-channel audio output data (`[channel][frame]`).
+    /// Per-channel audio output data (`[channel][frame]`), plus any MIDI the plugin
+    /// emitted during the block (arpeggiators, MPE, etc.).
     AudioOutput {
         /// Output samples per channel.
         outputs: Vec<Vec<f32>>,
+        /// MIDI events the plugin emitted this block, in order.
+        output_midi: Vec<crate::midi::MidiEvent>,
     },
     /// A single parameter value (normalized).
     ParameterValue {
@@ -419,6 +422,53 @@ pub enum IsolationError {
     /// Unexpected response
     #[error("Unexpected response from helper")]
     UnexpectedResponse,
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use crate::midi::{MidiChannel, MidiEvent};
+
+    #[test]
+    fn audio_output_carries_midi_across_the_wire() {
+        // The Process response now carries emitted MIDI alongside audio; make sure the
+        // extended variant round-trips through the JSON transport host and helper share.
+        let resp = HostResponse::AudioOutput {
+            outputs: vec![vec![0.0, 0.5], vec![-0.5, 0.0]],
+            output_midi: vec![
+                MidiEvent::NoteOn {
+                    channel: MidiChannel::Ch1,
+                    note: 60,
+                    velocity: 100,
+                },
+                MidiEvent::NoteOff {
+                    channel: MidiChannel::Ch1,
+                    note: 60,
+                    velocity: 0,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        let back: HostResponse = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            HostResponse::AudioOutput {
+                outputs,
+                output_midi,
+            } => {
+                assert_eq!(outputs, vec![vec![0.0, 0.5], vec![-0.5, 0.0]]);
+                assert_eq!(output_midi.len(), 2);
+                assert_eq!(
+                    output_midi[0],
+                    MidiEvent::NoteOn {
+                        channel: MidiChannel::Ch1,
+                        note: 60,
+                        velocity: 100
+                    }
+                );
+            }
+            other => panic!("round-trip changed the variant: {other:?}"),
+        }
+    }
 }
 
 /// Crash protection utilities for in-process plugins

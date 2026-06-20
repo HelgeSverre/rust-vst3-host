@@ -27,7 +27,13 @@ pub struct IsolatedPluginImpl {
     is_processing: bool,
     /// Whether the plugin has an open editor
     has_open_editor: bool,
+    /// MIDI the plugin has emitted across the boundary, buffered for the host to poll
+    /// (mirrors PluginImpl::output_midi). Capped to bound growth if never read.
+    output_midi: Mutex<Vec<MidiEvent>>,
 }
+
+/// Cap on buffered output MIDI, matching the in-process path's MAX_OUTPUT_MIDI.
+const MAX_OUTPUT_MIDI: usize = 4096;
 
 impl IsolatedPluginImpl {
     /// Create a new isolated plugin implementation
@@ -44,6 +50,7 @@ impl IsolatedPluginImpl {
             block_size,
             is_processing: false,
             has_open_editor: false,
+            output_midi: Mutex::new(Vec::new()),
         }
     }
 
@@ -148,7 +155,10 @@ impl PluginInternal for IsolatedPluginImpl {
         })?;
 
         match response {
-            HostResponse::AudioOutput { outputs } => {
+            HostResponse::AudioOutput {
+                outputs,
+                output_midi,
+            } => {
                 for (ch_idx, output_channel) in buffers.outputs.iter_mut().enumerate() {
                     if let Some(src) = outputs.get(ch_idx) {
                         let n = output_channel.len().min(src.len());
@@ -158,6 +168,16 @@ impl PluginInternal for IsolatedPluginImpl {
                         }
                     } else {
                         output_channel.fill(0.0);
+                    }
+                }
+                // Buffer any MIDI the plugin emitted this block for the host to poll.
+                if !output_midi.is_empty() {
+                    if let Ok(mut buf) = self.output_midi.lock() {
+                        buf.extend(output_midi);
+                        if buf.len() > MAX_OUTPUT_MIDI {
+                            let drop = buf.len() - MAX_OUTPUT_MIDI;
+                            buf.drain(0..drop);
+                        }
                     }
                 }
                 Ok(())
@@ -254,6 +274,13 @@ impl PluginInternal for IsolatedPluginImpl {
             },
             "LoadState",
         )
+    }
+
+    fn take_output_events(&self) -> Vec<MidiEvent> {
+        self.output_midi
+            .lock()
+            .map(|mut o| std::mem::take(&mut *o))
+            .unwrap_or_default()
     }
 
     fn helper_pid(&self) -> Option<u32> {

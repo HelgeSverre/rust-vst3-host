@@ -184,6 +184,9 @@ fn handle(
                 match p.process_audio(&mut buffers) {
                     Ok(()) => HostResponse::AudioOutput {
                         outputs: buffers.outputs,
+                        // The helper's Plugin captured any emitted MIDI internally; drain
+                        // it and return it alongside the audio for this block.
+                        output_midi: p.take_output_midi(),
                     },
                     Err(e) => err("Process", e),
                 }
