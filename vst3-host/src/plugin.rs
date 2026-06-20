@@ -9,7 +9,7 @@ use crate::{
 use std::sync::{Arc, Mutex};
 
 /// Information about a VST3 plugin
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PluginInfo {
     /// Full path to the VST3 bundle/file
     pub path: std::path::PathBuf,

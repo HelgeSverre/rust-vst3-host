@@ -79,6 +79,7 @@ mod internal;
 pub use audio::{AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStream, ChannelLevel};
 pub use discovery::{
     get_detailed_plugin_info, BusInfo, BusLayout, ClassInfo, DetailedPluginInfo, FactoryInfo,
+    PluginReport,
 };
 #[cfg(feature = "egui-widgets")]
 pub use embed::{EditorRect, EmbeddedEditor};
