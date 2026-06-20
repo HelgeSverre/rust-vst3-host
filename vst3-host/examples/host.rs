@@ -246,7 +246,7 @@ impl App {
                 .expect("Failed to get default output config");
 
             let plugin_clone = self.plugin.clone();
-            let sample_rate = config.sample_rate().0 as f64;
+            let sample_rate = config.sample_rate() as f64;
             let channels = config.channels() as usize;
 
             let stream_config = cpal::StreamConfig {
@@ -257,7 +257,7 @@ impl App {
 
             let stream = device
                 .build_output_stream(
-                    &stream_config,
+                    stream_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                         // Clear output buffer first
                         data.fill(0.0);

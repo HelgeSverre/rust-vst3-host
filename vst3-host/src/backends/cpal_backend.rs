@@ -6,7 +6,7 @@ use crate::{
 };
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    BufferSize, Device, SampleRate, Stream, StreamConfig, SupportedBufferSize,
+    BufferSize, Device, Stream, StreamConfig, SupportedBufferSize,
 };
 use std::sync::Arc;
 
@@ -20,7 +20,8 @@ use std::sync::Arc;
 /// are NOT changed here: the playback bridge interleaves based on the requested
 /// channel count, so silently changing it would garble the output.
 fn resolve_output_buffer_size(device: &Device, config: &AudioConfig) -> BufferSize {
-    let want_sr = SampleRate(config.sample_rate as u32);
+    // cpal 0.18: `SampleRate` is a `u32` type alias.
+    let want_sr = config.sample_rate as u32;
     let want_ch = config.output_channels as u16;
 
     if let Ok(ranges) = device.supported_output_configs() {
@@ -101,7 +102,7 @@ impl CpalBackend {
             .host
             .output_devices()
             .map_err(|e| Error::AudioBackendError(format!("Failed to enumerate devices: {}", e)))?
-            .filter_map(|d| d.name().ok())
+            .map(|d| d.to_string())
             .collect();
         Ok(devices)
     }
@@ -112,7 +113,7 @@ impl CpalBackend {
             .host
             .input_devices()
             .map_err(|e| Error::AudioBackendError(format!("Failed to enumerate devices: {}", e)))?
-            .filter_map(|d| d.name().ok())
+            .map(|d| d.to_string())
             .collect();
         Ok(devices)
     }
@@ -162,13 +163,13 @@ impl AudioBackend for CpalBackend {
     ) -> Result<Self::Stream> {
         let stream_config = StreamConfig {
             channels: config.output_channels as u16,
-            sample_rate: SampleRate(config.sample_rate as u32),
+            sample_rate: config.sample_rate as u32,
             buffer_size: resolve_output_buffer_size(device, &config),
         };
 
         let stream = device
             .build_output_stream(
-                &stream_config,
+                stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     data_callback(data);
                 },
@@ -195,13 +196,13 @@ impl AudioBackend for CpalBackend {
     ) -> Result<Self::Stream> {
         let stream_config = StreamConfig {
             channels: config.input_channels as u16,
-            sample_rate: SampleRate(config.sample_rate as u32),
+            sample_rate: config.sample_rate as u32,
             buffer_size: BufferSize::Fixed(config.block_size as u32),
         };
 
         let stream = device
             .build_input_stream(
-                &stream_config,
+                stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     data_callback(data);
                 },
@@ -231,7 +232,7 @@ impl AudioBackend for CpalBackend {
         // and assume the callback handles both input and output
         let stream_config = StreamConfig {
             channels: config.output_channels as u16,
-            sample_rate: SampleRate(config.sample_rate as u32),
+            sample_rate: config.sample_rate as u32,
             buffer_size: BufferSize::Fixed(config.block_size as u32),
         };
 
@@ -245,7 +246,7 @@ impl AudioBackend for CpalBackend {
 
         let stream = output_device
             .build_output_stream(
-                &stream_config,
+                stream_config,
                 move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     let input = input_buffer_clone.lock().unwrap();
                     data_callback(&input, output);

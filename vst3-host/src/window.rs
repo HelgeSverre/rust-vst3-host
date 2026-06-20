@@ -117,10 +117,9 @@ impl PluginWindow {
                 NSPoint::new(0.0, 0.0),
                 NSSize::new(width as f64, height as f64),
             );
-            let container_view =
-                unsafe { NSView::initWithFrame(NSView::alloc(mtm), container_frame) };
+            let container_view = NSView::initWithFrame(NSView::alloc(mtm), container_frame);
             if let Some(content_view) = window.contentView() {
-                unsafe { content_view.addSubview(&container_view) };
+                content_view.addSubview(&container_view);
             }
 
             // Hand the plugin the container NSView to embed its editor in.
