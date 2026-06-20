@@ -60,16 +60,18 @@ audio.control().send_midi(MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 6
 
 ### Still correctness-first, not fully RT-audited
 
-Even the lock-free runner isn't a hard-real-time guarantee yet:
+Even the lock-free runner isn't a fully hardened RT engine yet:
 
-- **Allocation hasn't been fully audited.** The scratch buffer is reused, but the steady-state
-  path isn't proven zero-allocation.
+- **Steady-state `process` is allocation-free** — the host preallocates its buffers and
+  channel-pointer arrays once, and a counting-allocator test asserts zero heap allocations
+  per block (with a well-behaved plugin). Sending new parameter/MIDI commands can still grow
+  the queues, and a plugin may allocate internally on note-ons.
 - **The plugin's internal event list still uses an (uncontended) mutex.** Only the audio
   thread touches it under the runner, so there's no cross-thread contention, but it isn't
   strictly lock-free internally.
 
-The runner removes the *cross-thread* lock (the big win); the remaining items are refinements
-for strict low-latency work.
+The runner removes the *cross-thread* lock (the big win) and the per-block allocations; the
+remaining item is the internal uncontended mutex.
 
 ## Metering
 
