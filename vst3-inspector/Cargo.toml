@@ -19,4 +19,4 @@ egui_extras = "0.31.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 directories = "6.0.0"
-rfd = "0.15"
+rfd = "0.17"

@@ -69,7 +69,7 @@ egui-widgets = ["egui", "raw-window-handle"]
 
 [dev-dependencies]
 env_logger = "0.11"
-rfd = "0.15"
+rfd = "0.17"
 eframe = "0.31"
 raw-window-handle = "0.6"
 
