@@ -440,6 +440,8 @@ struct VST3Inspector {
     // Prebuilt JSON export of the current plugin (PluginReport), for the "Copy JSON" button.
     // Built at load time so the button never re-introspects a loaded plugin.
     report_json: Option<String>,
+    // The plugin's native editor window while open (standalone; dropped to close).
+    plugin_window: Option<vst3_host::PluginWindow>,
     // Plugin discovery
     discovered_plugins: Vec<String>,
     // The `vst3-host` library host (built once, used to load plugins).
@@ -2109,16 +2111,26 @@ impl VST3Inspector {
         });
     }
 
-    // GUI editor embedding is not yet ported to the library — the native NSView/HWND
-    // attachment lived in the old raw-COM code path.
-    // TODO(port): editor embedding
+    // Open the plugin's native editor in a standalone window (via the library's PluginWindow).
+    // In-process plugins only — editors across process isolation aren't bridged yet.
     fn create_plugin_gui(&mut self) -> Result<(), String> {
-        self.last_error = Some("editor embedding not yet ported".into());
-        Err("editor embedding not yet ported".into())
+        let Some(audio) = self.audio.as_ref() else {
+            return Err("No plugin loaded".into());
+        };
+        let mut window = vst3_host::PluginWindow::new(audio.plugin());
+        if let Err(e) = window.open() {
+            let msg = format!("Failed to open editor: {e}");
+            self.last_error = Some(msg.clone());
+            return Err(msg);
+        }
+        self.plugin_window = Some(window);
+        self.gui_attached = true;
+        Ok(())
     }
 
-    // TODO(port): editor embedding
     fn close_plugin_gui(&mut self) {
+        // Dropping the window closes the editor and the native window.
+        self.plugin_window = None;
         self.gui_attached = false;
     }
 
@@ -2217,6 +2229,7 @@ impl VST3Inspector {
         self.plugin_info = None;
         self.selected_parameter = None;
         self.current_page = 0;
+        self.plugin_window = None; // close any open editor from the previous plugin
         self.gui_attached = false;
         self.is_processing = false;
         self.last_error = None;
@@ -2863,6 +2876,7 @@ impl VST3Inspector {
             plugin_path: path.to_string(),
             plugin_info: None,
             report_json: None,
+            plugin_window: None,
             discovered_plugins: Vec::new(),
             host,
             audio: None,
