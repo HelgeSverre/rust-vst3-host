@@ -3618,6 +3618,7 @@ dependencies = [
  "objc2 0.6.1",
  "objc2-app-kit 0.3.1",
  "objc2-foundation 0.3.1",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",

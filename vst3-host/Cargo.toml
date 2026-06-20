@@ -31,6 +31,7 @@ libc = "0.2"
 # Optional dependencies
 cpal = { version = "0.16.0", optional = true }
 egui = { version = "0.31.1", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
 
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -61,7 +62,7 @@ xcb = "1.7"
 default = ["cpal-backend", "process-isolation"]
 cpal-backend = ["cpal"]
 process-isolation = []
-egui-widgets = ["egui"]
+egui-widgets = ["egui", "raw-window-handle"]
 
 [dev-dependencies]
 env_logger = "0.11"
@@ -83,6 +84,10 @@ name = "plugin_scanner"
 [[example]]
 name = "plugin_gui"
 required-features = ["cpal-backend"]
+
+[[example]]
+name = "embedded_editor"
+required-features = ["egui-widgets"]
 
 [[example]]
 name = "host"
