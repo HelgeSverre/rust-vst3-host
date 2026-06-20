@@ -395,6 +395,65 @@ fn test_isolation_state_roundtrip() {
     println!("Isolated state round-trip OK ({} bytes)", snapshot.len());
 }
 
+/// Track D: automating a parameter through the public API changes the rendered audio
+/// (end-to-end). The processor-queue mechanism itself is covered deterministically by the
+/// `parameter_changes_tests` unit test; this proves the full path produces an audible effect
+/// and that feeding the input queue didn't break processing.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_parameter_automation_changes_audio() {
+    let plugin_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(plugin_path).exists() {
+        println!("Test plugin not found, skipping");
+        return;
+    }
+
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .build()
+        .unwrap();
+    let mut plugin = host.load_plugin(plugin_path).unwrap();
+    plugin.start_processing().unwrap();
+
+    let params = plugin.get_parameters().unwrap();
+    let cutoff = params
+        .iter()
+        .find(|p| p.name.to_lowercase().contains("cutoff"))
+        .map(|p| p.id)
+        .unwrap_or(params[0].id);
+
+    // Render a held note with the parameter set to a value, measuring output RMS.
+    fn render_rms(plugin: &mut Plugin, id: u32, value: f64) -> f64 {
+        plugin.set_parameter(id, value).unwrap();
+        plugin.send_midi_note(60, 110, MidiChannel::Ch1).unwrap();
+        let (mut sumsq, mut n) = (0.0f64, 0u64);
+        for _ in 0..40 {
+            let mut b = AudioBuffers::new(0, 2, 512, 48000.0);
+            plugin.process_audio(&mut b).unwrap();
+            for ch in &b.outputs {
+                for &s in ch {
+                    sumsq += (s as f64) * (s as f64);
+                    n += 1;
+                }
+            }
+        }
+        plugin.send_midi_note_off(60, MidiChannel::Ch1).unwrap();
+        (sumsq / n.max(1) as f64).sqrt()
+    }
+
+    let low = render_rms(&mut plugin, cutoff, 0.05);
+    let high = render_rms(&mut plugin, cutoff, 0.95);
+    plugin.stop_processing().ok();
+
+    println!("automation A/B (cutoff): low RMS={low:.6}, high RMS={high:.6}");
+    assert!(low > 0.0 || high > 0.0, "plugin produced no audio at all");
+    assert!(
+        (low - high).abs() > 1e-4,
+        "automating the parameter did not change the audio: low={low:.6} high={high:.6}"
+    );
+}
+
 /// Track D: MIDI a plugin emits is captured across the process-isolation boundary.
 ///
 /// Needs a MIDI-*emitting* plugin (arpeggiator/sequencer that produces output without GUI

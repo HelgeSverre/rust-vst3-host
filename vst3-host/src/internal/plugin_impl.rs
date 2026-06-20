@@ -4,7 +4,7 @@ use crate::{
     audio::AudioBuffers,
     error::{Error, Result},
     midi::{MidiChannel, MidiEvent},
-    parameters::Parameter,
+    parameters::{Parameter, ParameterChange},
     plugin::{PluginInfo, PluginInternal},
 };
 use std::ptr;
@@ -47,6 +47,11 @@ pub struct PluginImpl {
     // Host data structures
     process_data: Option<Box<HostProcessData>>,
     component_handler: Option<ComWrapper<ComponentHandler>>,
+
+    // Parameter changes queued by the host (set_parameter / automation) to be fed into the
+    // processor's input parameter queue at the start of the next process() block. Serialized
+    // with process() by the caller's &mut access, so a plain Vec (no lock) is sufficient.
+    pending_param_changes: Vec<ParameterChange>,
 
     // Event handling
     input_events: ComWrapper<HostEventList>,
@@ -261,6 +266,7 @@ impl PluginImpl {
                 block_size: 512,
                 process_data: None,
                 component_handler: Some(component_handler),
+                pending_param_changes: Vec::new(),
                 input_events,
                 output_events,
                 output_midi: Arc::new(Mutex::new(Vec::new())),
@@ -561,9 +567,17 @@ impl PluginImpl {
 impl PluginInternal for PluginImpl {
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
         if let Some(ref controller) = self.controller {
+            // VST3 requires both halves: tell the controller (for GUI/display/formatting)
+            // AND feed the processor's input queue (so the change reaches the audio DSP).
+            // The processor side is applied at the start of the next process() block.
             unsafe {
                 controller.setParamNormalized(id, value);
             }
+            self.pending_param_changes.push(ParameterChange {
+                id,
+                value,
+                sample_offset: 0,
+            });
             Ok(())
         } else {
             Err(Error::InterfaceError("No controller available".to_string()))
@@ -637,6 +651,10 @@ impl PluginInternal for PluginImpl {
             return Err(Error::Other("Plugin is not processing".to_string()));
         }
 
+        // Drain parameter changes queued since the last block; fed into the processor's
+        // input queue below so the DSP — not just the controller — sees them this block.
+        let pending = std::mem::take(&mut self.pending_param_changes);
+
         if let Some(ref mut data) = self.process_data {
             unsafe {
                 // Clear output events only - input events should be preserved for processing
@@ -655,6 +673,13 @@ impl PluginInternal for PluginImpl {
                     .unwrap_or(self.block_size)
                     .min(self.block_size);
                 data.process_data.numSamples = frames as i32;
+
+                // Feed queued parameter changes into the processor's input queue, clamping
+                // each sample offset into this block.
+                for pc in &pending {
+                    let off = pc.sample_offset.clamp(0, frames.saturating_sub(1) as i32);
+                    data.input_param_changes.enqueue(pc.id, off, pc.value);
+                }
 
                 // Copy input audio to plugin buffers (length-clamped — never assume the
                 // caller's block equals the configured block size).
@@ -735,6 +760,9 @@ impl PluginInternal for PluginImpl {
 
                 // Clear input events AFTER processing so plugin can see them
                 self.input_events.clear();
+                // Clear the input parameter queue too, so this block's values don't
+                // re-stick on the next block.
+                data.input_param_changes.clear_all();
 
                 // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
                 let emitted = self.output_events.drain();

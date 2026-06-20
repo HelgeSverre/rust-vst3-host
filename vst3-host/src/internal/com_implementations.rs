@@ -656,6 +656,30 @@ impl Default for ParameterChanges {
     }
 }
 
+impl ParameterChanges {
+    /// Host-side: queue a parameter change point for the next process block. The processor
+    /// reads these from `inputParameterChanges` during `process()`. Points for the same id
+    /// share one queue and are kept ordered by sample offset.
+    pub fn enqueue(&self, id: u32, sample_offset: i32, value: f64) {
+        if let Ok(mut queues) = self.queues.lock() {
+            if let Some(idx) = queues.iter().position(|q| q.param_id == id) {
+                queues[idx].insert_point(sample_offset, value);
+            } else {
+                let q = ComWrapper::new(ParameterValueQueue::new(id));
+                q.insert_point(sample_offset, value);
+                queues.push(q);
+            }
+        }
+    }
+
+    /// Drop all queued changes. Call after each `process()` block so values don't re-stick.
+    pub fn clear_all(&self) {
+        if let Ok(mut queues) = self.queues.lock() {
+            queues.clear();
+        }
+    }
+}
+
 impl Class for ParameterChanges {
     type Interfaces = (IParameterChanges,);
 }
@@ -790,6 +814,18 @@ impl ParameterValueQueue {
             points: Mutex::new(Vec::new()),
         }
     }
+
+    /// Insert a point keeping sample-offset order (safe host-side population, mirroring the
+    /// COM `addPoint`).
+    fn insert_point(&self, sample_offset: i32, value: f64) {
+        if let Ok(mut points) = self.points.lock() {
+            let pos = points
+                .iter()
+                .position(|(off, _)| *off > sample_offset)
+                .unwrap_or(points.len());
+            points.insert(pos, (sample_offset, value));
+        }
+    }
 }
 
 impl Class for ParameterValueQueue {
@@ -855,6 +891,33 @@ mod host_attr_tests {
         assert_eq!(list.get_value("s"), Some(AttrValue::Str(vec![72, 105])));
         assert_eq!(list.get_value("b"), Some(AttrValue::Bin(vec![1, 2, 3])));
         assert_eq!(list.get_value("missing"), None);
+    }
+}
+
+#[cfg(test)]
+mod parameter_changes_tests {
+    use super::*;
+
+    #[test]
+    fn enqueue_groups_by_id_orders_by_offset_and_clears() {
+        let pc = ParameterChanges::default();
+        pc.enqueue(7, 64, 0.9);
+        pc.enqueue(7, 0, 0.5); // earlier offset, same id → must sort before the 64 point
+        pc.enqueue(3, 0, 0.1);
+
+        // Two distinct parameter ids → two queues; the processor reads this count.
+        assert_eq!(unsafe { pc.getParameterCount() }, 2);
+        {
+            let queues = pc.queues.lock().unwrap();
+            let q7 = queues.iter().find(|q| q.param_id == 7).unwrap();
+            assert_eq!(*q7.points.lock().unwrap(), vec![(0, 0.5), (64, 0.9)]);
+            let q3 = queues.iter().find(|q| q.param_id == 3).unwrap();
+            assert_eq!(*q3.points.lock().unwrap(), vec![(0, 0.1)]);
+        }
+
+        // After a block the host clears it so values don't re-stick.
+        pc.clear_all();
+        assert_eq!(unsafe { pc.getParameterCount() }, 0);
     }
 }
 
