@@ -48,11 +48,15 @@ Valhalla, …) across capabilities: **loads / audio / parameters / GUI / state s
 / MIDI-out**. A living matrix builds trust faster than abstract docs. Candidate home:
 `docs/reference/compatibility.md`, generated/checked by a harness (extend `--selftest`).
 
-### M3 — A separate pro realtime path (don't uglify the simple API)
-Keep `simple::play()` as the friendly mutex-based convenience API. Add a lower-level
-`RealtimePluginRunner` *alongside* it: command queues, preallocated buffers, **no locks in
-the audio callback**, explicit lock-free rings for parameter/audio/MIDI events. Two tiers:
-nice API on top, serious API underneath.
+### M3 — A separate pro realtime path (don't uglify the simple API) — ✅ core DONE
+Kept `simple::play()` / `Vst3Host::play` as the friendly mutex path. Added
+`RealtimePluginRunner` *alongside* it (`realtime.rs`): owns the plugin on the audio thread;
+MIDI + parameter commands cross a lock-free SPSC ring (`rtrb`) and apply per block; the
+callback takes no lock a control thread could hold. `Vst3Host::play_realtime` /
+`play_realtime_with_backend` wire it to cpal. Verified offline (commands apply + audio
+renders) and via a live hardware smoke. *Remaining:* zero-allocation audit of the
+steady-state path, and replacing the plugin's internal uncontended mutexes (event list) for
+strict RT purity.
 
 ## Near-term backlog (smaller, concrete)
 

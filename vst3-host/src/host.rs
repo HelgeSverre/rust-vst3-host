@@ -488,4 +488,37 @@ impl Vst3Host {
         };
         crate::playback::play_with_backend(&backend, plugin, config)
     }
+
+    /// Play a plugin through the default device using the **lock-free** real-time path
+    /// (a [`RealtimePluginRunner`]) instead of the mutex-based [`Self::play`].
+    ///
+    /// The audio callback takes no lock; queue MIDI and parameter changes through the
+    /// returned handle's [`RtControl`](crate::RtControl):
+    ///
+    /// ```no_run
+    /// # use vst3_host::{Vst3Host, midi::MidiEvent, midi::MidiChannel};
+    /// # fn main() -> vst3_host::Result<()> {
+    /// let mut host = Vst3Host::new()?;
+    /// let plugin = host.load_plugin("/path/synth.vst3")?;
+    /// let mut audio = host.play_realtime(plugin, 1024)?;
+    /// audio.control().send_midi(MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 60, velocity: 100 });
+    /// std::thread::sleep(std::time::Duration::from_secs(1));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`RealtimePluginRunner`]: crate::RealtimePluginRunner
+    pub fn play_realtime(
+        &self,
+        plugin: Plugin,
+        command_capacity: usize,
+    ) -> Result<crate::playback::RtAudioHandle> {
+        let backend = crate::backends::CpalBackend::new()?;
+        let config = crate::audio::AudioConfig {
+            output_channels: 2,
+            input_channels: 0,
+            ..self.config
+        };
+        crate::playback::play_realtime_with_backend(&backend, plugin, config, command_capacity)
+    }
 }

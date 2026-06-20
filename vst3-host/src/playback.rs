@@ -14,6 +14,7 @@ use crate::{
     audio::{AudioBackend, AudioBuffers, AudioConfig, AudioStream},
     error::{Error, Result},
     plugin::Plugin,
+    realtime::{RealtimePluginRunner, RtControl},
 };
 
 /// A running audio stream driving a [`Plugin`].
@@ -146,6 +147,81 @@ pub fn play_with_backend<B: AudioBackend>(
     Ok(AudioHandle {
         _stream: Box::new(stream),
         plugin,
+    })
+}
+
+/// A running real-time audio stream (the [`RealtimePluginRunner`] variant of
+/// [`AudioHandle`]). Holds the device stream open and exposes the lock-free [`RtControl`];
+/// dropping it stops playback.
+pub struct RtAudioHandle {
+    _stream: Box<dyn AudioStream>,
+    control: RtControl,
+}
+
+impl RtAudioHandle {
+    /// The lock-free control handle — queue MIDI and parameter changes without locking the
+    /// audio thread.
+    pub fn control(&mut self) -> &mut RtControl {
+        &mut self.control
+    }
+
+    /// Stop playback now (equivalent to dropping the handle).
+    pub fn stop(self) {}
+}
+
+/// Like [`play_with_backend`], but drives the plugin through a [`RealtimePluginRunner`] so the
+/// audio callback takes **no lock** — control changes flow over a lock-free queue. Returns an
+/// [`RtAudioHandle`] that keeps the stream alive and exposes the [`RtControl`].
+///
+/// `command_capacity` bounds how many MIDI/parameter commands can queue between callbacks.
+pub fn play_realtime_with_backend<B: AudioBackend>(
+    backend: &B,
+    plugin: Plugin,
+    config: AudioConfig,
+    command_capacity: usize,
+) -> Result<RtAudioHandle> {
+    let device = backend
+        .default_output_device()
+        .ok_or_else(|| Error::AudioBackendError("No default output device available".into()))?;
+
+    let channels = config.output_channels;
+    let sample_rate = config.sample_rate;
+
+    let (mut runner, control) = RealtimePluginRunner::new(plugin, command_capacity);
+    runner.start()?;
+
+    // Reusable scratch buffer so the steady-state callback does not allocate.
+    let mut scratch = AudioBuffers::new(0, channels, config.block_size, sample_rate);
+
+    let data_cb = Box::new(move |data: &mut [f32]| {
+        data.fill(0.0);
+        if channels == 0 {
+            return;
+        }
+        let frames = data.len() / channels;
+        prepare_scratch(&mut scratch, frames);
+
+        // No lock: the runner owns the plugin and drains its command queue here.
+        if runner.process(&mut scratch).is_ok() {
+            interleave_outputs(&scratch.outputs, data, channels);
+        }
+    });
+
+    let err_cb = Box::new(|e: B::Error| {
+        log::error!("audio stream error: {}", e);
+    });
+
+    let stream = backend
+        .create_output_stream(&device, config, data_cb, err_cb)
+        .map_err(|e| Error::AudioBackendError(format!("Failed to create output stream: {}", e)))?;
+
+    stream
+        .play()
+        .map_err(|e| Error::AudioBackendError(format!("Failed to start stream: {}", e)))?;
+
+    Ok(RtAudioHandle {
+        _stream: Box::new(stream),
+        control,
     })
 }
 
