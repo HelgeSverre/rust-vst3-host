@@ -24,7 +24,7 @@ pub fn vst_string_to_string(vst_str: &String128) -> String {
         if ch == 0 {
             break;
         }
-        utf16_vec.push(ch as u16);
+        utf16_vec.push(ch);
     }
 
     String::from_utf16_lossy(&utf16_vec)
