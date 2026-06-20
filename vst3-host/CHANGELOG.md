@@ -46,6 +46,11 @@ First usable release of the safe VST3 hosting library, extracted from the inspec
   `IMessage`/`IAttributeList`) — fixes crashes in plugins that query the host (e.g. u-he).
 - Native plugin editor windows (macOS/Windows; Linux via X11/XCB).
 - Cross-platform: builds and unit-tests pass on macOS and Linux (incl. aarch64).
+- Declared MSRV (`rust-version = "1.81"`, the floor of the optional `egui` dependency).
+
+### API stability
+- `Error` and `MidiEvent` are `#[non_exhaustive]` — match them with a wildcard arm; new
+  variants can be added without a breaking change.
 
 ### Known limitations
 - Building requires the VST3 SDK and the `VST3_SDK_DIR` environment variable (inherited

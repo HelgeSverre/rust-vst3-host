@@ -3,6 +3,7 @@ name = "vst3-host"
 version = "0.1.0"
 authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 edition = "2021"
+rust-version = "1.81"
 description = "Safe, simple VST3 plugin hosting with audio playback, MIDI, and crash protection"
 documentation = "https://docs.rs/vst3-host"
 readme = "README.md"
