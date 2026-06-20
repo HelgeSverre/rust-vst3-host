@@ -132,6 +132,80 @@ fn main() -> vst3_host::Result<()> {
 }
 ```
 
+### Putting it all together
+
+A complete offline workflow: configure an isolated host, discover an instrument, tweak a
+parameter, snapshot its state, render a held note while measuring the peak, recover if the
+plugin's process crashes, capture any emitted MIDI, then restore the original state.
+
+```rust
+use vst3_host::{audio::AudioBuffers, midi::MidiChannel, Error, Vst3Host};
+
+fn main() -> vst3_host::Result<()> {
+    // 1. Configure the host: 48 kHz, 512-sample blocks, and run the plugin in its own
+    //    process so a crash can't take the whole app down.
+    let mut host = Vst3Host::builder()
+        .sample_rate(48_000.0)
+        .block_size(512)
+        .with_process_isolation(true)
+        .build()?;
+
+    // 2. Discover what's installed and pick the first instrument.
+    let info = host
+        .discover_plugins()?
+        .into_iter()
+        .find(|p| p.has_midi_input && p.audio_outputs > 0)
+        .ok_or_else(|| Error::Other("no instrument found".into()))?;
+    println!("Loading {} v{} by {}", info.name, info.version, info.vendor);
+
+    // 3. Load it (in the isolated helper process).
+    let mut plugin = host.load_plugin(&info.path)?;
+
+    // 4. Tweak the first automatable parameter, shown the way the plugin displays it.
+    if let Some(p) = plugin.get_parameters()?.into_iter().find(|p| p.can_automate) {
+        plugin.set_parameter(p.id, 0.6)?;
+        println!("set {} -> {}", p.name, plugin.format_parameter(p.id, 0.6)?);
+    }
+
+    // 5. Snapshot the state so we can restore it later.
+    let preset = plugin.save_state()?;
+
+    // 6. Render one second of a held note offline, measuring the peak. If the plugin
+    //    crashes its process, recover and reload instead of crashing ourselves.
+    plugin.start_processing()?;
+    plugin.send_midi_note(60, 100, MidiChannel::Ch1)?;
+
+    let mut buffer = AudioBuffers::new(0, 2, 512, 48_000.0);
+    let mut peak = 0.0f32;
+    for _ in 0..(48_000 / 512) {
+        match plugin.process_audio(&mut buffer) {
+            Ok(()) => {
+                for ch in &buffer.outputs {
+                    peak = peak.max(ch.iter().fold(0.0, |m, &s| m.max(s.abs())));
+                }
+            }
+            Err(Error::PluginCrashed) => {
+                eprintln!("plugin crashed - recovering");
+                plugin.recover()?;
+                plugin.load_state(&preset)?;
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    plugin.stop_processing()?;
+    println!("rendered peak amplitude: {peak:.3}");
+
+    // 7. Capture any MIDI the plugin emitted (arpeggiators, MPE, ...).
+    let emitted = plugin.take_output_midi();
+    println!("plugin emitted {} MIDI event(s)", emitted.len());
+
+    // 8. Restore the original state.
+    plugin.load_state(&preset)?;
+    Ok(())
+}
+```
+
 ## Feature flags
 
 | Flag | Default | Enables |
