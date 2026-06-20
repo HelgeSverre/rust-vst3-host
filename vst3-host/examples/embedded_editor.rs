@@ -15,6 +15,10 @@ struct App {
     editor_size: (i32, i32),
     editor: Option<EmbeddedEditor>,
     error: Option<String>,
+    // Headless smoke mode (EMBED_SMOKE=1): auto-embed then quit, to verify the embed path
+    // doesn't crash without needing a human to click.
+    smoke: bool,
+    frame: u64,
 }
 
 impl App {
@@ -30,31 +34,53 @@ impl App {
             editor_size,
             editor: None,
             error: None,
+            smoke: std::env::var("EMBED_SMOKE").is_ok(),
+            frame: 0,
         })
+    }
+
+    fn try_embed(&mut self, frame: &mut eframe::Frame) {
+        match frame.window_handle() {
+            Ok(h) => {
+                let rect = EditorRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: self.editor_size.0 as f32,
+                    height: self.editor_size.1 as f32,
+                };
+                match EmbeddedEditor::embed(self.plugin.clone(), h.as_raw(), rect) {
+                    Ok(e) => self.editor = Some(e),
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+            }
+            Err(e) => self.error = Some(format!("no window handle: {e:?}")),
+        }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.frame += 1;
+        if self.smoke {
+            // Auto-embed once the window exists, render a few frames, then quit.
+            if self.frame == 3 {
+                self.try_embed(frame);
+                match (&self.editor, &self.error) {
+                    (Some(_), _) => println!("EMBED_SMOKE_OK: editor embedded without crashing"),
+                    (None, Some(e)) => println!("EMBED_SMOKE_ERR: {e}"),
+                    _ => {}
+                }
+            }
+            if self.frame > 15 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+
         egui::TopBottomPanel::top("bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.editor.is_none() {
                     if ui.button("Show embedded editor").clicked() {
-                        match frame.window_handle() {
-                            Ok(h) => {
-                                let rect = EditorRect {
-                                    x: 0.0,
-                                    y: 0.0,
-                                    width: self.editor_size.0 as f32,
-                                    height: self.editor_size.1 as f32,
-                                };
-                                match EmbeddedEditor::embed(self.plugin.clone(), h.as_raw(), rect) {
-                                    Ok(e) => self.editor = Some(e),
-                                    Err(e) => self.error = Some(e.to_string()),
-                                }
-                            }
-                            Err(e) => self.error = Some(format!("no window handle: {e:?}")),
-                        }
+                        self.try_embed(frame);
                     }
                 } else {
                     if ui.button("Close editor").clicked() {
