@@ -79,6 +79,10 @@ name = "isolated_host"
 required-features = ["process-isolation"]
 
 [[example]]
+name = "compatibility_matrix"
+required-features = ["cpal-backend", "process-isolation"]
+
+[[example]]
 name = "plugin_scanner"
 
 [[example]]
