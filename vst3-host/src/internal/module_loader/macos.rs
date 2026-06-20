@@ -20,6 +20,72 @@ use core_foundation::{
 use std::{ffi::CString, path::Path, ptr};
 use vst3::Steinberg::IPluginFactory;
 
+/// The architecture this host binary was built for (what the plugin must also provide).
+#[cfg(target_arch = "aarch64")]
+const HOST_ARCH: &str = "arm64";
+#[cfg(target_arch = "x86_64")]
+const HOST_ARCH: &str = "x86_64";
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+const HOST_ARCH: &str = "unknown";
+
+/// Best-effort: read the bundle's Mach-O executable and return the CPU architectures it
+/// contains ("arm64"/"x86_64"). Empty if it can't be read/parsed. Used only to produce a
+/// clearer error when `CFBundleLoadExecutable` fails (commonly an arch mismatch).
+fn bundle_executable_archs(bundle_path: &Path) -> Vec<&'static str> {
+    let macos_dir = bundle_path.join("Contents/MacOS");
+    let exe = std::fs::read_dir(&macos_dir)
+        .ok()
+        .and_then(|it| it.flatten().map(|e| e.path()).find(|p| p.is_file()));
+    let Some(exe) = exe else {
+        return Vec::new();
+    };
+    let Ok(data) = std::fs::read(&exe) else {
+        return Vec::new();
+    };
+    parse_macho_archs(&data)
+}
+
+/// Parse Mach-O / fat-binary headers for CPU types we care about. Only x86_64 and arm64 are
+/// mapped (the only relevant macOS targets); other/unknown CPU types are ignored.
+fn parse_macho_archs(data: &[u8]) -> Vec<&'static str> {
+    fn arch_name(cputype: u32) -> Option<&'static str> {
+        match cputype {
+            0x0100_0007 => Some("x86_64"),
+            0x0100_000c => Some("arm64"),
+            _ => None,
+        }
+    }
+    if data.len() < 8 {
+        return Vec::new();
+    }
+    let mut archs = Vec::new();
+    let magic = [data[0], data[1], data[2], data[3]];
+    if magic == [0xca, 0xfe, 0xba, 0xbe] {
+        // Fat binary, big-endian header: nfat_arch then fat_arch[] (cputype is first u32).
+        let nfat = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        for i in 0..nfat {
+            let off = 8 + i * 20;
+            if off + 4 > data.len() {
+                break;
+            }
+            let cputype =
+                u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+            if let Some(a) = arch_name(cputype) {
+                if !archs.contains(&a) {
+                    archs.push(a);
+                }
+            }
+        }
+    } else if magic == [0xcf, 0xfa, 0xed, 0xfe] {
+        // Thin 64-bit Mach-O, little-endian: cputype is the u32 right after the magic.
+        let cputype = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        if let Some(a) = arch_name(cputype) {
+            archs.push(a);
+        }
+    }
+    archs
+}
+
 /// Function signature for bundleEntry
 type BundleEntryFunc = unsafe extern "C" fn(bundle: CFBundleRef) -> Boolean;
 
@@ -115,9 +181,19 @@ impl MacOSModule {
             let load_result = CFBundleLoadExecutable(bundle);
             if load_result == 0 {
                 CFRelease(bundle as CFTypeRef);
-                return Err(Error::PluginLoadFailed(
-                    "Failed to load bundle executable".to_string(),
-                ));
+                // The most common cause on Apple Silicon is an architecture mismatch
+                // (e.g. an x86_64-only plugin in an arm64 host). Diagnose it so the error
+                // is actionable rather than just "failed to load".
+                let detail = match bundle_executable_archs(&bundle_path) {
+                    archs if !archs.is_empty() && !archs.contains(&HOST_ARCH) => format!(
+                        "Failed to load bundle executable: plugin is {}-only but this host \
+                         is {HOST_ARCH}. Run the host under Rosetta or use a universal/{HOST_ARCH} \
+                         build of the plugin.",
+                        archs.join("+")
+                    ),
+                    _ => "Failed to load bundle executable".to_string(),
+                };
+                return Err(Error::PluginLoadFailed(detail));
             }
 
             log::debug!("✅ Bundle executable loaded");
@@ -274,5 +350,34 @@ impl ModuleLoader for MacOSModuleLoader {
     fn load(path: &Path) -> Result<Box<dyn VstModule>> {
         let module = MacOSModule::load_internal(path)?;
         Ok(Box::new(module))
+    }
+}
+
+#[cfg(test)]
+mod arch_tests {
+    use super::*;
+
+    #[test]
+    fn parses_thin_x86_64() {
+        // MH_MAGIC_64 on disk (LE): CF FA ED FE, then cputype x86_64 (0x01000007) LE.
+        let mut data = vec![0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01];
+        data.resize(64, 0);
+        assert_eq!(parse_macho_archs(&data), vec!["x86_64"]);
+    }
+
+    #[test]
+    fn parses_fat_universal() {
+        // FAT_MAGIC (BE): CA FE BA BE, nfat=2, two fat_arch entries (cputype is first u32 BE).
+        let mut data = vec![0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2];
+        data.extend_from_slice(&0x0100_0007u32.to_be_bytes()); // x86_64
+        data.extend_from_slice(&[0u8; 16]);
+        data.extend_from_slice(&0x0100_000cu32.to_be_bytes()); // arm64
+        data.extend_from_slice(&[0u8; 16]);
+        assert_eq!(parse_macho_archs(&data), vec!["x86_64", "arm64"]);
+    }
+
+    #[test]
+    fn ignores_garbage() {
+        assert!(parse_macho_archs(&[0, 1, 2]).is_empty());
     }
 }
