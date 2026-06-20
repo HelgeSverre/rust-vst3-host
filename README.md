@@ -7,16 +7,16 @@ through them, control parameters, send MIDI, and isolate crashes — without wri
 ```rust
 use vst3_host::{simple, midi::MidiChannel};
 
-# fn main() -> vst3_host::Result<()> {
-// Load a synth and start it playing through the default audio device.
-let plugin = simple::load_plugin("/Library/Audio/Plug-Ins/VST3/Dexed.vst3")?;
-let audio = simple::play(plugin)?;
+fn main() -> vst3_host::Result<()> {
+    // Load a synth and start it playing through the default audio device.
+    let plugin = simple::load_plugin("/Library/Audio/Plug-Ins/VST3/Dexed.vst3")?;
+    let audio = simple::play(plugin)?;
 
-// Play middle C for one second.
-audio.lock().send_midi_note(60, 100, MidiChannel::Ch1)?;
-std::thread::sleep(std::time::Duration::from_secs(1));
-# Ok(())
-# }
+    // Play middle C (MIDI note 60) for one second.
+    audio.lock().send_midi_note(60, 100, MidiChannel::Ch1)?;
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    Ok(())
+}
 ```
 
 ## What it does
@@ -25,17 +25,22 @@ std::thread::sleep(std::time::Duration::from_secs(1));
 - **Audio** — a bundled CPAL backend drives a plugin to your speakers; or plug in your own backend.
 - **Parameters** — list, read, set, and format parameters as the plugin itself displays them.
 - **MIDI** — notes, control changes, pitch bend, and aftertouch.
-- **Crash isolation** — run a plugin in a separate process so a crash can't take down your app.
-- **Native plugin editors** — open a plugin's own GUI in a window (macOS/Windows).
+- **State** — save and restore a plugin's own state (`save_state` / `load_state`).
+- **Crash isolation** — run a plugin in a separate process so a crash can't take down your
+  app; crashes surface as `Error::PluginCrashed` and `Plugin::recover()` reloads it.
+- **Native plugin editors** — open a plugin's own GUI in a standalone window, or embed it in
+  your egui app (`EmbeddedEditor`, macOS).
 
 All VST3 COM interaction is contained behind a safe API. The public surface has no `unsafe`.
 
 ## Status
 
-The core is working and exercised against real plugins on macOS. Some things are still in
-progress — see [Platform support](docs/reference/platform-support.md) and the honest caveats
-in each guide. Notably: the audio path is correctness-first (not yet tuned for the lowest
-latency), process isolation is opt-in, and plugin-editor embedding into egui is planned.
+The core is working and exercised against real plugins on macOS. Known limitations — see
+[Platform support](docs/reference/platform-support.md) and each guide: the default audio path
+is correctness-first (a lock-free `play_realtime` path also exists, though neither is a fully
+RT-audited engine yet), process isolation is opt-in, and editor embedding into egui
+(`EmbeddedEditor`) works on macOS — the Windows/Linux window code compiles but isn't yet
+runtime-verified.
 
 ## Install
 
