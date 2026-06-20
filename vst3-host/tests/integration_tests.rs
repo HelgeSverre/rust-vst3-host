@@ -801,3 +801,37 @@ fn test_realtime_runner_applies_commands_and_renders() {
     );
     println!("Realtime runner OK: peak {peak:.3}, cutoff {v}");
 }
+
+/// M3: the lock-free cpal play_realtime path runs end-to-end (needs an output device).
+#[test]
+#[ignore = "Requires audio hardware and the bundled test plugin"]
+fn test_play_realtime_smoke() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(path).exists() {
+        println!("Test plugin not found, skipping");
+        return;
+    }
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .build()
+        .unwrap();
+    let plugin = host.load_plugin(path).unwrap();
+    let mut audio = host.play_realtime(plugin, 1024).expect("play_realtime");
+
+    // Drive control changes over the lock-free queue; the audio callback never locks.
+    assert!(audio.control().send_midi(MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 110
+    }));
+    std::thread::sleep(Duration::from_millis(300));
+    audio.control().send_midi(MidiEvent::NoteOff {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 0,
+    });
+    audio.stop();
+    // Reaching here means the realtime callback ran without crashing.
+    println!("play_realtime smoke OK");
+}
