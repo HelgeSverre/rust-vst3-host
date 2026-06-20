@@ -12,7 +12,7 @@ fn main() -> vst3_host::Result<()> {
     let plugin = simple::load_plugin("/Library/Audio/Plug-Ins/VST3/Dexed.vst3")?;
     let audio = simple::play(plugin)?;
 
-    // Play middle C for one second.
+    // Play middle C (MIDI note 60) for one second.
     audio.lock().send_midi_note(60, 100, MidiChannel::Ch1)?;
     std::thread::sleep(std::time::Duration::from_secs(1));
     Ok(())
@@ -37,6 +37,101 @@ fn main() -> vst3_host::Result<()> {
   egui app (`EmbeddedEditor`, macOS). Windows/Linux window code compiles but isn't yet
   runtime-verified.
 
+## Examples
+
+**Discover and inspect installed plugins.** `discover_plugins` scans the standard VST3
+locations and returns metadata without loading any DSP:
+
+```rust
+use vst3_host::simple;
+
+fn main() -> vst3_host::Result<()> {
+    for info in simple::discover_plugins()? {
+        println!(
+            "{} v{} — {} | {} audio out | MIDI in: {} | GUI: {}",
+            info.name, info.version, info.category,
+            info.audio_outputs, info.has_midi_input, info.has_gui,
+        );
+    }
+    Ok(())
+}
+```
+
+**Read, format, and set parameters.** Parameters are normalized to `0.0..=1.0`;
+`format_parameter` renders the plugin's own display string (e.g. `"8.2 kHz"`):
+
+```rust
+use vst3_host::simple;
+
+fn main() -> vst3_host::Result<()> {
+    let mut plugin = simple::load_plugin("/Library/Audio/Plug-Ins/VST3/Dexed.vst3")?;
+
+    for p in plugin.get_parameters()?.iter().take(5) {
+        println!("{:>4}  {:<24} {}", p.id, p.name, plugin.format_parameter(p.id, p.value)?);
+    }
+
+    // Set the first parameter to 75% and read it back.
+    let id = plugin.get_parameters()?[0].id;
+    plugin.set_parameter(id, 0.75)?;
+    assert_eq!(plugin.get_parameter(id)?, 0.75);
+    Ok(())
+}
+```
+
+**Save and restore a plugin's state** (its own serialized preset/patch blob):
+
+```rust
+use vst3_host::simple;
+
+fn main() -> vst3_host::Result<()> {
+    let mut plugin = simple::load_plugin("/path/synth.vst3")?;
+
+    let snapshot: Vec<u8> = plugin.save_state()?;   // serialize current state
+    plugin.set_parameter(0, 0.1)?;                  // change something...
+    plugin.load_state(&snapshot)?;                  // ...and restore it exactly
+    Ok(())
+}
+```
+
+**Contain crashes with process isolation.** Run the plugin in a child process; a crash
+surfaces as `Error::PluginCrashed` instead of killing your app, and `recover()` respawns
+and reloads it:
+
+```rust
+use vst3_host::{Vst3Host, Error, midi::MidiChannel};
+
+fn main() -> vst3_host::Result<()> {
+    let mut host = Vst3Host::builder().with_process_isolation(true).build()?;
+    let mut plugin = host.load_plugin("/path/sketchy.vst3")?;
+
+    if let Err(Error::PluginCrashed) = plugin.send_midi_note(60, 100, MidiChannel::Ch1) {
+        plugin.recover()?; // respawn helper + reload + restart processing
+    }
+    Ok(())
+}
+```
+
+**Real-time, lock-free playback.** `play_realtime` hands the plugin to the audio thread and
+sends control over a lock-free SPSC ring, so the callback never blocks on your thread:
+
+```rust
+use vst3_host::{Vst3Host, midi::{MidiEvent, MidiChannel}};
+
+fn main() -> vst3_host::Result<()> {
+    let mut host = Vst3Host::new()?;
+    let plugin = host.load_plugin("/path/synth.vst3")?;
+
+    let mut audio = host.play_realtime(plugin, 1024)?; // 1024 = command-queue capacity
+    audio.control().send_midi(MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 100,
+    });
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    Ok(())
+}
+```
+
 ## Feature flags
 
 | Flag | Default | Enables |
@@ -50,9 +145,9 @@ fn main() -> vst3_host::Result<()> {
 vst3-host = "0.1"
 ```
 
-## Status & caveats
+## Status & known limitations
 
-The core is working and exercised against real plugins on macOS. Honest limits:
+The core is working and exercised against real plugins on macOS. What to be aware of:
 
 - The default `play` audio path is correctness-first (it locks on the audio callback). For a
   lock-free path use `play_realtime` / `RealtimePluginRunner`; even that isn't a fully
