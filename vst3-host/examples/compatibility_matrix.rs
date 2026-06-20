@@ -26,9 +26,9 @@ enum Cell {
 impl Cell {
     fn md(&self) -> String {
         match self {
-            Cell::Yes(s) if s.is_empty() => "✅".to_string(),
-            Cell::Yes(s) => format!("✅ {s}"),
-            Cell::No => "❌".to_string(),
+            Cell::Yes(s) if s.is_empty() => "yes".to_string(),
+            Cell::Yes(s) => format!("yes ({s})"),
+            Cell::No => "no".to_string(),
             Cell::Na => "—".to_string(),
         }
     }
@@ -75,17 +75,17 @@ fn test_plugin(path: &Path) -> Row {
         }
     };
     match host.probe_plugin(path) {
-        ProbeResult::Ok => row.load = "✅ loads".into(),
+        ProbeResult::Ok => row.load = "loads".into(),
         ProbeResult::Crashed => {
-            row.load = "💥 crashes (contained by isolation)".into();
+            row.load = "crashes (contained by isolation)".into();
             return row;
         }
         ProbeResult::TimedOut => {
-            row.load = "⏱ timed out".into();
+            row.load = "timed out".into();
             return row;
         }
         ProbeResult::Failed(e) => {
-            row.load = format!("❌ failed: {}", e.lines().next().unwrap_or(""));
+            row.load = format!("failed: {}", e.lines().next().unwrap_or(""));
             return row;
         }
     }
@@ -105,7 +105,7 @@ fn test_plugin(path: &Path) -> Row {
     let mut plugin = match host.load_plugin(path) {
         Ok(p) => p,
         Err(e) => {
-            row.load = format!("❌ in-process load failed: {e}");
+            row.load = format!("in-process load failed: {e}");
             return row;
         }
     };

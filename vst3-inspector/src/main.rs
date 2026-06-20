@@ -288,7 +288,7 @@ fn main() {
         std::process::exit(run_selftest(&path));
     }
 
-    println!("🚀 Starting VST3 Host...");
+    println!("Starting VST3 Host...");
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -314,7 +314,7 @@ fn main() {
             if std::path::Path::new(&default_path).exists() {
                 inspector.load_plugin(default_path);
             } else {
-                println!("ℹ️ Default plugin not found, none loaded at startup");
+                println!("ℹDefault plugin not found, none loaded at startup");
             }
 
             Ok(Box::new(inspector))
@@ -540,7 +540,7 @@ impl eframe::App for VST3Inspector {
 
                     // Show last error, if any.
                     if let Some(err) = &self.last_error {
-                        ui.colored_label(egui::Color32::ORANGE, format!("⚠️ {}", err));
+                        ui.colored_label(egui::Color32::ORANGE, err.clone());
                     }
                 });
 
@@ -561,7 +561,7 @@ impl eframe::App for VST3Inspector {
                                 .clicked()
                             {
                                 if let Err(e) = self.create_plugin_gui() {
-                                    println!("❌ Failed to create plugin GUI: {}", e);
+                                    println!("Failed to create plugin GUI: {}", e);
                                 }
                             }
                         } else {
@@ -799,7 +799,7 @@ impl VST3Inspector {
                 // Export the full plugin report (metadata + bus layout + parameters) as JSON.
                 ui.add_enabled_ui(self.report_json.is_some(), |ui| {
                     if ui
-                        .button("📋 Copy JSON")
+                        .button("Copy JSON")
                         .on_hover_text(
                             "Copy this plugin's full report (metadata, buses, parameters) as JSON",
                         )
@@ -820,7 +820,7 @@ impl VST3Inspector {
                         if let Some(plugin_info) = &self.plugin_info {
                             // Plugin identity summary — accurate library metadata.
                             let s = &plugin_info.summary;
-                            ui.label(egui::RichText::new("🎛 Plugin").strong());
+                            ui.label(egui::RichText::new("Plugin").strong());
                             ui.add_space(2.0);
                             egui::Grid::new("plugin_summary_grid")
                                 .num_columns(2)
@@ -851,19 +851,16 @@ impl VST3Inspector {
                                         s.audio_inputs, s.audio_outputs
                                     ));
                                     ui.end_row();
+                                    let yn = |b: bool| if b { "yes" } else { "no" };
                                     ui.label("MIDI:");
                                     ui.label(format!(
-                                        "{}  ·  {}",
-                                        if s.has_midi_input { "✅ in" } else { "— in" },
-                                        if s.has_midi_output {
-                                            "✅ out"
-                                        } else {
-                                            "— out"
-                                        },
+                                        "in: {}   out: {}",
+                                        yn(s.has_midi_input),
+                                        yn(s.has_midi_output),
                                     ));
                                     ui.end_row();
                                     ui.label("Editor:");
-                                    ui.label(if s.has_gui { "✅" } else { "—" });
+                                    ui.label(yn(s.has_gui));
                                     ui.end_row();
                                     ui.label("UID:");
                                     ui.label(egui::RichText::new(&s.uid).monospace().small());
@@ -872,7 +869,7 @@ impl VST3Inspector {
                             ui.add_space(8.0);
 
                             // Factory Information - collapsible
-                            egui::CollapsingHeader::new("🏭 Factory Information")
+                            egui::CollapsingHeader::new("Factory Information")
                                 .id_source("factory_info_header")
                                 .show(ui, |ui| {
                                     ui.add_space(4.0);
@@ -905,7 +902,7 @@ impl VST3Inspector {
                             ui.add_space(8.0);
 
                             // Plugin Classes - collapsible
-                            ui.collapsing("📋 Plugin Classes", |ui| {
+                            ui.collapsing("Plugin Classes", |ui| {
                                 if plugin_info.classes.is_empty() {
                                     ui.label("No classes found.");
                                 } else {
@@ -936,7 +933,7 @@ impl VST3Inspector {
 
                             // Component Information - collapsible
                             if let Some(ref info) = plugin_info.component_info {
-                                egui::CollapsingHeader::new("🔧 Component Information")
+                                egui::CollapsingHeader::new("Component Information")
                                     .id_source("component_info_header")
                                     .show(ui, |ui| {
                                         ui.strong("Bus Counts");
@@ -964,7 +961,7 @@ impl VST3Inspector {
                                         ui.add_space(8.0);
 
                                         if !info.audio_inputs.is_empty() {
-                                            ui.strong("🎤 Audio Inputs");
+                                            ui.strong("Audio Inputs");
                                             for bus in info.audio_inputs.iter() {
                                                 ui.label(format!(
                                                     "  {} - {} channels",
@@ -975,7 +972,7 @@ impl VST3Inspector {
                                         }
 
                                         if !info.audio_outputs.is_empty() {
-                                            ui.strong("🔊 Audio Outputs");
+                                            ui.strong("Audio Outputs");
                                             for bus in info.audio_outputs.iter() {
                                                 ui.label(format!(
                                                     "  {} - {} channels",
@@ -990,7 +987,7 @@ impl VST3Inspector {
                             }
 
                             // GUI Information - collapsible
-                            egui::CollapsingHeader::new("🎨 GUI Information")
+                            egui::CollapsingHeader::new("GUI Information")
                                 .id_source("gui_info_header")
                                 .show(ui, |ui| {
                                     ui.add_space(4.0);
@@ -1017,7 +1014,7 @@ impl VST3Inspector {
                         } else {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(50.0);
-                                ui.label("❌ No plugin loaded");
+                                ui.label("No plugin loaded");
                                 ui.add_space(10.0);
                                 ui.label("Load a VST3 plugin to view its information");
                             });
@@ -1086,7 +1083,7 @@ impl VST3Inspector {
                                 ui.horizontal(|ui| {
                                     if ui.button("Refresh Values").clicked() {
                                         if let Err(e) = self.refresh_parameter_values() {
-                                            println!("❌ Failed to refresh parameters: {}", e);
+                                            println!("Failed to refresh parameters: {}", e);
                                         }
                                     }
                                 });
@@ -1223,7 +1220,7 @@ impl VST3Inspector {
                                         );
 
                                         ui.add_enabled_ui(self.current_page > 0, |ui| {
-                                            if ui.button("◀ Previous").clicked() {
+                                            if ui.button("<< Previous").clicked() {
                                                 self.current_page -= 1;
                                             }
                                         });
@@ -1265,7 +1262,7 @@ impl VST3Inspector {
             } else {
                 ui.vertical_centered(|ui| {
                     ui.add_space(100.0);
-                    ui.heading("🎵 VST3 Plugin Inspector");
+                    ui.heading("VST3 Plugin Inspector");
                     ui.add_space(20.0);
                     ui.label("Load a VST3 plugin to begin inspection");
                 });
@@ -1410,7 +1407,7 @@ impl VST3Inspector {
                                             if let Err(e) =
                                                 self.set_parameter_value(param.id, new_value as f64)
                                             {
-                                                println!("❌ Failed to set parameter: {}", e);
+                                                println!("Failed to set parameter: {}", e);
                                             }
                                         }
                                         combo_response.response
@@ -1428,7 +1425,7 @@ impl VST3Inspector {
                                             if let Err(e) =
                                                 self.set_parameter_value(param.id, new_value as f64)
                                             {
-                                                println!("❌ Failed to set parameter: {}", e);
+                                                println!("Failed to set parameter: {}", e);
                                             }
                                         }
 
@@ -1484,7 +1481,7 @@ impl VST3Inspector {
                                         param.id,
                                         param.default_normalized_value,
                                     ) {
-                                        println!("❌ Failed to reset parameter: {}", e);
+                                        println!("Failed to reset parameter: {}", e);
                                     }
                                 }
 
@@ -1535,7 +1532,7 @@ impl VST3Inspector {
 
                         if slider_response.changed() {
                             if let Err(e) = self.set_parameter_value(param.id, new_value as f64) {
-                                println!("❌ Failed to set parameter: {}", e);
+                                println!("Failed to set parameter: {}", e);
                             }
                         }
                     });
@@ -1545,19 +1542,19 @@ impl VST3Inspector {
                             if let Err(e) =
                                 self.set_parameter_value(param.id, param.default_normalized_value)
                             {
-                                println!("❌ Failed to reset parameter: {}", e);
+                                println!("Failed to reset parameter: {}", e);
                             }
                         }
 
                         if ui.button("Set to 0.0").clicked() {
                             if let Err(e) = self.set_parameter_value(param.id, 0.0) {
-                                println!("❌ Failed to set parameter: {}", e);
+                                println!("Failed to set parameter: {}", e);
                             }
                         }
 
                         if ui.button("Set to 1.0").clicked() {
                             if let Err(e) = self.set_parameter_value(param.id, 1.0) {
-                                println!("❌ Failed to set parameter: {}", e);
+                                println!("Failed to set parameter: {}", e);
                             }
                         }
 
@@ -1800,11 +1797,11 @@ impl VST3Inspector {
                 ui.vertical(|ui| {
                     ui.label("Emergency Controls:");
 
-                    if ui.button("🚨 MIDI Panic").clicked() {
+                    if ui.button("MIDI Panic").clicked() {
                         self.send_midi_panic();
                     }
 
-                    if ui.button("🔇 Audio Panic").clicked() {
+                    if ui.button("Audio Panic").clicked() {
                         self.audio_panic();
                     }
                 });
@@ -1939,7 +1936,7 @@ impl VST3Inspector {
                     *self.midi_monitor_paused.lock().unwrap() = true;
                 }
 
-                if ui.button("🗑 Clear").clicked() {
+                if ui.button("Clear").clicked() {
                     self.midi_events.lock().unwrap().clear();
                 }
 
@@ -2239,7 +2236,7 @@ impl VST3Inspector {
             Ok(d) => d,
             Err(e) => {
                 let msg = format!("Failed to introspect plugin: {e}");
-                println!("❌ {msg}");
+                println!("{msg}");
                 self.last_error = Some(msg);
                 return;
             }
@@ -2250,7 +2247,7 @@ impl VST3Inspector {
             Ok(p) => p,
             Err(e) => {
                 let msg = format!("Failed to load plugin: {e}");
-                println!("❌ {msg}");
+                println!("{msg}");
                 self.last_error = Some(msg);
                 return;
             }
@@ -2263,7 +2260,7 @@ impl VST3Inspector {
             Ok(a) => a,
             Err(e) => {
                 let msg = format!("Failed to start audio playback: {e}");
-                println!("❌ {msg}");
+                println!("{msg}");
                 self.last_error = Some(msg);
                 return;
             }
@@ -2283,11 +2280,11 @@ impl VST3Inspector {
         // Auto-start processing if enabled in preferences.
         if self.preferences.auto_start_processing {
             if let Err(e) = self.start_processing() {
-                println!("⚠️ Failed to auto-start processing: {}", e);
+                println!("Failed to auto-start processing: {}", e);
             }
         }
 
-        println!("✅ Plugin loaded successfully!");
+        println!("Plugin loaded successfully!");
     }
 
     /// Map the library's `DetailedPluginInfo` + parameter list into the inspector's own
@@ -2365,7 +2362,7 @@ impl VST3Inspector {
     fn stop_processing(&mut self) {
         if let Some(audio) = &self.audio {
             if let Err(e) = audio.lock().stop_processing() {
-                println!("⚠️ stop_processing failed: {e}");
+                println!("stop_processing failed: {e}");
             }
         }
         self.is_processing = false;
@@ -2460,21 +2457,21 @@ impl VST3Inspector {
 
     // MIDI Panic — uses the library's dedicated all-notes-off / all-sounds-off.
     fn send_midi_panic(&mut self) {
-        println!("🚨 Sending MIDI Panic...");
+        println!("Sending MIDI Panic...");
         if let Some(audio) = &self.audio {
             if let Err(e) = audio.lock().midi_panic() {
-                println!("⚠️ MIDI panic failed: {e}");
+                println!("MIDI panic failed: {e}");
             } else {
-                println!("✅ MIDI Panic sent");
+                println!("MIDI Panic sent");
             }
         } else {
-            println!("⚠️ Cannot send MIDI Panic: no plugin loaded");
+            println!("Cannot send MIDI Panic: no plugin loaded");
         }
     }
 
     // Audio Panic — stop processing and clear the VU meters.
     fn audio_panic(&mut self) {
-        println!("🔇 Audio Panic - stopping processing");
+        println!("Audio Panic - stopping processing");
         if let Some(audio) = &self.audio {
             let mut p = audio.lock();
             let _ = p.midi_panic();
@@ -2495,7 +2492,7 @@ impl VST3Inspector {
         if let Ok(mut hold) = self.peak_hold_right.lock() {
             *hold = (0.0, now);
         }
-        println!("✅ Audio panic complete");
+        println!("Audio panic complete");
     }
 
     fn should_show_event(&self, event: &MidiEvent) -> bool {
@@ -2866,7 +2863,7 @@ impl VST3Inspector {
             .auto_isolate_problematic(true)
             .build()
             .unwrap_or_else(|e| {
-                eprintln!("❌ Failed to build Vst3Host: {e}");
+                eprintln!("Failed to build Vst3Host: {e}");
                 // Fall back to a default host; if that also fails, panic is acceptable
                 // since the app cannot function without it.
                 Vst3Host::new().expect("failed to build a default Vst3Host")

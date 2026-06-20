@@ -20,19 +20,19 @@ plugin that crashes can't take down the run.
 
 | Plugin | Vendor | Version | Category | Load | Params | Audio | State | MIDI-out | GUI |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Dexed | Digital Suburban | 1.0.0 | Instrument\|Synth | ✅ | ✅ 2238 | ✅ peak 0.13 | ✅ | ✅ | ✅ |
-| OB-Xd 3 | discoDSP | 3.8.0 | Instrument\|Synth | ✅ | ✅ 2167 | ✅ peak 0.12 | ✅ | ✅ | ✅ |
-| Surge XT | Surge Synth Team | 1.3.4 | Instrument\|Synth | ✅ | ✅ 2855 | ✅ peak 0.21 | ❌ | ❌ | ✅ |
-| Surge XT Effects | Surge Synth Team | 1.3.4 | Fx | ✅ | ✅ 14 | ✅ processes | ✅ | ❌ | ✅ |
-| TyrellN6 | u-he | 3.0.0 | Instrument\|u-he | ✅ | ✅ 2175 | ✅ peak 0.10 | ✅ | ❌ | ✅ |
-| ValhallaSupermassive | Valhalla DSP | 5.0.0 | Fx | ✅ | ✅ 19 | ✅ processes | ✅ | ❌ | ✅ |
-| Vital | — | — | — | ❌ x86_64-only (host is arm64) | — | — | — | — | — |
-| WaveShell1-VST3 14.12 | — | — | — | 💥 crashes — contained by isolation | — | — | — | — | — |
+| Dexed | Digital Suburban | 1.0.0 | Instrument\|Synth | loads | yes (2238) | yes (peak 0.127) | yes | yes | yes |
+| OB-Xd 3 | discoDSP | 3.8.0 | Instrument\|Synth | loads | yes (2167) | yes (peak 0.124) | yes | yes | yes |
+| Surge XT | Surge Synth Team | 1.3.4 | Instrument\|Synth | loads | yes (2855) | yes (peak 0.207) | no | no | yes |
+| Surge XT Effects | Surge Synth Team | 1.3.4 | Fx | loads | yes (14) | yes (processes) | yes | no | yes |
+| TyrellN6 | u-he | 3.0.0 | Instrument\|u-he | loads | yes (2175) | yes (peak 0.103) | yes | no | yes |
+| ValhallaSupermassive | Valhalla DSP | 5.0.0 | Fx | loads | yes (19) | yes (processes) | yes | no | yes |
+| Vital | — | — | — | failed: x86_64-only (host is arm64) | — | — | — | — | — |
+| WaveShell1-VST3 14.12 | — | — | — | crashes (contained by isolation) | — | — | — | — | — |
 
 ## What the columns mean
 
-- **Load** — loads cleanly (`✅`), crashes the probe (`💥`, then handled only via isolation),
-  times out (`⏱`), or fails to load (`❌`).
+- **Load** — `loads` (clean), `crashes (contained by isolation)` (crashes the probe, handled
+  only via isolation), `timed out`, or `failed: …` (fails to load).
 - **Params** — parameter count reported by the controller.
 - **Audio** — for instruments, output peak from a held note; for effects, that it processes a
   block without error (effects fed silence stay silent).
@@ -49,10 +49,10 @@ plugin that crashes can't take down the run.
 - **Vital is x86_64-only**, but this host is arm64, so CFBundle can't load it. The loader now
   reports the architecture mismatch explicitly. Run the host under Rosetta, or use a
   universal/arm64 build of the plugin. (Not a library limitation.)
-- **Surge XT (the synth)** state round-trip shows ❌: its state is a full patch snapshot that
+- **Surge XT (the synth)** state round-trip shows `no`: its state is a full patch snapshot that
   doesn't reflect an isolated normalized-parameter change the way the test expects. State
   *save/restore itself works* (Dexed, OB-Xd, TyrellN6, Valhalla all round-trip).
-- **MIDI-out** is ✅ only when a plugin exposes an event-output bus (Dexed, OB-Xd). Surge XT,
+- **MIDI-out** is `yes` only when a plugin exposes an event-output bus (Dexed, OB-Xd). Surge XT,
   TyrellN6, and Valhalla don't emit MIDI, which is expected.
 - The **State** check skips meta parameters (version/compatibility flags) and processes a
   block between set and save, so it's fair to separate-component plugins.

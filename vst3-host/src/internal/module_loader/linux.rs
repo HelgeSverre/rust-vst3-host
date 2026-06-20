@@ -50,7 +50,7 @@ impl LinuxModule {
             let library = Library::new(path).map_err(|e| {
                 Error::PluginLoadFailed(format!("Failed to load shared object: {}", e))
             })?;
-            log::debug!("✅ Shared object loaded successfully");
+            log::debug!("Shared object loaded successfully");
 
             // Step 2: Get ModuleEntry function (REQUIRED)
             log::debug!("Step 2: Getting ModuleEntry function...");
@@ -62,7 +62,7 @@ impl LinuxModule {
                             .to_string(),
                     )
                 })?;
-            log::debug!("✅ ModuleEntry function found");
+            log::debug!("ModuleEntry function found");
 
             // Step 3: Get ModuleExit function (REQUIRED)
             log::debug!("Step 3: Getting ModuleExit function...");
@@ -71,7 +71,7 @@ impl LinuxModule {
                     "Shared object does not export the required 'ModuleExit' function".to_string(),
                 )
             })?;
-            log::debug!("✅ ModuleExit function found");
+            log::debug!("ModuleExit function found");
 
             // Step 4: Call ModuleEntry (MUST be called before GetPluginFactory)
             log::debug!("Step 4: Calling ModuleEntry...");
@@ -81,7 +81,7 @@ impl LinuxModule {
                     "ModuleEntry function returned false".to_string(),
                 ));
             }
-            log::debug!("✅ ModuleEntry called successfully");
+            log::debug!("ModuleEntry called successfully");
 
             // Step 5: Get GetPluginFactory function (REQUIRED)
             log::debug!("Step 5: Getting GetPluginFactory function...");
@@ -93,7 +93,7 @@ impl LinuxModule {
                     Error::PluginLoadFailed(format!("Failed to find GetPluginFactory: {}", e))
                 })?;
 
-            log::debug!("✅ GetPluginFactory function found");
+            log::debug!("GetPluginFactory function found");
 
             // SAFETY: We extend the lifetime to 'static because we're storing these in the struct
             // and will ensure they're dropped before the library is unloaded
@@ -140,15 +140,15 @@ impl Drop for LinuxModule {
             log::debug!("Calling ModuleExit...");
             let exit_result = (self.module_exit)();
             if exit_result {
-                log::debug!("✅ ModuleExit called successfully");
+                log::debug!("ModuleExit called successfully");
             } else {
-                log::warn!("⚠️ ModuleExit returned false");
+                log::warn!("ModuleExit returned false");
             }
 
             // Step 2: Library will be automatically unloaded when dropped
             log::debug!("Unloading shared object...");
             // The Drop implementation of Library handles dlclose
-            log::debug!("✅ Shared object unloaded");
+            log::debug!("Shared object unloaded");
 
             log::debug!("=== Linux VST3 MODULE CLEANUP COMPLETE ===");
         }

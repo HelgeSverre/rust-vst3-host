@@ -127,12 +127,12 @@ impl PluginImpl {
             // Load the VST3 module using platform-specific loader
             log::debug!("Step 1: Loading VST3 module...");
             let module = load_module(path)?;
-            log::debug!("✅ VST3 module loaded successfully");
+            log::debug!("VST3 module loaded successfully");
 
             // Get factory from module
             log::debug!("Step 2: Getting factory from module...");
             let factory_ptr = module.get_factory()?;
-            log::debug!("✅ Factory obtained, ptr: {:?}", factory_ptr);
+            log::debug!("Factory obtained, ptr: {:?}", factory_ptr);
             if factory_ptr.is_null() {
                 return Err(Error::PluginLoadFailed(
                     "GetPluginFactory returned null".to_string(),
@@ -143,12 +143,12 @@ impl PluginImpl {
             let factory = ComPtr::<IPluginFactory>::from_raw(factory_ptr).ok_or_else(|| {
                 Error::PluginLoadFailed("Failed to create factory ComPtr".to_string())
             })?;
-            log::debug!("✅ Factory wrapped successfully");
+            log::debug!("Factory wrapped successfully");
 
             // Find and create the audio component
             log::debug!("Step 4: Creating audio component...");
             let component = Self::create_component(&factory)?;
-            log::debug!("✅ Component created successfully");
+            log::debug!("Component created successfully");
 
             // Initialize component with a host-application context. Passing null here
             // crashes plugins that query the host (u-he, Waves, ...); see HostApplication.
@@ -160,26 +160,26 @@ impl PluginImpl {
                 .map(|p| p.as_ptr() as *mut FUnknown)
                 .unwrap_or(ptr::null_mut());
             let init_result = component.initialize(context);
-            log::debug!("✅ Component initialized with result: {:#x}", init_result);
+            log::debug!("Component initialized with result: {:#x}", init_result);
 
             // CRITICAL: Activate event buses for MIDI processing
             log::debug!("Step 6: Activating event buses...");
             Self::activate_event_buses(&component)?;
-            log::debug!("✅ Event buses activated");
+            log::debug!("Event buses activated");
 
             // Get processor interface
             log::debug!("Step 7: Getting IAudioProcessor interface...");
             let processor = component.cast::<IAudioProcessor>().ok_or_else(|| {
                 Error::InterfaceError("Component does not implement IAudioProcessor".to_string())
             })?;
-            log::debug!("✅ IAudioProcessor interface obtained");
+            log::debug!("IAudioProcessor interface obtained");
 
             // Create component handler for parameter change notifications
             log::debug!("Step 8: Creating component handler...");
             let parameter_changes = Arc::new(Mutex::new(Vec::new()));
             let component_handler =
                 ComWrapper::new(ComponentHandler::new(parameter_changes.clone()));
-            log::debug!("✅ Component handler created");
+            log::debug!("Component handler created");
 
             // Get or create controller (handles both single-component and separate controller)
             log::debug!("Step 9: Getting or creating controller...");
@@ -188,7 +188,7 @@ impl PluginImpl {
             let single_component = component.cast::<IEditController>().is_some();
             let controller = Self::get_or_create_controller(&component, &factory, context)?;
             log::debug!(
-                "✅ Controller obtained: {} (single_component: {single_component})",
+                "Controller obtained: {} (single_component: {single_component})",
                 controller.is_some()
             );
 
@@ -196,14 +196,14 @@ impl PluginImpl {
             if let Some(ref ctrl) = controller {
                 log::debug!("Step 10: Connecting component and controller...");
                 Self::connect_component_and_controller(&component, ctrl)?;
-                log::debug!("✅ Component and controller connected");
+                log::debug!("Component and controller connected");
 
                 // Set component handler on controller for parameter change notifications
                 log::debug!("Step 11: Setting component handler on controller...");
                 if let Some(handler_ptr) = component_handler.to_com_ptr::<IComponentHandler>() {
                     let result = ctrl.setComponentHandler(handler_ptr.into_raw());
                     if result == kResultOk {
-                        log::debug!("✅ Component handler set on controller successfully");
+                        log::debug!("Component handler set on controller successfully");
                     } else {
                         log::warn!(
                             "Failed to set component handler on controller: {:#x}",
@@ -243,7 +243,7 @@ impl PluginImpl {
             log::debug!("Step 13: Creating event lists...");
             let input_events = create_event_list();
             let output_events = create_event_list();
-            log::debug!("✅ Event lists created");
+            log::debug!("Event lists created");
 
             // Extract plugin info from the factory and component
             let info = Self::extract_plugin_info(path, &factory, &component, &controller)?;

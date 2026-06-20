@@ -48,7 +48,7 @@ impl WindowsModule {
             log::debug!("Step 1: Loading DLL...");
             let library = Library::new(path)
                 .map_err(|e| Error::PluginLoadFailed(format!("Failed to load DLL: {}", e)))?;
-            log::debug!("✅ DLL loaded successfully");
+            log::debug!("DLL loaded successfully");
 
             // Step 2: Try to get InitDll function (OPTIONAL).
             // Note: `library.get` returns `libloading::Result`, not the crate's `Result`
@@ -57,12 +57,12 @@ impl WindowsModule {
             let init_dll_result = library.get::<InitDllFunc>(b"InitDll");
             match init_dll_result {
                 Ok(init_dll) => {
-                    log::debug!("✅ InitDll function found, calling it...");
+                    log::debug!("InitDll function found, calling it...");
                     let init_result = init_dll();
                     if init_result {
-                        log::debug!("✅ InitDll called successfully");
+                        log::debug!("InitDll called successfully");
                     } else {
-                        log::warn!("⚠️ InitDll returned false");
+                        log::warn!("InitDll returned false");
                         return Err(Error::PluginLoadFailed(
                             "InitDll function returned false".to_string(),
                         ));
@@ -79,7 +79,7 @@ impl WindowsModule {
             log::debug!("Step 3: Looking for ExitDll function...");
             let exit_dll = match library.get::<ExitDllFunc>(b"ExitDll") {
                 Ok(func) => {
-                    log::debug!("✅ ExitDll function found (will be called on cleanup)");
+                    log::debug!("ExitDll function found (will be called on cleanup)");
                     // SAFETY: We extend the lifetime to 'static because we're storing this in the struct
                     // and will ensure it's dropped before the library is unloaded
                     Some(std::mem::transmute(func))
@@ -100,7 +100,7 @@ impl WindowsModule {
                     Error::PluginLoadFailed(format!("Failed to find GetPluginFactory: {}", e))
                 })?;
 
-            log::debug!("✅ GetPluginFactory function found");
+            log::debug!("GetPluginFactory function found");
 
             // SAFETY: We extend the lifetime to 'static because we're storing this in the struct
             // and will ensure it's dropped before the library is unloaded
@@ -147,16 +147,16 @@ impl Drop for WindowsModule {
                 log::debug!("Calling ExitDll...");
                 let exit_result = exit_dll();
                 if exit_result {
-                    log::debug!("✅ ExitDll called successfully");
+                    log::debug!("ExitDll called successfully");
                 } else {
-                    log::warn!("⚠️ ExitDll returned false");
+                    log::warn!("ExitDll returned false");
                 }
             }
 
             // Step 2: Library will be automatically unloaded when dropped
             log::debug!("Unloading DLL...");
             // The Drop implementation of Library handles FreeLibrary
-            log::debug!("✅ DLL unloaded");
+            log::debug!("DLL unloaded");
 
             log::debug!("=== Windows VST3 MODULE CLEANUP COMPLETE ===");
         }
