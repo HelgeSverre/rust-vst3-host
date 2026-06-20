@@ -91,6 +91,9 @@ const PLUGIN_PATH: &str = r"C:\Program Files\Common Files\VST3\HY-MPS3 free.vst3
 
 #[derive(Debug, Clone)]
 struct PluginInfo {
+    // Accurate plugin-level metadata from the library (name, vendor, version, category,
+    // MIDI/audio capability, uid) — surfaced as the identity summary.
+    summary: vst3_host::PluginInfo,
     factory_info: FactoryInfo,
     classes: Vec<ClassInfo>,
     component_info: Option<ComponentInfo>,
@@ -437,6 +440,8 @@ struct VST3Inspector {
     // Prebuilt JSON export of the current plugin (PluginReport), for the "Copy JSON" button.
     // Built at load time so the button never re-introspects a loaded plugin.
     report_json: Option<String>,
+    // The plugin's native editor window while open (standalone; dropped to close).
+    plugin_window: Option<vst3_host::PluginWindow>,
     // Plugin discovery
     discovered_plugins: Vec<String>,
     // The `vst3-host` library host (built once, used to load plugins).
@@ -813,6 +818,59 @@ impl VST3Inspector {
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         if let Some(plugin_info) = &self.plugin_info {
+                            // Plugin identity summary — accurate library metadata.
+                            let s = &plugin_info.summary;
+                            ui.label(egui::RichText::new("🎛 Plugin").strong());
+                            ui.add_space(2.0);
+                            egui::Grid::new("plugin_summary_grid")
+                                .num_columns(2)
+                                .spacing([10.0, 4.0])
+                                .show(ui, |ui| {
+                                    let dash = |t: &str| {
+                                        if t.is_empty() {
+                                            "—".to_string()
+                                        } else {
+                                            t.to_string()
+                                        }
+                                    };
+                                    ui.label("Name:");
+                                    ui.label(&s.name);
+                                    ui.end_row();
+                                    ui.label("Vendor:");
+                                    ui.label(&s.vendor);
+                                    ui.end_row();
+                                    ui.label("Version:");
+                                    ui.label(dash(&s.version));
+                                    ui.end_row();
+                                    ui.label("Category:");
+                                    ui.label(dash(&s.category));
+                                    ui.end_row();
+                                    ui.label("Audio I/O:");
+                                    ui.label(format!(
+                                        "{} in / {} out",
+                                        s.audio_inputs, s.audio_outputs
+                                    ));
+                                    ui.end_row();
+                                    ui.label("MIDI:");
+                                    ui.label(format!(
+                                        "{}  ·  {}",
+                                        if s.has_midi_input { "✅ in" } else { "— in" },
+                                        if s.has_midi_output {
+                                            "✅ out"
+                                        } else {
+                                            "— out"
+                                        },
+                                    ));
+                                    ui.end_row();
+                                    ui.label("Editor:");
+                                    ui.label(if s.has_gui { "✅" } else { "—" });
+                                    ui.end_row();
+                                    ui.label("UID:");
+                                    ui.label(egui::RichText::new(&s.uid).monospace().small());
+                                    ui.end_row();
+                                });
+                            ui.add_space(8.0);
+
                             // Factory Information - collapsible
                             egui::CollapsingHeader::new("🏭 Factory Information")
                                 .id_source("factory_info_header")
@@ -2053,16 +2111,26 @@ impl VST3Inspector {
         });
     }
 
-    // GUI editor embedding is not yet ported to the library — the native NSView/HWND
-    // attachment lived in the old raw-COM code path.
-    // TODO(port): editor embedding
+    // Open the plugin's native editor in a standalone window (via the library's PluginWindow).
+    // In-process plugins only — editors across process isolation aren't bridged yet.
     fn create_plugin_gui(&mut self) -> Result<(), String> {
-        self.last_error = Some("editor embedding not yet ported".into());
-        Err("editor embedding not yet ported".into())
+        let Some(audio) = self.audio.as_ref() else {
+            return Err("No plugin loaded".into());
+        };
+        let mut window = vst3_host::PluginWindow::new(audio.plugin());
+        if let Err(e) = window.open() {
+            let msg = format!("Failed to open editor: {e}");
+            self.last_error = Some(msg.clone());
+            return Err(msg);
+        }
+        self.plugin_window = Some(window);
+        self.gui_attached = true;
+        Ok(())
     }
 
-    // TODO(port): editor embedding
     fn close_plugin_gui(&mut self) {
+        // Dropping the window closes the editor and the native window.
+        self.plugin_window = None;
         self.gui_attached = false;
     }
 
@@ -2161,6 +2229,7 @@ impl VST3Inspector {
         self.plugin_info = None;
         self.selected_parameter = None;
         self.current_page = 0;
+        self.plugin_window = None; // close any open editor from the previous plugin
         self.gui_attached = false;
         self.is_processing = false;
         self.last_error = None;
@@ -2265,6 +2334,7 @@ impl VST3Inspector {
             .collect();
 
         PluginInfo {
+            summary: detail.info.clone(),
             factory_info: FactoryInfo {
                 vendor: detail.factory.vendor.clone(),
                 url: detail.factory.url.clone(),
@@ -2791,6 +2861,9 @@ impl VST3Inspector {
         let host = Vst3Host::builder()
             .sample_rate(sample_rate)
             .block_size(block_size as usize)
+            // Contain crash-prone plugins (e.g. Waves/WaveShell) in an isolated process so
+            // selecting one can't take down the inspector.
+            .auto_isolate_problematic(true)
             .build()
             .unwrap_or_else(|e| {
                 eprintln!("❌ Failed to build Vst3Host: {e}");
@@ -2803,6 +2876,7 @@ impl VST3Inspector {
             plugin_path: path.to_string(),
             plugin_info: None,
             report_json: None,
+            plugin_window: None,
             discovered_plugins: Vec::new(),
             host,
             audio: None,
