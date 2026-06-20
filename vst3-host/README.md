@@ -26,8 +26,11 @@ fn main() -> vst3_host::Result<()> {
   own backend.
 - **Parameters** — list, read, set, and format them as the plugin itself displays them.
 - **MIDI** — notes, control change, pitch bend, aftertouch.
-- **Crash isolation** — optionally run a plugin in a separate process (`process-isolation`).
-- **Native editors** — open a plugin's own GUI in a window (macOS/Windows).
+- **Crash isolation** — optionally run a plugin in a separate process (`process-isolation`),
+  with typed `Error::PluginCrashed` + `Plugin::recover()`.
+- **Native editors** — open a plugin's own GUI in a standalone window, or embed it in your
+  egui app (`EmbeddedEditor`, macOS). Windows/Linux window code compiles but isn't yet
+  runtime-verified.
 
 ## Feature flags
 
@@ -35,7 +38,7 @@ fn main() -> vst3_host::Result<()> {
 | --- | --- | --- |
 | `cpal-backend` | yes | The bundled CPAL backend and `simple::play` / `Vst3Host::play`. |
 | `process-isolation` | yes | Out-of-process hosting + the `vst3-host-helper` binary. |
-| `egui-widgets` | no | egui helpers (planned — not yet a usable widget). |
+| `egui-widgets` | no | `EmbeddedEditor` — embed a plugin editor in an egui/eframe window (macOS). |
 
 ```toml
 [dependencies]
@@ -48,19 +51,33 @@ The core is working and exercised against real plugins on macOS. Honest limits:
 
 - The audio path is correctness-first — not yet tuned for the lowest latency (it locks on
   the audio callback).
-- Process isolation is opt-in (`Vst3Host::builder().with_process_isolation(true)`); it has
-  no GUI-across-the-boundary and no auto-respawn yet.
+- Process isolation is opt-in (`Vst3Host::builder().with_process_isolation(true)`); crashes
+  surface as `Error::PluginCrashed` and `Plugin::recover()` reloads, but there is no
+  GUI-across-the-boundary yet.
 - `MidiEvent::ProgramChange` is unsupported (VST3 routes programs through `IUnitInfo`).
-- Windows/Linux are implemented but less exercised than macOS.
+- Windows/Linux build and test in CI but aren't interactively exercised (no plugin run or
+  editor opened) — macOS is the exercised platform.
+- Not yet published to crates.io: building depends on the VST3 SDK via `VST3_SDK_DIR`
+  (see [Building from source](#building-from-source)).
 
 ## Building from source
 
-Requires the VST3 SDK (a git submodule in the repository):
+The `vst3` dependency generates bindings from the Steinberg VST3 SDK headers at build time,
+so it needs the SDK and the `VST3_SDK_DIR` environment variable pointing at it (plus
+`libclang` for bindgen).
+
+**In this repository** the SDK is the `vst3sdk` git submodule and `.cargo/config.toml`
+already sets `VST3_SDK_DIR`, so no extra setup is needed:
 
 ```bash
 git submodule update --init --recursive
 cargo build --release
 ```
+
+**As a dependency in your own project**, you must provide the SDK yourself — clone the
+[VST3 SDK](https://github.com/steinbergmedia/vst3sdk) and set `VST3_SDK_DIR` to its path
+before building (e.g. in your crate's `.cargo/config.toml` or the environment). This is why
+the crate isn't on crates.io yet; the Steinberg SDK's license prevents bundling its headers.
 
 ## Documentation
 

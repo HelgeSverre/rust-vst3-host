@@ -2,18 +2,25 @@
 
 | Platform | Loading & audio | Plugin editor window | Notes |
 | --- | --- | --- | --- |
-| macOS | Working, exercised against real plugins | Standalone native window (`PluginWindow`) | Primary development platform. |
-| Windows | Implemented | Implemented, less exercised | Loading uses the Win32 module path. |
-| Linux | Implemented | X11 via XCB (`PluginWindow`) | Editor support ported from the [khremeviuc1004 fork](https://github.com/khremeviuc1004/rust-vst3-host); see note below. |
+| macOS | Working, exercised against real plugins | Standalone window + embedded-in-egui (`PluginWindow`, `EmbeddedEditor`) | Primary, fully exercised platform. |
+| Windows | Builds + tested in CI; not interactively exercised | Standalone window implemented, not runtime-verified | Loading uses the Win32 module path. |
+| Linux | Builds + unit-tested in CI (Docker) | X11 via XCB implemented, not runtime-verified | Editor ported from the [khremeviuc1004 fork](https://github.com/khremeviuc1004/rust-vst3-host); see note below. |
 
-This reflects where each path has been run, not a guarantee. macOS is the most exercised;
-contributions and reports for Windows/Linux are welcome.
+CI builds and tests all three platforms on every push (macOS full; Linux build+test+clippy;
+Windows build), so compilation is verified everywhere. **"Exercised" — actually running
+plugins and opening editors — is macOS-only.** This table reflects what has been *run*, not a
+guarantee; reports for Windows/Linux are very welcome.
 
-> **Linux editor — needs verification.** The X11/XCB plugin-editor window
-> (`vst3-host/src/window.rs`) was ported from a fork that ran it on Linux, but it has not
-> been compiled or run in this project's CI/dev environment (which is macOS). It is
-> cfg-gated, so it does not affect the macOS/Windows builds. Building on Linux requires
-> the `libxcb` development headers. If you run it on Linux, reports are very welcome.
+- **Editor embedding into egui** (`EmbeddedEditor`) is implemented on **macOS only** so far;
+  other platforms return an error.
+- **Process isolation** (the helper binary) is exercised on macOS; the IPC is platform-neutral
+  but hasn't been run on Windows/Linux.
+
+> **Windows/Linux editors — compiled, not run.** The Win32 and X11/XCB plugin-editor windows
+> (`vst3-host/src/window.rs`) build in CI but have **not been opened against a real plugin** in
+> this project's environment (which is macOS). They are cfg-gated and don't affect the macOS
+> build. Building on Linux needs the `libxcb` development headers. If you run them, please
+> report back.
 
 ## Default plugin scan directories
 
