@@ -118,8 +118,8 @@ mod macos {
                 NSPoint::new(rect.x as f64, 0.0),
                 NSSize::new(rect.width as f64, rect.height as f64),
             );
-            let child = unsafe { NSView::initWithFrame(NSView::alloc(mtm), frame) };
-            unsafe { parent.addSubview(&child) };
+            let child = NSView::initWithFrame(NSView::alloc(mtm), frame);
+            parent.addSubview(&child);
 
             let handle = crate::plugin::WindowHandle::from_nsview(
                 Retained::as_ptr(&child) as *mut std::ffi::c_void
@@ -149,13 +149,13 @@ mod macos {
                 NSPoint::new(rect.x as f64, y),
                 NSSize::new(rect.width as f64, rect.height as f64),
             );
-            unsafe { self.child.setFrame(frame) };
+            self.child.setFrame(frame);
         }
     }
 
     impl Drop for MacEmbed {
         fn drop(&mut self) {
-            unsafe { self.child.removeFromSuperview() };
+            self.child.removeFromSuperview();
         }
     }
 }
