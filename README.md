@@ -1,5 +1,10 @@
 # vst3-host
 
+[![Crates.io](https://img.shields.io/crates/v/vst3-host.svg)](https://crates.io/crates/vst3-host)
+[![Docs.rs](https://docs.rs/vst3-host/badge.svg)](https://docs.rs/vst3-host)
+[![CI](https://github.com/HelgeSverre/rust-vst3-host/actions/workflows/ci.yml/badge.svg)](https://github.com/HelgeSverre/rust-vst3-host/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/vst3-host.svg)](#license)
+
 A safe Rust library for hosting VST3 plugins: discover them, load them, play audio
 through them, control parameters, send MIDI, and isolate crashes — without writing any
 `unsafe` code yourself.
