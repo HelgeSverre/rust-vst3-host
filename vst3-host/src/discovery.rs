@@ -1,11 +1,12 @@
 //! VST3 plugin discovery functionality
 
 use crate::{error::Result, plugin::PluginInfo};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::ptr;
 
 /// Factory-level metadata (the plugin vendor's identity).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FactoryInfo {
     /// Vendor / manufacturer name.
     pub vendor: String,
@@ -18,7 +19,7 @@ pub struct FactoryInfo {
 }
 
 /// One class exported by a plugin's factory.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClassInfo {
     /// Class display name.
     pub name: String,
@@ -33,7 +34,7 @@ pub struct ClassInfo {
 }
 
 /// One audio or event bus.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BusInfo {
     /// Bus display name.
     pub name: String,
@@ -46,7 +47,7 @@ pub struct BusInfo {
 }
 
 /// The plugin's full bus layout.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BusLayout {
     /// Audio input buses.
     pub audio_inputs: Vec<BusInfo>,
@@ -62,7 +63,7 @@ pub struct BusLayout {
 /// This is the static metadata a plugin *inspector* UI needs, beyond the lightweight
 /// [`PluginInfo`]. For the parameter list, load the plugin and call
 /// [`crate::Plugin::get_parameters`] (which runs the full controller logic).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetailedPluginInfo {
     /// The basic metadata (also part of this report for convenience).
     pub info: PluginInfo,
@@ -72,6 +73,36 @@ pub struct DetailedPluginInfo {
     pub classes: Vec<ClassInfo>,
     /// Full audio + event bus layout.
     pub buses: BusLayout,
+}
+
+/// A complete, serializable report of a plugin: static introspection plus its parameter
+/// list. Build it after loading the plugin and serialize to JSON for export (e.g. the
+/// inspector's "Copy JSON", or feeding plugin metadata to other tools).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginReport {
+    /// Static introspection: factory, classes, bus layout, basic info.
+    pub detailed: DetailedPluginInfo,
+    /// The plugin's parameters (normalized values + metadata).
+    pub parameters: Vec<crate::parameters::Parameter>,
+}
+
+impl PluginReport {
+    /// Bundle a [`DetailedPluginInfo`] with a parameter list (from
+    /// [`crate::Plugin::get_parameters`]).
+    pub fn new(
+        detailed: DetailedPluginInfo,
+        parameters: Vec<crate::parameters::Parameter>,
+    ) -> Self {
+        Self {
+            detailed,
+            parameters,
+        }
+    }
+
+    /// Serialize the report to pretty-printed JSON.
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string_pretty(self)
+    }
 }
 
 /// Scan standard VST3 directories for plugins
@@ -191,8 +222,10 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
         let num_classes = factory.countClasses();
         let mut plugin_name = String::new();
         let mut category = String::new();
+        let mut version = String::new();
         let mut uid = String::new();
         let mut has_midi_input = false;
+        let mut has_midi_output = false;
         let mut audio_inputs = 0u32;
         let mut audio_outputs = 0u32;
         let mut has_gui = false;
@@ -204,13 +237,18 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
 
                 if class_category.contains("Audio Module Class") {
                     plugin_name = crate::internal::utils::c_str_to_string(&class_info.name);
-                    category = if class_category.contains("Instrument") {
-                        "Instrument".to_string()
-                    } else if class_category.contains("Fx") {
-                        "Effect".to_string()
-                    } else {
-                        "Other".to_string()
-                    };
+
+                    // Real version + sub-categories via IPluginFactory2 (PClassInfo.category
+                    // is just "Audio Module Class"; the useful sub-categories live in
+                    // PClassInfo2.subCategories). Left empty rather than faked when absent.
+                    if let Some(f2) = factory.cast::<IPluginFactory2>() {
+                        let mut info2: PClassInfo2 = std::mem::zeroed();
+                        if f2.getClassInfo2(i, &mut info2) == kResultOk {
+                            version = crate::internal::utils::c_str_to_string(&info2.version);
+                            category =
+                                crate::internal::utils::c_str_to_string(&info2.subCategories);
+                        }
+                    }
 
                     // Convert UID to string
                     // cid is an array of bytes, convert to hex string
@@ -245,9 +283,9 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
                         audio_inputs = component.getBusCount(kAudio as i32, kInput as i32) as u32;
                         audio_outputs = component.getBusCount(kAudio as i32, kOutput as i32) as u32;
 
-                        // Check for MIDI input
-                        let event_inputs = component.getBusCount(kEvent as i32, kInput as i32);
-                        has_midi_input = event_inputs > 0;
+                        // MIDI capability from event bus presence.
+                        has_midi_input = component.getBusCount(kEvent as i32, kInput as i32) > 0;
+                        has_midi_output = component.getBusCount(kEvent as i32, kOutput as i32) > 0;
 
                         // Check for GUI
                         if let Some(controller) = component.cast::<IEditController>() {
@@ -283,13 +321,13 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
                 plugin_name
             },
             vendor,
-            version: "1.0.0".to_string(), // Version not available in PClassInfo
+            version,
             category,
             uid,
             audio_inputs,
             audio_outputs,
             has_midi_input,
-            has_midi_output: false, // Would need to check event output buses
+            has_midi_output,
             has_gui,
         })
     }
@@ -490,4 +528,46 @@ pub fn get_vst3_binary_path(bundle_path: &Path) -> Result<PathBuf> {
         "Could not find VST3 binary in bundle: {}",
         bundle_path.display()
     )))
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+    use crate::plugin::PluginInfo;
+
+    #[test]
+    fn plugin_report_serializes_and_round_trips() {
+        let detail = DetailedPluginInfo {
+            info: PluginInfo {
+                path: std::path::PathBuf::from("/x/Dexed.vst3"),
+                name: "Dexed".into(),
+                vendor: "Digital Suburban".into(),
+                version: "1.0.0".into(),
+                category: "Instrument|Synth".into(),
+                uid: "ABCD".into(),
+                audio_inputs: 0,
+                audio_outputs: 1,
+                has_midi_input: true,
+                has_midi_output: true,
+                has_gui: true,
+            },
+            factory: FactoryInfo {
+                vendor: "Digital Suburban".into(),
+                ..Default::default()
+            },
+            classes: vec![ClassInfo {
+                name: "Dexed".into(),
+                ..Default::default()
+            }],
+            buses: BusLayout::default(),
+        };
+        let report = PluginReport::new(detail, Vec::new());
+        let json = report.to_json().expect("to_json");
+        // The export round-trips and preserves the accurate metadata.
+        let back: PluginReport = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(back.detailed.info.name, "Dexed");
+        assert_eq!(back.detailed.info.category, "Instrument|Synth");
+        assert!(back.detailed.info.has_midi_output);
+        assert_eq!(back.detailed.classes.len(), 1);
+    }
 }

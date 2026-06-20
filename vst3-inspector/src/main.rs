@@ -179,19 +179,22 @@ fn run_selftest(path: &str) -> i32 {
     }
 
     // 2. Deep introspection (Slice 0).
-    match vst3_host::get_detailed_plugin_info(std::path::Path::new(path)) {
-        Ok(d) => println!(
-            "introspect: {} by {} — {} classes, {} audio-out bus(es)",
-            d.info.name,
-            d.factory.vendor,
-            d.classes.len(),
-            d.buses.audio_outputs.len()
-        ),
+    let detail = match vst3_host::get_detailed_plugin_info(std::path::Path::new(path)) {
+        Ok(d) => {
+            println!(
+                "introspect: {} by {} — {} classes, {} audio-out bus(es)",
+                d.info.name,
+                d.factory.vendor,
+                d.classes.len(),
+                d.buses.audio_outputs.len()
+            );
+            d
+        }
         Err(e) => {
             eprintln!("FAIL: introspect {path}: {e}");
             return 1;
         }
-    }
+    };
 
     // 3. Load + parameters + play + observe audio.
     let mut host = match Vst3Host::builder()
@@ -214,6 +217,39 @@ fn run_selftest(path: &str) -> i32 {
     };
     let param_count = plugin.get_parameters().map(|p| p.len()).unwrap_or(0);
     println!("load: {} — {param_count} parameters", plugin.info().name);
+
+    // 3b. JSON export — the "Copy JSON" capability (full report → valid JSON). Reuses the
+    // introspection from step 2 plus the loaded plugin's parameters.
+    match plugin.get_parameters() {
+        Ok(params) => {
+            let report = vst3_host::PluginReport::new(detail, params);
+            match report.to_json() {
+                Ok(json) => {
+                    if serde_json::from_str::<serde_json::Value>(&json).is_err() {
+                        eprintln!("FAIL: PluginReport produced invalid JSON");
+                        return 1;
+                    }
+                    println!(
+                        "export: PluginReport JSON {} bytes, {} params, version={:?} category={:?} midi_in={} midi_out={}",
+                        json.len(),
+                        report.parameters.len(),
+                        report.detailed.info.version,
+                        report.detailed.info.category,
+                        report.detailed.info.has_midi_input,
+                        report.detailed.info.has_midi_output,
+                    );
+                }
+                Err(e) => {
+                    eprintln!("FAIL: to_json: {e}");
+                    return 1;
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("FAIL: get parameters for report: {e}");
+            return 1;
+        }
+    }
 
     let audio = match host.play(plugin) {
         Ok(a) => a,
@@ -398,6 +434,9 @@ impl Preferences {
 struct VST3Inspector {
     plugin_path: String,
     plugin_info: Option<PluginInfo>,
+    // Prebuilt JSON export of the current plugin (PluginReport), for the "Copy JSON" button.
+    // Built at load time so the button never re-introspects a loaded plugin.
+    report_json: Option<String>,
     // Plugin discovery
     discovered_plugins: Vec<String>,
     // The `vst3-host` library host (built once, used to load plugins).
@@ -750,6 +789,22 @@ impl VST3Inspector {
                 ui.add_space(8.0);
 
                 ui.heading("Plugin Information");
+                ui.add_space(4.0);
+
+                // Export the full plugin report (metadata + bus layout + parameters) as JSON.
+                ui.add_enabled_ui(self.report_json.is_some(), |ui| {
+                    if ui
+                        .button("📋 Copy JSON")
+                        .on_hover_text(
+                            "Copy this plugin's full report (metadata, buses, parameters) as JSON",
+                        )
+                        .clicked()
+                    {
+                        if let Some(json) = &self.report_json {
+                            ctx.copy_text(json.clone());
+                        }
+                    }
+                });
                 ui.add_space(8.0);
 
                 // Make the plugin information section scrollable
@@ -2145,6 +2200,12 @@ impl VST3Inspector {
             }
         };
 
+        // Prebuild the JSON export (full report) so "Copy JSON" never re-introspects a
+        // plugin that's currently loaded.
+        self.report_json = vst3_host::PluginReport::new(detail.clone(), params.clone())
+            .to_json()
+            .ok();
+
         self.plugin_info = Some(Self::build_plugin_info(&detail, &params));
         self.is_processing = audio.lock().is_processing();
         self.audio = Some(audio);
@@ -2741,6 +2802,7 @@ impl VST3Inspector {
         Self {
             plugin_path: path.to_string(),
             plugin_info: None,
+            report_json: None,
             discovered_plugins: Vec::new(),
             host,
             audio: None,
