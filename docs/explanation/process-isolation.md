@@ -48,13 +48,24 @@ machine. So the runtime default stays in-process, and isolation is something you
 The `process-isolation` feature is on by default so the helper *builds* without extra
 flags — but loading is in-process unless you call `with_process_isolation(true)`.
 
+Parameters, audio, plugin state (`save_state`/`load_state`), and **MIDI the plugin emits**
+(`take_output_midi`) all marshal across the boundary, so an isolated `Plugin` behaves like an
+in-process one for those.
+
+## Recovery
+
+A dead or hung helper surfaces as a typed `Error::PluginCrashed` / `Error::PluginTimeout`
+(never a hang or a host crash). `Plugin::recover()` respawns the helper and reloads the
+plugin; it's explicit (not inline) so the expensive respawn stays off the audio thread. See
+[Isolate plugin crashes](../how-to/isolate-plugin-crashes.md).
+
 ## Current limits
 
 - **No GUI across the boundary** — opening a plugin's editor in isolated mode isn't
   supported; the editor lives in the host process's window system, and forwarding a native
   view handle across processes isn't implemented.
-- **No automatic respawn** — after a crash, the `Plugin` is dead; create a new isolated
-  plugin to recover. Reload-and-restore is a future addition.
+- **Recovery loses live state** — `recover()` reloads from the default state; re-apply
+  parameters/preset with `save_state`/`load_state` if you need them preserved.
 - **IPC overhead per audio block** — driving audio through isolation marshals each block
   over the pipe. It works, but it's heavier than in-process and not aimed at the lowest
   latency.

@@ -21,11 +21,16 @@ fn main() -> vst3_host::Result<()> {
 
 ## Features
 
-- **Discovery** — scan standard locations; read plugin metadata.
-- **Audio** — a bundled CPAL backend drives a plugin to the default output, or bring your
-  own backend.
-- **Parameters** — list, read, set, and format them as the plugin itself displays them.
-- **MIDI** — notes, control change, pitch bend, aftertouch.
+- **Discovery** — scan standard locations; read plugin metadata; export a full report as JSON
+  (`PluginReport`).
+- **Audio** — a bundled CPAL backend drives a plugin to the default output (or bring your own
+  backend), with two paths: the easy mutex-based `play` and a lock-free `play_realtime`
+  (`RealtimePluginRunner`) that takes no lock on the audio thread.
+- **Parameters** — list, read, set (applied to the audio processor), and format them as the
+  plugin itself displays them.
+- **MIDI** — send notes, CC, pitch bend, aftertouch; capture MIDI the plugin emits
+  (`take_output_midi`).
+- **State** — save/restore a plugin's state (`save_state`/`load_state`), in-process or isolated.
 - **Crash isolation** — optionally run a plugin in a separate process (`process-isolation`),
   with typed `Error::PluginCrashed` + `Plugin::recover()`.
 - **Native editors** — open a plugin's own GUI in a standalone window, or embed it in your
@@ -49,8 +54,9 @@ vst3-host = "0.1"
 
 The core is working and exercised against real plugins on macOS. Honest limits:
 
-- The audio path is correctness-first — not yet tuned for the lowest latency (it locks on
-  the audio callback).
+- The default `play` audio path is correctness-first (it locks on the audio callback). For a
+  lock-free path use `play_realtime` / `RealtimePluginRunner`; even that isn't a fully
+  RT-audited (zero-allocation) engine yet.
 - Process isolation is opt-in (`Vst3Host::builder().with_process_isolation(true)`); crashes
   surface as `Error::PluginCrashed` and `Plugin::recover()` reloads, but there is no
   GUI-across-the-boundary yet.

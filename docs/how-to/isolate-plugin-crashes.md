@@ -79,13 +79,37 @@ let mut host = Vst3Host::builder()
 # }
 ```
 
+## Recover from a crash
+
+When an isolated plugin's helper dies (a crash or a hang), calls return a typed
+`Error::PluginCrashed` (or `Error::PluginTimeout`) — the host process stays alive.
+`Plugin::recover()` respawns the helper and reloads the plugin from the same path and
+settings, restarting processing if it was running:
+
+```rust
+# use vst3_host::{Plugin, Error};
+# fn keep_going(plugin: &mut Plugin) -> vst3_host::Result<()> {
+if let Err(Error::PluginCrashed) = plugin.get_parameters() {
+    plugin.recover()?; // respawn + reload; the plugin is usable again
+}
+# Ok(())
+# }
+```
+
+The reloaded plugin starts from its default state — parameter values and any loaded preset
+are lost. Snapshot with [`save_state`](../how-to/control-parameters.md) beforehand and
+`load_state` after recovering to preserve them. `Plugin::isolation_pid()` exposes the helper
+PID for monitoring.
+
 ## Current limits
 
 - **Not the runtime default.** The default load path is in-process. Isolation is opt-in
   because it requires the helper binary to be present where your app runs.
 - **No GUI across the boundary.** Opening a plugin's editor in isolated mode is not
   supported yet (`open_editor` returns an error).
-- **No automatic respawn.** After a crash you create a new isolated plugin to recover.
+- **Recovery is explicit, not inline.** A crash surfaces as `Error::PluginCrashed`; call
+  `recover()` off the audio thread (it respawns + reloads, which is too slow to do inside a
+  process callback).
 
 See [Process isolation](../explanation/process-isolation.md) for how the IPC protocol
 works and why these limits exist.
