@@ -122,8 +122,19 @@ A multi-agent analysis produced an incremental, compile-at-each-step slice plan.
   wiring + a human to see the window. Depends on 2c.
 
 ## Other remaining (need interactive verification or are GUI-runtime work)
-- [ ] 2c. `IPlugFrame` resize + egui embedding helper (unblocks the inspector editor).
-- [ ] MIDI-input monitor: inspector monitor shows app-sent events only; capturing
-  plugin-EMITTED MIDI needs a library API (GAP-D: `Plugin::on_midi_output`).
-- [ ] 3e. Plugin GUI across the process boundary; isolation auto-respawn-and-reload.
-- [ ] 4a. `window.rs` cocoa → objc2 migration (~50 warnings).
+- [x] 2c. `IPlugFrame` resize (`Plugin::take_editor_resize_request`) + egui embedding helper
+  (`EmbeddedEditor`, macOS). Compile/smoke-verified; visual positioning needs interactive
+  confirmation. Windows/Linux embedding still TODO.
+- [x] Plugin-EMITTED MIDI capture (`Plugin::take_output_midi`), in-process and across isolation.
+- [x] Isolation crash recovery (`Error::PluginCrashed` + `Plugin::recover()`).
+- [x] Parameter changes reach the processor (input parameter queue), not just the controller.
+- [x] 4a. `window.rs` cocoa → objc2 migration.
+- [ ] 3e. Plugin GUI across the process boundary (helper-owned window; see the
+  2026-06-20 functional-gaps exploration).
+- [ ] MIDI-out capture in isolation observed with a real emitter (no installed plugin emits
+  without GUI config; covered by serde wire test + parity test for now).
+- [ ] Sample-accurate / timeline parameter automation on top of the per-block queue.
+- [ ] **VST3 call logger** (idea, from the abandoned `feature/vst3-logger`, commit 69ccc27):
+  trace host↔plugin COM traffic (interface, method, direction, args, result, timing, thread)
+  with filtering + an inspector tab. The old WIP code predates the workspace split and was
+  rewritten away; re-implement fresh in the `internal/` COM layer + inspector.
