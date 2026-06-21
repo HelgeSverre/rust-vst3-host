@@ -286,6 +286,62 @@ fn test_plugin_state_save_restore() {
     println!("State round-trip OK ({} bytes)", snapshot.len());
 }
 
+/// Track D: real `.vstpreset` save/load round-trip through the standard Steinberg container
+/// format, against the bundled Dexed plugin.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_vstpreset_save_load() {
+    let plugin_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(plugin_path).exists() {
+        println!("Test plugin not found at {plugin_path}, skipping");
+        return;
+    }
+
+    let mut host = Vst3Host::new().expect("Failed to create host");
+    let mut plugin = host
+        .load_plugin(plugin_path)
+        .expect("Failed to load plugin");
+
+    let params = plugin.get_parameters().expect("get_parameters");
+    let param = params
+        .iter()
+        .find(|p| p.can_automate && !p.is_read_only && !p.is_bypass)
+        .or_else(|| params.first())
+        .expect("plugin has at least one parameter")
+        .clone();
+    let id = param.id;
+
+    // Establish a known value, then save it to a .vstpreset file.
+    plugin.set_parameter(id, 0.25).expect("set_parameter v1");
+    let v1 = plugin.get_parameter(id).expect("get v1");
+
+    let mut preset_path = std::env::temp_dir();
+    preset_path.push(format!("vst3-host-test-{}.vstpreset", std::process::id()));
+    plugin.save_vstpreset(&preset_path).expect("save_vstpreset");
+
+    // The on-disk file must carry the standard container header tagged with our class id.
+    let raw = std::fs::read(&preset_path).expect("read written preset");
+    assert!(raw.len() >= 48, "preset shorter than the header");
+    assert_eq!(&raw[0..4], b"VST3", "magic");
+    assert_eq!(&raw[8..40], plugin.info().uid.as_bytes(), "class id");
+
+    // Move the parameter away, then load the preset back and confirm it is restored.
+    plugin.set_parameter(id, 0.75).expect("set_parameter v2");
+    plugin.load_vstpreset(&preset_path).expect("load_vstpreset");
+    let v3 = plugin.get_parameter(id).expect("get after restore");
+
+    let _ = std::fs::remove_file(&preset_path);
+
+    println!(
+        "vstpreset round-trip: v1={v1} restored={v3} ({} bytes)",
+        raw.len()
+    );
+    assert!(
+        (v3 - v1).abs() < 0.05,
+        "parameter not restored from vstpreset: {v3} (expected ~{v1})"
+    );
+}
+
 /// Phase 3 capstone: drive a plugin end-to-end in an isolated process.
 ///
 /// Requires the `vst3-host-helper` binary to be built and the bundled Dexed test
