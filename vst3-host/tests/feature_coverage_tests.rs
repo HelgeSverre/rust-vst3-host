@@ -291,6 +291,64 @@ fn test_builder_tempo_time_signature_applies() {
     );
 }
 
+/// `process_audio` before `start_processing` must error, not panic or produce garbage.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_process_before_start_errors() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed() else {
+        return;
+    };
+    let mut buffers = AudioBuffers::new(0, 2, 512, 48000.0);
+    assert!(
+        plugin.process_audio(&mut buffers).is_err(),
+        "process_audio before start_processing should return Err"
+    );
+}
+
+/// A block larger than the configured maximum must be clamped, not crash/overflow.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_oversized_block_is_clamped() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed() else {
+        return;
+    };
+    plugin.start_processing().expect("start_processing");
+    // Host was built with block_size 512; ask it to process 1024 frames.
+    let mut buffers = AudioBuffers::new(0, 2, 1024, 48000.0);
+    plugin
+        .process_audio(&mut buffers)
+        .expect("oversized block should be clamped and processed, not error");
+}
+
+/// A `.vstpreset` whose embedded class id doesn't match the loaded plugin is rejected.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_vstpreset_wrong_class_id_rejected() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed() else {
+        return;
+    };
+    let dir = std::env::temp_dir();
+    let path = dir.join("vh_wrong_classid.vstpreset");
+    plugin.save_vstpreset(&path).expect("save_vstpreset");
+
+    // The 32-char ASCII class id lives at bytes 8..40 of the container; corrupt it.
+    let mut bytes = std::fs::read(&path).expect("read preset");
+    for b in &mut bytes[8..40] {
+        *b = b'0';
+    }
+    std::fs::write(&path, &bytes).expect("write tampered preset");
+
+    let result = plugin.load_vstpreset(&path);
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        result.is_err(),
+        "load_vstpreset should reject a preset whose class id differs from the plugin"
+    );
+}
+
 // --- Pure-logic tests (run in CI without a plugin) ---------------------------
 
 /// The builder records tempo / time-signature on the config without needing a plugin.

@@ -514,12 +514,7 @@ impl PluginImpl {
             data.process_context.tempo = self.tempo;
             data.process_context.timeSigNumerator = self.time_sig_numerator;
             data.process_context.timeSigDenominator = self.time_sig_denominator;
-            // `state` is `uint32`; the StatesAndFlags_ constants are generated as `i32` on
-            // some targets (Windows) and `u32` on others (macOS), so cast to the field type.
-            data.process_context.state = (ProcessContext_::StatesAndFlags_::kPlaying
-                | ProcessContext_::StatesAndFlags_::kTempoValid
-                | ProcessContext_::StatesAndFlags_::kTimeSigValid)
-                as u32;
+            data.process_context.state = PROCESS_CONTEXT_STATE;
 
             // Set up process data
             data.process_data.processMode = ProcessModes_::kRealtime as i32;
@@ -1518,6 +1513,21 @@ impl Drop for PluginImpl {
     }
 }
 
+/// The `ProcessContext.state` flags the host advertises each block: transport playing, with
+/// a valid tempo, time signature, continuous sample time, and musical (quarter-note)
+/// playhead. The last two are essential — without `kContTimeValid`/`kProjectTimeMusicValid`
+/// a spec-conformant plugin treats the advancing `continousTimeSamples`/`projectTimeMusic`
+/// (see [`advance_process_context`]) as invalid and ignores it. The `as u32` cast is needed
+/// because the `StatesAndFlags_` constants are generated as `i32` on some targets (Windows)
+/// and `u32` on others (macOS).
+#[allow(clippy::unnecessary_cast)] // the `as u32` is needed where the constants are i32 (Windows)
+const PROCESS_CONTEXT_STATE: u32 = (ProcessContext_::StatesAndFlags_::kPlaying
+    | ProcessContext_::StatesAndFlags_::kTempoValid
+    | ProcessContext_::StatesAndFlags_::kTimeSigValid
+    | ProcessContext_::StatesAndFlags_::kContTimeValid
+    | ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid)
+    as u32;
+
 /// Advance the transport in a `ProcessContext` by `frames` samples after a processed block.
 /// Keeps `continousTimeSamples`/`projectTimeSamples` (and the musical playhead derived from
 /// the current tempo) moving so tempo-synced plugins don't see a frozen time-0.
@@ -1534,6 +1544,19 @@ fn advance_process_context(ctx: &mut ProcessContext, frames: i64) {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::unnecessary_cast)] // `as u32` needed where the constants are i32 (Windows)
+    fn process_context_state_advertises_playhead_validity() {
+        // The advancing continous/musical playhead is only honored by conformant plugins if
+        // its validity flags are set. Guard against silently dropping them again.
+        use ProcessContext_::StatesAndFlags_ as F;
+        assert_ne!(PROCESS_CONTEXT_STATE & F::kPlaying as u32, 0);
+        assert_ne!(PROCESS_CONTEXT_STATE & F::kTempoValid as u32, 0);
+        assert_ne!(PROCESS_CONTEXT_STATE & F::kTimeSigValid as u32, 0);
+        assert_ne!(PROCESS_CONTEXT_STATE & F::kContTimeValid as u32, 0);
+        assert_ne!(PROCESS_CONTEXT_STATE & F::kProjectTimeMusicValid as u32, 0);
+    }
 
     #[test]
     fn advance_moves_playhead_and_musical_time() {

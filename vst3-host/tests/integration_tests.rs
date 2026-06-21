@@ -14,6 +14,21 @@ use vst3_host::prelude::*;
 
 /// Helper to find a test plugin
 fn find_test_plugin() -> Option<PluginInfo> {
+    // Prefer the bundled Dexed (free, no license) and read it with the *lightweight*
+    // metadata path. `discover_plugins()` instantiates EVERY installed plugin, and some
+    // licensed system plugins abort the whole test binary with an uncatchable C++ exception
+    // during their license check — so only fall back to discovery if the bundle is missing.
+    let bundled = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if std::path::Path::new(bundled).exists() {
+        if let Ok(info) = vst3_host::simple::get_plugin_info(bundled) {
+            println!(
+                "Using bundled test plugin: {} by {}",
+                info.name, info.vendor
+            );
+            return Some(info);
+        }
+    }
+
     // Try to find common free VST3 plugins
     let test_plugins = [
         "Vital",            // Vital synthesizer

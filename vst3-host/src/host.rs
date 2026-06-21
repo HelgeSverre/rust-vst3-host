@@ -390,17 +390,23 @@ impl Vst3HostBuilder {
 
     /// Set the transport tempo (beats per minute) advertised to plugins in the host
     /// `ProcessContext`. Drives tempo-synced DSP (LFOs, synced delays, arpeggiators).
-    /// Defaults to `120.0`.
+    /// Defaults to `120.0`. Non-finite or non-positive values are ignored (a tempo of 0 or
+    /// less would freeze/reverse the derived musical playhead), keeping the previous tempo.
     pub fn tempo(mut self, bpm: f64) -> Self {
-        self.config.tempo = bpm;
+        if bpm.is_finite() && bpm > 0.0 {
+            self.config.tempo = bpm;
+        }
         self
     }
 
     /// Set the transport time signature advertised to plugins in the host
-    /// `ProcessContext` (`num`/`den`, e.g. `4, 4`). Defaults to `4/4`.
+    /// `ProcessContext` (`num`/`den`, e.g. `4, 4`). Defaults to `4/4`. Non-positive values
+    /// are ignored (a malformed time signature), keeping the previous setting.
     pub fn time_signature(mut self, num: i32, den: i32) -> Self {
-        self.config.time_sig_numerator = num;
-        self.config.time_sig_denominator = den;
+        if num > 0 && den > 0 {
+            self.config.time_sig_numerator = num;
+            self.config.time_sig_denominator = den;
+        }
         self
     }
 
