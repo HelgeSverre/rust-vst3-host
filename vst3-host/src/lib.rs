@@ -52,7 +52,7 @@
 //! # }
 //! ```
 
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 pub mod audio;
 pub mod error;

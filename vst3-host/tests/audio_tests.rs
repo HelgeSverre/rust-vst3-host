@@ -35,6 +35,7 @@ fn test_audio_buffers_clear() {
 }
 
 #[test]
+#[allow(clippy::field_reassign_with_default)] // sequential field tweaks read clearer here
 fn test_channel_level_db_conversion() {
     let mut level = ChannelLevel::default();
 

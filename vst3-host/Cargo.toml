@@ -3,7 +3,9 @@ name = "vst3-host"
 version = "0.1.1"
 authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 edition = "2021"
-rust-version = "1.81"
+# Default-feature floor (cpal 0.18 needs 1.85). The optional `egui-widgets` feature
+# requires a newer toolchain (egui/eframe 0.34 need Rust 1.92).
+rust-version = "1.85"
 description = "Safe, simple VST3 plugin hosting with audio playback, MIDI, and crash protection"
 documentation = "https://docs.rs/vst3-host"
 readme = "README.md"

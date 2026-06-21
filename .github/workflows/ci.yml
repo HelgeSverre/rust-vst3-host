@@ -2,14 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [main, "feature/**"]
+    branches: [main, "feature/**", "roadmap/**"]
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Primary platform: full workspace, formatting, lint, tests, examples.
+  # Primary platform: full workspace, formatting, lint (incl. tests/examples), tests, examples.
   macos:
     name: macOS (full)
     runs-on: macos-latest
@@ -19,9 +19,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
       - run: cargo test --workspace --all-features
       - run: cargo build --workspace --all-features --examples
+      # Keep the isolation path + a no-plugin example building.
+      - run: cargo build -p vst3-host --bin vst3-host-helper --features process-isolation
+      - run: cargo run -p vst3-host --example plugin_scanner
 
   # The published crate must build and pass its tests on Linux (incl. the X11/XCB path).
   linux:
@@ -38,10 +41,9 @@ jobs:
           sudo apt-get install -y libclang-dev clang libxcb1-dev libxcb-util-dev libasound2-dev pkg-config
       - run: cargo build -p vst3-host --all-features
       - run: cargo test -p vst3-host --all-features
-      - run: cargo clippy -p vst3-host --all-features -- -D warnings
+      - run: cargo clippy -p vst3-host --all-features --all-targets -- -D warnings
 
-  # The published crate must at least build on Windows. LLVM is kept for any -sys
-  # dependency that still runs bindgen (e.g. via cpal).
+  # Windows is the most regression-prone platform (DLL/module loading, paths) — build AND test.
   windows:
     name: Windows (vst3-host)
     runs-on: windows-latest
@@ -52,4 +54,50 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install LLVM
         run: choco install llvm -y
+      - run: cargo build -p vst3-host --all-features
+      - run: cargo test -p vst3-host --all-features
+
+  # MSRV: verify the declared rust-version (1.85) builds the default-feature crate.
+  # (egui-widgets is intentionally excluded — egui/eframe 0.34 require Rust 1.92.)
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.85
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev clang libxcb1-dev libxcb-util-dev libasound2-dev pkg-config
       - run: cargo build -p vst3-host
+
+  # docs.rs builds with --all-features and --cfg docsrs; catch doc/cfg breakage early.
+  docs:
+    name: docs.rs build
+    runs-on: macos-latest
+    env:
+      RUSTDOCFLAGS: "--cfg docsrs -D warnings"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo doc -p vst3-host --all-features --no-deps
+
+  # Feature-combination guard: cfg'd code paths must compile in isolation.
+  features:
+    name: Feature combos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p vst3-host --no-default-features
+      - run: cargo build -p vst3-host --no-default-features --features cpal-backend
+      - run: cargo build -p vst3-host --no-default-features --features process-isolation
+      - run: cargo build -p vst3-host --no-default-features --features cpal-backend,egui-widgets
+
+  # Dependency hygiene: advisories + license/ban policy (relevant after the MIT relicense).
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2

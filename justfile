@@ -89,10 +89,10 @@ fmt:
 fmt-check:
     cargo fmt --check
 
-# Lint with clippy (all features); warnings are errors
+# Lint with clippy (all features + tests/examples); warnings are errors
 [group('lint')]
 clippy:
-    cargo clippy --workspace --all-features -- -D warnings
+    cargo clippy --workspace --all-features --all-targets -- -D warnings
 
 # Pre-merge gate: formatting + clippy + tests
 [group('lint')]
