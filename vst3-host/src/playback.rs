@@ -26,6 +26,9 @@ pub struct AudioHandle {
     // Boxed as a trait object so `AudioHandle` is not generic over the backend.
     // Kept solely to hold the stream open — dropping it stops audio.
     _stream: Box<dyn AudioStream>,
+    // The capture stream for the duplex (effect-hosting) path; `None` for output-only play.
+    // Kept alive alongside `_stream`.
+    _input_stream: Option<Box<dyn AudioStream>>,
     plugin: Arc<Mutex<Plugin>>,
 }
 
@@ -146,6 +149,97 @@ pub fn play_with_backend<B: AudioBackend>(
 
     Ok(AudioHandle {
         _stream: Box::new(stream),
+        _input_stream: None,
+        plugin,
+    })
+}
+
+/// Drive a plugin with **live audio input** (effect hosting): capture from the default input
+/// device, process it through the plugin, and play the result on the default output device.
+///
+/// cpal has no true duplex stream, so this opens a separate input and output stream bridged
+/// by a lock-free ring: the input callback pushes captured frames, the output callback pops
+/// them into the plugin's input buffers, processes, and writes the output. `config`'s
+/// `input_channels`/`output_channels`/`sample_rate` define the streams. Like
+/// [`play_with_backend`], control the plugin via the returned [`AudioHandle`].
+///
+/// Note: the two device clocks are independent; this uses a small bridge buffer and tolerates
+/// drift by dropping/zero-filling at the edges. Suitable for monitoring/auditioning effects.
+pub fn play_with_input_backend<B: AudioBackend>(
+    backend: &B,
+    plugin: Plugin,
+    config: AudioConfig,
+) -> Result<AudioHandle> {
+    let in_device = backend
+        .default_input_device()
+        .ok_or_else(|| Error::AudioBackendError("No default input device available".into()))?;
+    let out_device = backend
+        .default_output_device()
+        .ok_or_else(|| Error::AudioBackendError("No default output device available".into()))?;
+
+    let in_channels = config.input_channels.max(1);
+    let out_channels = config.output_channels;
+    let sample_rate = config.sample_rate;
+
+    let plugin = Arc::new(Mutex::new(plugin));
+    plugin
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .start_processing()?;
+
+    // SPSC bridge: input callback (producer) -> output callback (consumer). Hold a few
+    // blocks of interleaved input so the independent device clocks don't starve immediately.
+    let ring_cap = (config.block_size * in_channels * 8).max(2048);
+    let (mut producer, mut consumer) = rtrb::RingBuffer::<f32>::new(ring_cap);
+
+    let in_data_cb = Box::new(move |data: &[f32]| {
+        // Drop on full (output side fell behind) rather than block the capture callback.
+        for &s in data {
+            let _ = producer.push(s);
+        }
+    });
+    let in_err_cb = Box::new(|e: B::Error| log::error!("input stream error: {}", e));
+    let input_stream = backend
+        .create_input_stream(&in_device, config, in_data_cb, in_err_cb)
+        .map_err(|e| Error::AudioBackendError(format!("Failed to create input stream: {}", e)))?;
+
+    let plugin_cb = Arc::clone(&plugin);
+    let mut scratch = AudioBuffers::new(in_channels, out_channels, config.block_size, sample_rate);
+    let out_data_cb = Box::new(move |data: &mut [f32]| {
+        data.fill(0.0);
+        if out_channels == 0 {
+            return;
+        }
+        let frames = data.len() / out_channels;
+        prepare_scratch(&mut scratch, frames);
+        // Deinterleave captured input from the ring into the plugin's input buffers
+        // (interleaved frame-major order matches the input callback's push order).
+        for f in 0..frames {
+            for ch in scratch.inputs.iter_mut() {
+                ch[f] = consumer.pop().unwrap_or(0.0);
+            }
+        }
+        if let Ok(mut p) = plugin_cb.lock() {
+            if p.process_audio(&mut scratch).is_ok() {
+                interleave_outputs(&scratch.outputs, data, out_channels);
+            }
+        }
+    });
+    let out_err_cb = Box::new(|e: B::Error| log::error!("output stream error: {}", e));
+    let output_stream = backend
+        .create_output_stream(&out_device, config, out_data_cb, out_err_cb)
+        .map_err(|e| Error::AudioBackendError(format!("Failed to create output stream: {}", e)))?;
+
+    input_stream
+        .play()
+        .map_err(|e| Error::AudioBackendError(format!("Failed to start input stream: {}", e)))?;
+    output_stream
+        .play()
+        .map_err(|e| Error::AudioBackendError(format!("Failed to start output stream: {}", e)))?;
+
+    Ok(AudioHandle {
+        _stream: Box::new(output_stream),
+        _input_stream: Some(Box::new(input_stream)),
         plugin,
     })
 }

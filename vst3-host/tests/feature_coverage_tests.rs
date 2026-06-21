@@ -421,6 +421,74 @@ fn test_render_to_wav_produces_audio() {
     println!("rendered {} bytes, peak {peak:.3}", bytes.len());
 }
 
+/// Offline effect-input path: feed a loud signal through an effect plugin and confirm the
+/// input reaches the plugin's DSP — output with signal must exceed output with silence.
+/// This verifies the audio-input plumbing (used by `play_with_input`) without a live device.
+#[test]
+#[ignore = "Requires an effect VST3 (Surge XT Effects / Valhalla) installed"]
+fn test_effect_processes_audio_input() {
+    let _guard = plugin_guard();
+    // Effects are free system plugins; load by known path (not discovery) to stay safe.
+    let candidates = [
+        "/Library/Audio/Plug-Ins/VST3/Surge XT Effects.vst3",
+        "/Library/Audio/Plug-Ins/VST3/ValhallaSupermassive.vst3",
+    ];
+    let Some(path) = candidates
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .copied()
+    else {
+        println!("No effect plugin installed, skipping");
+        return;
+    };
+
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .build()
+        .expect("build host");
+    let mut plugin = host.load_plugin(path).expect("load effect");
+    assert!(
+        plugin.info().audio_inputs > 0,
+        "expected an effect with audio inputs"
+    );
+    plugin.start_processing().expect("start_processing");
+
+    // Measure output peak over many blocks for: silence input, then loud-sine input.
+    fn run(plugin: &mut Plugin, amp: f32) -> f32 {
+        let mut phase = 0.0f32;
+        let mut peak = 0.0f32;
+        for _ in 0..60 {
+            let mut buf = AudioBuffers::new(2, 2, 512, 48000.0);
+            for frame in 0..512 {
+                let s = amp * (phase).sin();
+                phase += 2.0 * std::f32::consts::PI * 220.0 / 48000.0;
+                for ch in buf.inputs.iter_mut() {
+                    ch[frame] = s;
+                }
+            }
+            plugin.process_audio(&mut buf).expect("process_audio");
+            for ch in &buf.outputs {
+                for &s in ch {
+                    peak = peak.max(s.abs());
+                }
+            }
+        }
+        peak
+    }
+
+    let silent_peak = run(&mut plugin, 0.0);
+    let signal_peak = run(&mut plugin, 0.5);
+    plugin.stop_processing().ok();
+
+    println!("effect output peak: silence={silent_peak:.4}, signal={signal_peak:.4}");
+    assert!(
+        signal_peak > silent_peak + 0.001,
+        "effect output did not respond to input (silence {silent_peak}, signal {signal_peak}) \
+         — audio-input path not delivering"
+    );
+}
+
 // --- Pure-logic tests (run in CI without a plugin) ---------------------------
 
 /// The builder records tempo / time-signature on the config without needing a plugin.

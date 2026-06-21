@@ -187,6 +187,22 @@ pub fn play(plugin: Plugin) -> Result<crate::AudioHandle> {
     crate::playback::play_with_backend(&backend, plugin, config)
 }
 
+/// Host an effect plugin on live audio input: capture from the default input device, process
+/// through the plugin, and play the result on the default output device.
+///
+/// The instrument counterpart is [`play`]. Returns an [`AudioHandle`](crate::AudioHandle)
+/// that keeps the streams alive and lets you control the plugin; dropping it stops audio.
+#[cfg(feature = "cpal-backend")]
+pub fn play_with_input(plugin: Plugin) -> Result<crate::AudioHandle> {
+    let backend = crate::backends::CpalBackend::new()?;
+    let config = crate::audio::AudioConfig {
+        input_channels: 2,
+        output_channels: 2,
+        ..Default::default()
+    };
+    crate::playback::play_with_input_backend(&backend, plugin, config)
+}
+
 /// Discover all VST3 plugins in the standard system locations.
 ///
 /// Scans the platform's standard VST3 directories and returns metadata for each

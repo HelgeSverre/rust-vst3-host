@@ -528,6 +528,23 @@ impl Vst3Host {
         crate::playback::play_with_backend(&backend, plugin, config)
     }
 
+    /// Host a plugin on **live audio input** (effect hosting): capture from the default input
+    /// device, process through the plugin, and play the result on the default output device.
+    ///
+    /// Use this for effect plugins (EQ, reverb, compressor); for instruments use
+    /// [`Self::play`]. Control the plugin via the returned [`AudioHandle`].
+    ///
+    /// [`AudioHandle`]: crate::AudioHandle
+    pub fn play_with_input(&self, plugin: Plugin) -> Result<crate::AudioHandle> {
+        let backend = crate::backends::CpalBackend::new()?;
+        let config = crate::audio::AudioConfig {
+            input_channels: 2,
+            output_channels: 2,
+            ..self.config
+        };
+        crate::playback::play_with_input_backend(&backend, plugin, config)
+    }
+
     /// Play a plugin through the default device using the **lock-free** real-time path
     /// (a [`RealtimePluginRunner`]) instead of the mutex-based [`Self::play`].
     ///
