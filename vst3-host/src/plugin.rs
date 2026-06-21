@@ -136,6 +136,11 @@ pub(crate) trait PluginInternal: Send {
     fn tail_samples(&self) -> u32 {
         0
     }
+    /// Resolve a MIDI controller `(bus, channel, cc)` to a parameter id via `IMidiMapping`.
+    /// Defaults to `None` (plugin doesn't implement the interface, or no mapping / isolation).
+    fn midi_cc_to_parameter(&self, _bus: i32, _channel: i16, _cc: u16) -> Option<u32> {
+        None
+    }
     /// Serialize the plugin's current state to an opaque byte blob.
     fn save_state(&self) -> Result<Vec<u8>> {
         Err(Error::Other(
@@ -304,6 +309,20 @@ impl Plugin {
             .as_ref()
             .map(|i| i.tail_samples())
             .unwrap_or(0)
+    }
+
+    /// Resolve a MIDI controller to the parameter it's mapped to, via the plugin's
+    /// `IMidiMapping` (`getMidiControllerAssignment`).
+    ///
+    /// `bus` is the event input bus index (usually `0`), `channel` the 0-based MIDI channel,
+    /// and `cc` the MIDI controller number (`0–127`, or the VST3 specials such as `128`
+    /// aftertouch / `129` pitch-bend). Returns the parameter id the controller drives, or
+    /// `None` if the plugin doesn't implement `IMidiMapping`, the controller is unmapped, or
+    /// the plugin is process-isolated (not bridged).
+    pub fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
+        self.internal
+            .as_ref()?
+            .midi_cc_to_parameter(bus, channel, cc)
     }
 
     /// Get a parameter value by ID
