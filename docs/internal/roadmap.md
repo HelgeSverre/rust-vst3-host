@@ -15,10 +15,11 @@ inspector port (2a), `IPlugFrame` resize + macOS editor embedding (2c), MIDI-out
 (in-proc + isolated), crash recovery, processor-bound + sample-accurate parameter
 automation, and `window.rs`→objc2 (4a) are all done.
 
-**The one remaining functional gap: GUI across the process boundary (3e)** — the helper
-still errors on `CreateGui`. See the 2026-06-20 functional-gaps exploration for the approach
-(helper-owned window). Secondary: Windows/Linux editor *embedding* (macOS-only today,
-build-only off-platform), the VST3 call-logger idea, and the deferred egui/eframe 0.34 bump.
+All the originally-scoped functional gaps are now done, including **GUI across the process
+boundary (3e)** — the helper owns its editor window (macOS: NSApplication event pump on the
+main thread, commands on a worker), verified interactively. Remaining items are secondary:
+Windows/Linux editor *embedding* (macOS-only today, build-only off-platform), the VST3
+call-logger idea, and the deferred egui/eframe 0.34 bump.
 
 ## State at resume
 
@@ -93,8 +94,9 @@ examples compile, reached phase by phase.
   the child is killed), a crashed/exited helper surfaces as a disconnect error, and a
   dead helper short-circuits. Verified by `test_isolation_dead_helper_errors_fast`
   (errors in <1s, no hang). Auto-respawn-and-reload is the one remaining sub-item.
-- [ ] 3e. Plugin GUI across the process boundary (CreateGui/CloseGui currently error).
-  REMAINING.
+- [x] 3e. Plugin GUI across the process boundary — DONE (macOS). Helper owns its editor
+  window (main-thread NSApplication event pump + worker-thread commands); `CreateGui` returns
+  the real editor size. `just isolated-gui` / `examples/isolated_gui.rs`.
 
 ## Phase 4 — Polish
 - [x] Deleted the dead stub `objc_conflict_resolver.rs` + its misleading "conflicts
@@ -142,8 +144,7 @@ A multi-agent analysis produced an incremental, compile-at-each-step slice plan.
 - [x] Isolation crash recovery (`Error::PluginCrashed` + `Plugin::recover()`).
 - [x] Parameter changes reach the processor (input parameter queue), not just the controller.
 - [x] 4a. `window.rs` cocoa → objc2 migration.
-- [ ] 3e. Plugin GUI across the process boundary (helper-owned window; see the
-  2026-06-20 functional-gaps exploration).
+- [x] 3e. Plugin GUI across the process boundary (helper-owned window; macOS).
 - [ ] MIDI-out capture in isolation observed with a real emitter (no installed plugin emits
   without GUI config; covered by serde wire test + parity test for now).
 - [x] Sample-accurate parameter automation on top of the per-block queue
