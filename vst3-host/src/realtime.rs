@@ -51,6 +51,8 @@ pub struct RealtimePluginRunner {
 /// without locking. Lives on the control thread; the runner lives on the audio thread.
 pub struct RtControl {
     tx: Producer<RtCommand>,
+    /// Count of commands dropped because the queue was full (observability).
+    dropped: u64,
 }
 
 impl RealtimePluginRunner {
@@ -62,7 +64,7 @@ impl RealtimePluginRunner {
     /// and worst-case control burst (e.g. 1024).
     pub fn new(plugin: Plugin, command_capacity: usize) -> (Self, RtControl) {
         let (tx, rx) = RingBuffer::new(command_capacity.max(1));
-        (Self { plugin, rx }, RtControl { tx })
+        (Self { plugin, rx }, RtControl { tx, dropped: 0 })
     }
 
     /// Begin processing. Call once before the first [`process`](Self::process).
@@ -110,13 +112,29 @@ impl RtControl {
     /// Queue a MIDI event for the next block. Returns `false` if the command queue is full
     /// (the event is dropped rather than blocking the caller).
     pub fn send_midi(&mut self, event: MidiEvent) -> bool {
-        self.tx.push(RtCommand::Midi(event)).is_ok()
+        let ok = self.tx.push(RtCommand::Midi(event)).is_ok();
+        self.track(ok)
     }
 
     /// Queue a normalized parameter change (`0.0..=1.0`) for the next block. Returns `false`
     /// if the queue is full.
     pub fn set_parameter(&mut self, id: u32, value: f64) -> bool {
-        self.tx.push(RtCommand::Param { id, value }).is_ok()
+        let ok = self.tx.push(RtCommand::Param { id, value }).is_ok();
+        self.track(ok)
+    }
+
+    /// Total number of commands dropped because the queue was full since this control was
+    /// created. A persistently rising count means the queue capacity is too small for the
+    /// control rate.
+    pub fn dropped_command_count(&self) -> u64 {
+        self.dropped
+    }
+
+    fn track(&mut self, ok: bool) -> bool {
+        if !ok {
+            self.dropped += 1;
+        }
+        ok
     }
 }
 
@@ -128,10 +146,16 @@ mod tests {
     fn control_queue_reports_full_without_blocking() {
         // A tiny capacity makes the drop-on-full behavior observable without a plugin.
         let (tx, _rx) = RingBuffer::<RtCommand>::new(2);
-        let mut control = RtControl { tx };
+        let mut control = RtControl { tx, dropped: 0 };
         assert!(control.set_parameter(1, 0.5));
         assert!(control.set_parameter(1, 0.6));
         // Third push exceeds capacity (nothing has been drained) → dropped, not blocked.
         assert!(!control.set_parameter(1, 0.7));
+        assert!(!control.send_midi(crate::midi::MidiEvent::NoteOn {
+            channel: crate::midi::MidiChannel::Ch1,
+            note: 60,
+            velocity: 100
+        }));
+        assert_eq!(control.dropped_command_count(), 2);
     }
 }

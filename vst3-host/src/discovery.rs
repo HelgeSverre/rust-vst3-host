@@ -494,11 +494,15 @@ pub fn get_vst3_binary_path(bundle_path: &Path) -> Result<PathBuf> {
     {
         // Windows: .vst3 file or folder structure
         if bundle_path.is_dir() {
-            // Look for .vst3 file in Contents/x86_64-win or Contents/x86-win
-            let x64_path = bundle_path.join("Contents").join("x86_64-win");
-            let x86_path = bundle_path.join("Contents").join("x86-win");
+            // Look for the .vst3 in the per-arch Contents folder. VST3 uses `arm64-win`
+            // (and `arm64ec-win`) for ARM64 — not `aarch64-win`. Native arch first.
+            let contents = bundle_path.join("Contents");
+            let arm64_path = contents.join("arm64-win");
+            let arm64ec_path = contents.join("arm64ec-win");
+            let x64_path = contents.join("x86_64-win");
+            let x86_path = contents.join("x86-win");
 
-            for contents_path in &[x64_path, x86_path] {
+            for contents_path in &[arm64_path, arm64ec_path, x64_path, x86_path] {
                 if let Ok(entries) = std::fs::read_dir(contents_path) {
                     for entry in entries.flatten() {
                         let file_path = entry.path();
@@ -517,6 +521,7 @@ pub fn get_vst3_binary_path(bundle_path: &Path) -> Result<PathBuf> {
         if bundle_path.is_dir() {
             let contents_path = bundle_path.join("Contents");
             let arch_paths = [
+                contents_path.join("aarch64-linux"),
                 contents_path.join("x86_64-linux"),
                 contents_path.join("i386-linux"),
             ];

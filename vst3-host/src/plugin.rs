@@ -35,6 +35,21 @@ pub struct PluginInfo {
     pub has_gui: bool,
 }
 
+/// A saved plugin preset: the plugin's identity plus its opaque state blob.
+///
+/// Written/read by [`Plugin::save_preset`] / [`Plugin::load_preset`]. The `uid` lets a
+/// loader reject a preset that belongs to a different plugin (whose state bytes would be
+/// meaningless or harmful).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginPreset {
+    /// The originating plugin's unique class id ([`PluginInfo::uid`]).
+    pub uid: String,
+    /// The originating plugin's display name (for friendly mismatch messages).
+    pub plugin_name: String,
+    /// The plugin's opaque serialized state (from [`Plugin::save_state`]).
+    pub state: Vec<u8>,
+}
+
 /// VST3 plugin instance
 #[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
 pub struct Plugin {
@@ -453,8 +468,8 @@ impl Plugin {
     /// snapshot a session. Call this on the main thread (see the
     /// [threading model](https://docs.rs/vst3-host)).
     ///
-    /// Returns an error for plugins that don't implement state saving, or when running
-    /// under process isolation (not yet bridged across the boundary).
+    /// Works both in-process and across process isolation (the state blob is marshalled over
+    /// the IPC boundary). Returns an error for plugins that don't implement state saving.
     pub fn save_state(&self) -> Result<Vec<u8>> {
         self.internal
             .as_ref()
@@ -473,6 +488,39 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .load_state(data)
+    }
+
+    /// Save this plugin's state to a file as a [`PluginPreset`] (JSON: the plugin's `uid`
+    /// and name plus the opaque state blob). The embedded `uid` lets [`Self::load_preset`]
+    /// reject a preset saved from a different plugin.
+    pub fn save_preset<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
+        let info = self.info();
+        let preset = PluginPreset {
+            uid: info.uid.clone(),
+            plugin_name: info.name.clone(),
+            state: self.save_state()?,
+        };
+        let json = serde_json::to_vec_pretty(&preset)
+            .map_err(|e| Error::Other(format!("serialize preset: {e}")))?;
+        std::fs::write(path, json).map_err(|e| Error::Other(format!("write preset: {e}")))?;
+        Ok(())
+    }
+
+    /// Load a [`PluginPreset`] file written by [`Self::save_preset`] and apply its state.
+    /// Returns an error if the preset's `uid` doesn't match this plugin (loading another
+    /// plugin's state is undefined).
+    pub fn load_preset<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<()> {
+        let bytes = std::fs::read(path).map_err(|e| Error::Other(format!("read preset: {e}")))?;
+        let preset: PluginPreset = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::Other(format!("parse preset: {e}")))?;
+        if preset.uid != self.info().uid {
+            return Err(Error::Other(format!(
+                "preset is for a different plugin ({}, expected {})",
+                preset.plugin_name,
+                self.info().name
+            )));
+        }
+        self.load_state(&preset.state)
     }
 
     /// The OS process id of the isolated helper hosting this plugin, or `None` if it runs
