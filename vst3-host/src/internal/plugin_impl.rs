@@ -43,6 +43,12 @@ pub struct PluginImpl {
     is_processing: bool,
     sample_rate: f64,
     block_size: usize,
+    /// Transport tempo (BPM) advertised in the host `ProcessContext`.
+    tempo: f64,
+    /// Time signature numerator advertised in the host `ProcessContext`.
+    time_sig_numerator: i32,
+    /// Time signature denominator advertised in the host `ProcessContext`.
+    time_sig_denominator: i32,
 
     // Host data structures
     process_data: Option<Box<HostProcessData>>,
@@ -103,6 +109,22 @@ struct SendChannelPtrs(Vec<Vec<*mut f32>>);
 unsafe impl Send for SendChannelPtrs {}
 
 impl PluginImpl {
+    /// Configure the transport advertised to the plugin in the host `ProcessContext`.
+    ///
+    /// Call before processing starts (the values are baked into the context when
+    /// `create_process_data` runs during `start_processing`). The musical playhead
+    /// (`projectTimeMusic`) derives from `tempo` as the transport advances.
+    pub fn set_transport(
+        &mut self,
+        tempo: f64,
+        time_sig_numerator: i32,
+        time_sig_denominator: i32,
+    ) {
+        self.tempo = tempo;
+        self.time_sig_numerator = time_sig_numerator;
+        self.time_sig_denominator = time_sig_denominator;
+    }
+
     /// Get parameter changes captured from the plugin GUI
     pub fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
         if let Some(ref handler) = self.component_handler {
@@ -287,6 +309,9 @@ impl PluginImpl {
                 is_processing: false,
                 sample_rate: 44100.0,
                 block_size: 512,
+                tempo: 120.0,
+                time_sig_numerator: 4,
+                time_sig_denominator: 4,
                 process_data: None,
                 component_handler: Some(component_handler),
                 pending_param_changes: Vec::new(),
@@ -486,9 +511,9 @@ impl PluginImpl {
 
             // Initialize process context
             data.process_context.sampleRate = self.sample_rate;
-            data.process_context.tempo = 120.0;
-            data.process_context.timeSigNumerator = 4;
-            data.process_context.timeSigDenominator = 4;
+            data.process_context.tempo = self.tempo;
+            data.process_context.timeSigNumerator = self.time_sig_numerator;
+            data.process_context.timeSigDenominator = self.time_sig_denominator;
             // `state` is `uint32`; the StatesAndFlags_ constants are generated as `i32` on
             // some targets (Windows) and `u32` on others (macOS), so cast to the field type.
             data.process_context.state = (ProcessContext_::StatesAndFlags_::kPlaying

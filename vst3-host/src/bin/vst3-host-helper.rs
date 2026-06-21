@@ -138,11 +138,16 @@ fn handle(
             path,
             sample_rate: sr,
             block_size,
+            tempo,
+            time_sig_numerator,
+            time_sig_denominator,
         } => {
             *sample_rate = sr;
             let mut host = match Vst3Host::builder()
                 .sample_rate(sr)
                 .block_size(block_size as usize)
+                .tempo(tempo)
+                .time_signature(time_sig_numerator, time_sig_denominator)
                 .build()
             {
                 Ok(h) => h,

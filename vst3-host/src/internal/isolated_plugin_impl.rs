@@ -23,6 +23,13 @@ pub struct IsolatedPluginImpl {
     sample_rate: f64,
     /// Current block size
     block_size: usize,
+    /// Transport tempo (BPM) advertised in the helper's host `ProcessContext`
+    /// (also used to reload after a crash).
+    tempo: f64,
+    /// Time signature numerator advertised in the helper's host `ProcessContext`.
+    time_sig_numerator: i32,
+    /// Time signature denominator advertised in the helper's host `ProcessContext`.
+    time_sig_denominator: i32,
     /// Whether the plugin is currently processing
     is_processing: bool,
     /// Whether the plugin has an open editor
@@ -41,11 +48,15 @@ const MAX_OUTPUT_MIDI: usize = 4096;
 
 impl IsolatedPluginImpl {
     /// Create a new isolated plugin implementation
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         process: PluginHostProcess,
         info: PluginInfo,
         sample_rate: f64,
         block_size: usize,
+        tempo: f64,
+        time_sig_numerator: i32,
+        time_sig_denominator: i32,
         output_channels: usize,
     ) -> Self {
         Self {
@@ -53,6 +64,9 @@ impl IsolatedPluginImpl {
             info,
             sample_rate,
             block_size,
+            tempo,
+            time_sig_numerator,
+            time_sig_denominator,
             is_processing: false,
             has_open_editor: false,
             editor_size: None,
@@ -318,6 +332,9 @@ impl PluginInternal for IsolatedPluginImpl {
             path: self.info.path.display().to_string(),
             sample_rate: self.sample_rate,
             block_size: self.block_size as u32,
+            tempo: self.tempo,
+            time_sig_numerator: self.time_sig_numerator,
+            time_sig_denominator: self.time_sig_denominator,
         }) {
             Ok(HostResponse::PluginInfo { .. }) => {}
             Ok(HostResponse::Error { message }) => {

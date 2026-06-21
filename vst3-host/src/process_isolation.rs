@@ -28,6 +28,12 @@ pub enum HostCommand {
         sample_rate: f64,
         /// Block size to configure the plugin for.
         block_size: u32,
+        /// Transport tempo (BPM) to advertise in the plugin's host `ProcessContext`.
+        tempo: f64,
+        /// Time signature numerator to advertise in the host `ProcessContext`.
+        time_sig_numerator: i32,
+        /// Time signature denominator to advertise in the host `ProcessContext`.
+        time_sig_denominator: i32,
     },
     /// Unload the current plugin
     UnloadPlugin,
