@@ -49,8 +49,12 @@ correctness fix —
   in-process plugin applies it. Wire round-trip test + isolation integration test (value
   applied across the boundary). Completes the 1.7 sample-accurate story for both paths.
 
+- **2.5**: input-stream buffer-size negotiation — `create_input_stream` now resolves the
+  device's supported range (was an unconditional `BufferSize::Fixed` that CoreAudio rejects)
+  via a shared, unit-tested `clamp_block_to_buffer_size` + `resolve_buffer_size`. 4 unit tests.
+
 **Next up** (deferred, still open): 2.3 denormal guard (ARM-unverifiable), 4.2/4.3 inspector
-polish, 4.5 inspector audio export, 2.5 input buffer, and the rest of Tier 3/4.
+polish, 4.5 inspector audio export, and the rest of Tier 3/4.
 
 **Known flake** (pre-existing, not CI-affecting): `test_isolation_output_midi_parity`
 intermittently SIGABRTs with "Pure virtual function called!" while the helper *loads* Dexed

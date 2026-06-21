@@ -9,38 +9,71 @@ use cpal::{
     BufferSize, Device, Stream, StreamConfig, SupportedBufferSize,
 };
 
-/// Pick a buffer size the device will actually accept for the requested channel
-/// count and sample rate.
+/// Clamp a requested `block_size` into a device-advertised supported buffer range.
 ///
-/// Many devices (notably CoreAudio on macOS) reject `BufferSize::Fixed` outright, so
-/// we only request a fixed size when the device advertises a supported range — and
-/// then clamp the requested `block_size` into it. Otherwise we fall back to
-/// `BufferSize::Default` and let the device choose. The channel count and sample rate
-/// are NOT changed here: the playback bridge interleaves based on the requested
-/// channel count, so silently changing it would garble the output.
+/// `SupportedBufferSize::Range` → `Fixed(block_size clamped to [min, max])`;
+/// `Unknown` → `Default` (the device gives no range, so let it choose). Pure and unit-tested.
+fn clamp_block_to_buffer_size(supported: &SupportedBufferSize, block_size: u32) -> BufferSize {
+    match supported {
+        SupportedBufferSize::Range { min, max } => BufferSize::Fixed(block_size.clamp(*min, *max)),
+        SupportedBufferSize::Unknown => BufferSize::Default,
+    }
+}
+
+/// Pick a buffer size the device will actually accept, given its advertised config ranges,
+/// the requested sample rate / channel count, and the desired `block_size`.
+///
+/// Many devices (notably CoreAudio on macOS) reject `BufferSize::Fixed` outright, so we only
+/// request a fixed size when a matching range is advertised — and clamp into it. Otherwise we
+/// fall back to `BufferSize::Default`. The channel count and sample rate are NOT changed here:
+/// the bridge interleaves based on the requested channel count, so silently changing it would
+/// garble audio.
+fn resolve_buffer_size(
+    ranges: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+    want_sr: u32,
+    want_ch: u16,
+    block_size: u32,
+) -> BufferSize {
+    for range in ranges {
+        if range.channels() != want_ch {
+            continue;
+        }
+        if want_sr < range.min_sample_rate() || want_sr > range.max_sample_rate() {
+            continue;
+        }
+        return clamp_block_to_buffer_size(range.buffer_size(), block_size);
+    }
+    BufferSize::Default
+}
+
+/// Resolve the output-stream buffer size for `device` and `config`.
 fn resolve_output_buffer_size(device: &Device, config: &AudioConfig) -> BufferSize {
     // cpal 0.18: `SampleRate` is a `u32` type alias.
-    let want_sr = config.sample_rate as u32;
-    let want_ch = config.output_channels as u16;
-
-    if let Ok(ranges) = device.supported_output_configs() {
-        for range in ranges {
-            if range.channels() != want_ch {
-                continue;
-            }
-            if want_sr < range.min_sample_rate() || want_sr > range.max_sample_rate() {
-                continue;
-            }
-            return match range.buffer_size() {
-                SupportedBufferSize::Range { min, max } => {
-                    BufferSize::Fixed((config.block_size as u32).clamp(*min, *max))
-                }
-                SupportedBufferSize::Unknown => BufferSize::Default,
-            };
-        }
+    match device.supported_output_configs() {
+        Ok(ranges) => resolve_buffer_size(
+            ranges,
+            config.sample_rate as u32,
+            config.output_channels as u16,
+            config.block_size as u32,
+        ),
+        Err(_) => BufferSize::Default,
     }
+}
 
-    BufferSize::Default
+/// Resolve the input-stream buffer size for `device` and `config`.
+///
+/// Mirrors [`resolve_output_buffer_size`] for the capture side: an unconditional
+/// `BufferSize::Fixed` (what this used to send) is rejected by CoreAudio on many input devices.
+fn resolve_input_buffer_size(device: &Device, config: &AudioConfig) -> BufferSize {
+    match device.supported_input_configs() {
+        Ok(ranges) => resolve_buffer_size(
+            ranges,
+            config.sample_rate as u32,
+            config.input_channels as u16,
+            config.block_size as u32,
+        ),
+        Err(_) => BufferSize::Default,
+    }
 }
 
 /// CPAL stream wrapper
@@ -196,7 +229,7 @@ impl AudioBackend for CpalBackend {
         let stream_config = StreamConfig {
             channels: config.input_channels as u16,
             sample_rate: config.sample_rate as u32,
-            buffer_size: BufferSize::Fixed(config.block_size as u32),
+            buffer_size: resolve_input_buffer_size(device, &config),
         };
 
         let stream = device
@@ -223,5 +256,48 @@ impl AudioBackend for CpalBackend {
 impl Default for CpalBackend {
     fn default() -> Self {
         Self::new().expect("Failed to create CPAL backend")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_within_range_keeps_requested_size() {
+        let supported = SupportedBufferSize::Range { min: 64, max: 2048 };
+        assert_eq!(
+            clamp_block_to_buffer_size(&supported, 512),
+            BufferSize::Fixed(512)
+        );
+    }
+
+    #[test]
+    fn clamp_below_min_raises_to_min() {
+        let supported = SupportedBufferSize::Range {
+            min: 256,
+            max: 2048,
+        };
+        assert_eq!(
+            clamp_block_to_buffer_size(&supported, 64),
+            BufferSize::Fixed(256)
+        );
+    }
+
+    #[test]
+    fn clamp_above_max_lowers_to_max() {
+        let supported = SupportedBufferSize::Range { min: 64, max: 1024 };
+        assert_eq!(
+            clamp_block_to_buffer_size(&supported, 4096),
+            BufferSize::Fixed(1024)
+        );
+    }
+
+    #[test]
+    fn clamp_unknown_range_falls_back_to_default() {
+        assert_eq!(
+            clamp_block_to_buffer_size(&SupportedBufferSize::Unknown, 512),
+            BufferSize::Default
+        );
     }
 }
