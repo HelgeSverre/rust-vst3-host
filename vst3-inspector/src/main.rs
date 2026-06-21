@@ -275,6 +275,33 @@ fn run_selftest(path: &str) -> i32 {
     0
 }
 
+/// Apply a Catppuccin Frappé-flavoured dark theme to egui (replaces the `catppuccin-egui`
+/// crate, which lags egui's releases).
+fn apply_frappe_theme(ctx: &egui::Context) {
+    use egui::Color32;
+    let base = Color32::from_rgb(0x30, 0x34, 0x46);
+    let mantle = Color32::from_rgb(0x29, 0x2c, 0x3c);
+    let surface0 = Color32::from_rgb(0x41, 0x45, 0x59);
+    let surface1 = Color32::from_rgb(0x51, 0x57, 0x6d);
+    let text = Color32::from_rgb(0xc6, 0xd0, 0xf5);
+    let blue = Color32::from_rgb(0x8c, 0xaa, 0xee);
+
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(text);
+    v.panel_fill = base;
+    v.window_fill = mantle;
+    v.extreme_bg_color = mantle;
+    v.faint_bg_color = surface0;
+    v.hyperlink_color = blue;
+    v.widgets.noninteractive.bg_fill = base;
+    v.widgets.inactive.bg_fill = surface0;
+    v.widgets.hovered.bg_fill = surface1;
+    v.widgets.active.bg_fill = surface1;
+    v.selection.bg_fill = blue.gamma_multiply(0.4);
+    v.selection.stroke = egui::Stroke::new(1.0, blue);
+    ctx.set_visuals(v);
+}
+
 fn main() {
     // Headless self-test mode: `vst3-inspector --selftest [plugin.vst3]`.
     let args: Vec<String> = std::env::args().collect();
@@ -301,7 +328,7 @@ fn main() {
         "VST3 Plugin Inspector",
         options,
         Box::new(|cc| {
-            catppuccin_egui::set_theme(&cc.egui_ctx, catppuccin_egui::FRAPPE);
+            apply_frappe_theme(&cc.egui_ctx);
 
             let mut inspector = VST3Inspector::from_path(PLUGIN_PATH);
 
@@ -508,14 +535,23 @@ enum ParameterFilter {
 }
 
 impl eframe::App for VST3Inspector {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Pull current output levels from the library and feed the VU meter cache.
-        self.update_vu_meters();
+    // eframe 0.34 made `ui` the required trait method; this app builds its own panels on the
+    // `Context` from `update` (still called by eframe each frame), so `ui` is unused.
+    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 
-        // Repaint while audio is running so the VU meter animates.
-        if self.audio.is_some() {
-            ctx.request_repaint();
-        }
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Pull current output levels, plugin-emitted MIDI, and plugin-side parameter edits.
+        self.update_vu_meters();
+        self.poll_plugin_output_midi();
+        self.poll_plugin_parameter_changes();
+
+        // Keep the UI live without busy-looping. egui is reactive by default (repaints only
+        // on input), which makes a host UI feel dead between events; an *unbounded*
+        // `request_repaint()` instead pegs the render loop at the monitor refresh rate and
+        // hammers the plugin mutex (contending with the audio thread → input lag). Capping at
+        // ~60 fps with `request_repaint_after` keeps meters/clicks responsive at far lower
+        // cost. (Input events still trigger an immediate repaint.)
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
         // Top header panel
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
@@ -598,6 +634,72 @@ impl eframe::App for VST3Inspector {
 }
 
 impl VST3Inspector {
+    /// Drain MIDI the plugin emitted during processing (arpeggiators, MPE, step
+    /// sequencers, ...) and log it in the MIDI monitor as Output. The plugin only emits
+    /// while it is processing audio, so this is a no-op when nothing is playing.
+    fn poll_plugin_output_midi(&mut self) {
+        use vst3_host::midi::MidiEvent;
+        let events = match &self.audio {
+            Some(a) => a.lock().take_output_midi(),
+            None => return,
+        };
+        for ev in events {
+            let (ty, ch, d1, d2): (u16, u8, u8, u8) = match ev {
+                MidiEvent::NoteOn {
+                    channel,
+                    note,
+                    velocity,
+                } => (0, channel.as_index(), note, velocity),
+                MidiEvent::NoteOff {
+                    channel,
+                    note,
+                    velocity,
+                } => (1, channel.as_index(), note, velocity),
+                MidiEvent::ControlChange {
+                    channel,
+                    controller,
+                    value,
+                } => (3, channel.as_index(), controller, value),
+                MidiEvent::ProgramChange { channel, program } => {
+                    (4, channel.as_index(), program, 0)
+                }
+                MidiEvent::ChannelAftertouch { channel, pressure } => {
+                    (2, channel.as_index(), pressure, 0)
+                }
+                MidiEvent::PolyAftertouch {
+                    channel,
+                    note,
+                    pressure,
+                } => (2, channel.as_index(), note, pressure),
+                // PitchBend and any future variants aren't shown in the monitor's note grid.
+                _ => continue,
+            };
+            self.log_midi_event(MidiDirection::Output, ty, ch, d1, d2);
+        }
+    }
+
+    /// Reflect parameter changes the plugin made through its own editor (turning a knob in
+    /// the plugin GUI calls back via the component handler) into the inspector's parameter
+    /// list, so the displayed values stay in sync with the plugin's editor.
+    fn poll_plugin_parameter_changes(&mut self) {
+        let changes = match &self.audio {
+            Some(a) => a.lock().get_parameter_changes(),
+            None => return,
+        };
+        if changes.is_empty() {
+            return;
+        }
+        if let Some(plugin_info) = &mut self.plugin_info {
+            if let Some(controller_info) = &mut plugin_info.controller_info {
+                for (id, value) in changes {
+                    if let Some(p) = controller_info.parameters.iter_mut().find(|p| p.id == id) {
+                        p.current_value = value;
+                    }
+                }
+            }
+        }
+    }
+
     /// Pull the latest output levels from the playing plugin and feed the VU meter
     /// (peak + peak-hold) caches that the Processing tab reads.
     fn update_vu_meters(&mut self) {
@@ -2836,7 +2938,7 @@ impl VST3Inspector {
         }
 
         // Check for released keys
-        if response.drag_released() || !response.is_pointer_button_down_on() {
+        if response.drag_stopped() || !response.is_pointer_button_down_on() {
             // Mouse up - send note off for all pressed keys
             for &note in self.pressed_keys.clone().iter() {
                 if let Err(e) = self.send_midi_note_off(self.selected_midi_channel, note, 0.0) {

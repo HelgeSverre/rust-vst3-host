@@ -432,6 +432,10 @@ mod macos {
                 false,
             )
         };
+        // We own the window's lifetime via `Retained`; opt out of release-on-close to avoid
+        // a double-free when the editor window is closed.
+        // SAFETY: standard AppKit setter on the main thread.
+        unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&NSString::from_str(&title));
 
         let container = NSView::initWithFrame(

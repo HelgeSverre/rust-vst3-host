@@ -8,6 +8,9 @@
 //! - Plugin GUI window support
 //! - Sample rate and block size controls
 
+// egui 0.34 deprecated the ctx-based panel API; suppressed here as in the inspector.
+#![allow(deprecated)]
+
 use eframe::egui;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -480,6 +483,8 @@ impl PluginGuiApp {
 }
 
 impl eframe::App for PluginGuiApp {
+    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("VST3 Plugin Processing");

@@ -109,6 +109,12 @@ impl PluginWindow {
                 )
             };
 
+            // Programmatic NSWindows default to `releasedWhenClosed = YES`; closing one would
+            // then release it while our `Retained<NSWindow>` also releases on drop — a
+            // double-free that crashes on close. We own the lifetime, so opt out.
+            // SAFETY: standard AppKit setter on the main thread.
+            unsafe { window.setReleasedWhenClosed(false) };
+
             let title = NSString::from_str(&format!("{} - VST3", plugin_info.name));
             window.setTitle(&title);
 
