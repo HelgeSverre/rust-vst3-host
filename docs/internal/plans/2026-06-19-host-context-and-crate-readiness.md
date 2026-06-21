@@ -206,10 +206,15 @@ Sequenced after the above; each is its own plan when picked up:
   (`SaveState`/`LoadState` IPC). Verified by exact byte round-trip + value restore against
   Dexed, in-process and isolated. Single- vs separate-component handled (`setComponentState`
   only for separate controllers).
-- **Editor embedding into egui** (the `egui-widgets` feature) + `IPlugFrame` resize. *(open)*
-- **GUI across the process boundary** (isolated editor windows). *(open)*
-- **MIDI output capture in isolated mode** (in-process already done). *(open)*
-- **Parameter automation execution** (`ParameterAutomation` is computed but not applied). *(open)*
+- **Editor embedding into egui** (the `egui-widgets` feature) + `IPlugFrame` resize — ✅ DONE
+  (macOS: `EmbeddedEditor`, `HostPlugFrame`, `Plugin::take_editor_resize_request`).
+  Windows/Linux embedding still TODO (macOS-only `cfg` today).
+- **GUI across the process boundary** (isolated editor windows). *(open — the one remaining
+  functional gap; helper-owned-window approach in the 2026-06-20 functional-gaps doc.)*
+- **MIDI output capture in isolated mode** — ✅ DONE (piggybacked on the per-block `Process`
+  response; `IsolatedPluginImpl` buffers it; `Plugin::take_output_midi` works isolated).
+- **Parameter automation execution** — ✅ DONE. Changes feed the processor's input parameter
+  queue per block (`set_parameter_at` + sample offsets), dual-written to the controller.
 
 ---
 

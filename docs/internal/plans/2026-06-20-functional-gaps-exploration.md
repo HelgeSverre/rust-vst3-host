@@ -4,16 +4,22 @@ Scoping notes for the five remaining functional gaps after the library extractio
 Read-only exploration (2026-06-20); no code changed. Each section: current state, gap,
 approach, difficulty, the acceptance gate, and dependencies.
 
+> **Update 2026-06-21:** all but one of these have shipped. MIDI-out in isolation, parameter
+> automation, IPlugFrame + resize, and macOS editor embedding are done; the crates.io item was
+> resolved by the `vst3` 0.3 bump (pre-generated bindings → no SDK) and **`vst3-host` 0.1.1 is
+> published (MIT)**. The single remaining gap is **GUI across the isolation boundary** (helper
+> owns its own window — option a below). The original exploration text is kept for reference.
+
 ## At a glance
 
 | Task | Difficulty | Self-contained | Headless gate | Main risk / blocker |
 |------|-----------|----------------|---------------|---------------------|
 | MIDI-out in isolation — ✅ **DONE** | **S** | Yes | serde wire test + parity | Needs a MIDI-emitting test plugin |
-| Parameter automation (apply) — ✅ **DONE** (core) | **S–M** core | Yes (in-proc) | mechanism test + A/B render | Plugins that also smooth params |
-| IPlugFrame + host resize | **S** | Yes (in-proc) | Partial | — (shared plumbing) |
-| Editor embed into egui | **M** mac/win, **L** linux | In-proc only | Partial (interactive) | eframe window-handle access (spike) |
-| GUI across isolation | **M** (helper-owned window) | Reuses window.rs | Partial (interactive) | Helper needs a UI run loop; macOS true-embed blocked |
-| crates.io / VST3_SDK_DIR | **Decision**, not code | N/A | Yes (clean-room build) | **Steinberg SDK license** + upstream `vst3` |
+| Parameter automation (apply) — ✅ **DONE** | **S–M** core | Yes (in-proc) | mechanism test + A/B render | Plugins that also smooth params |
+| IPlugFrame + host resize — ✅ **DONE** | **S** | Yes (in-proc) | Partial | — (shared plumbing) |
+| Editor embed into egui — ✅ **DONE** (macOS) | **M** mac/win, **L** linux | In-proc only | Partial (interactive) | Win/Linux embedding still TODO |
+| GUI across isolation — ⬜ **OPEN** | **M** (helper-owned window) | Reuses window.rs | Partial (interactive) | Helper needs a UI run loop; macOS true-embed blocked |
+| crates.io / VST3_SDK_DIR — ✅ **RESOLVED** (published 0.1.1) | **Decision** | N/A | Yes (clean-room build) | ~~SDK license~~ — moot: vst3 0.3 has no SDK dep |
 
 Two quick, self-contained, headlessly-verifiable wins (MIDI-out in isolation; the core of
 parameter automation) sit next to three GUI/packaging items that are larger, GUI-runtime or

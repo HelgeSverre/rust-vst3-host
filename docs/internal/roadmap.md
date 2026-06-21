@@ -6,6 +6,20 @@
 > play a plugin in <10 lines, zero unsafe in the public API, process isolation by
 > default, CPAL + egui included, cross-platform.
 
+## Status (2026-06-21)
+
+**Released to crates.io as `vst3-host` 0.1.1** (MIT). The SDK blocker is gone — `vst3` 0.3
+ships pre-generated bindings, so there's no `VST3_SDK_DIR`/submodule (both removed) and a
+plain `cargo build` works; CI is green on macOS/Linux/Windows. Phases 0–3 (core), the
+inspector port (2a), `IPlugFrame` resize + macOS editor embedding (2c), MIDI-out capture
+(in-proc + isolated), crash recovery, processor-bound + sample-accurate parameter
+automation, and `window.rs`→objc2 (4a) are all done.
+
+**The one remaining functional gap: GUI across the process boundary (3e)** — the helper
+still errors on `CreateGui`. See the 2026-06-20 functional-gaps exploration for the approach
+(helper-owned window). Secondary: Windows/Linux editor *embedding* (macOS-only today,
+build-only off-platform), the VST3 call-logger idea, and the deferred egui/eframe 0.34 bump.
+
 ## State at resume
 
 Extraction is ~40% real / ~70% surface. The in-process load path
@@ -48,9 +62,9 @@ examples compile, reached phase by phase.
   channel count kept exact so the interleave stays consistent.
 
 ## Phase 2 — Prove consumability + close API gaps
-- [ ] 2a. Port `vst3-inspector` onto the library (regression net). ← NEXT BIG SLICE (XL)
+- [x] 2a. Port `vst3-inspector` onto the library (regression net) — DONE (see Phase 2a).
 - [x] 2b. Implemented `discover_plugins_with_callback` (done in Phase 0c).
-- [ ] 2c. `IPlugFrame` resize + egui embedding helper.
+- [x] 2c. `IPlugFrame` resize + egui embedding helper — DONE (macOS; see below).
 - [x] 2d. Parameter display correctness: added `Plugin::format_parameter` which calls
   the controller's `getParamStringByValue` (verified against Dexed — e.g.
   `MonoMode = "POLY"`). Documented `Parameter` min/max as normalized and
@@ -88,8 +102,8 @@ examples compile, reached phase by phase.
 - [x] 4b (partial). Cleared the `missing_docs` warnings on the IPC protocol types.
   Warnings down 83 → 61. Remaining are mostly the cocoa deprecations (4a) and a few
   platform-conditional dead-code items.
-- [ ] 4a. Migrate `window.rs` `cocoa`/`objc` → `objc2` (clears the remaining ~50
-  deprecation + `cargo-clippy` cfg warnings). GUI work — verify interactively.
+- [x] 4a. Migrate `window.rs` `cocoa`/`objc` → `objc2` (clears the remaining ~50
+  deprecation + `cargo-clippy` cfg warnings). DONE.
 - [ ] 4b (rest). Escalate `missing_docs` to `deny` in CI once 4a is clean.
 - [ ] 4c. Real COM-level tests (load a bundled `.vst3`, run `process()`, assert cleanup).
 
@@ -117,9 +131,8 @@ A multi-agent analysis produced an incremental, compile-at-each-step slice plan.
   and the raw `vst3`/`cpal`/`libloading`/`cocoa`/`objc`/`winapi` deps. `main.rs` 5492 →
   2783. **Verified**: workspace builds + tests green, `just selftest` OK (real audio),
   GUI launches + renders, 0 raw `vst3::`/`ComPtr`/`cpal` refs left, clippy clean.
-- [ ] Slice 9 (interactive-only). Editor window embedding is currently a stubbed no-op
-  (`TODO(port)` in `create_plugin_gui`) — needs `Plugin::open_editor`/`PluginWindow`
-  wiring + a human to see the window. Depends on 2c.
+- [x] Slice 9. Editor window embedding wired — `create_plugin_gui` opens the plugin editor
+  via `Plugin::open_editor`/`PluginWindow`. Verified interactively (macOS).
 
 ## Other remaining (need interactive verification or are GUI-runtime work)
 - [x] 2c. `IPlugFrame` resize (`Plugin::take_editor_resize_request`) + egui embedding helper
@@ -133,7 +146,8 @@ A multi-agent analysis produced an incremental, compile-at-each-step slice plan.
   2026-06-20 functional-gaps exploration).
 - [ ] MIDI-out capture in isolation observed with a real emitter (no installed plugin emits
   without GUI config; covered by serde wire test + parity test for now).
-- [ ] Sample-accurate / timeline parameter automation on top of the per-block queue.
+- [x] Sample-accurate parameter automation on top of the per-block queue
+  (`Plugin::set_parameter_at(sample_offset)`, `ParameterAutomation::points_for_block`).
 - [ ] **VST3 call logger** (idea, from the abandoned `feature/vst3-logger`, commit 69ccc27):
   trace host↔plugin COM traffic (interface, method, direction, args, result, timing, thread)
   with filtering + an inspector tab. The old WIP code predates the workspace split and was
