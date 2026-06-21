@@ -8,7 +8,6 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     BufferSize, Device, Stream, StreamConfig, SupportedBufferSize,
 };
-use std::sync::Arc;
 
 /// Pick a buffer size the device will actually accept for the requested channel
 /// count and sample rate.
@@ -213,51 +212,6 @@ impl AudioBackend for CpalBackend {
             )
             .map_err(|e| {
                 Error::AudioBackendError(format!("Failed to build input stream: {}", e))
-            })?;
-
-        Ok(CpalStream {
-            stream: Some(stream),
-        })
-    }
-
-    fn create_duplex_stream(
-        &self,
-        _input_device: &Self::Device,
-        output_device: &Self::Device,
-        config: AudioConfig,
-        mut data_callback: Box<dyn FnMut(&[f32], &mut [f32]) + Send>,
-        mut error_callback: Box<dyn FnMut(Self::Error) + Send>,
-    ) -> Result<Self::Stream> {
-        // CPAL doesn't directly support duplex streams, so we'll create an output stream
-        // and assume the callback handles both input and output
-        let stream_config = StreamConfig {
-            channels: config.output_channels as u16,
-            sample_rate: config.sample_rate as u32,
-            buffer_size: BufferSize::Fixed(config.block_size as u32),
-        };
-
-        // Create a dummy input buffer
-        let input_buffer = Arc::new(std::sync::Mutex::new(vec![
-            0.0f32;
-            config.block_size
-                * config.input_channels
-        ]));
-        let input_buffer_clone = input_buffer.clone();
-
-        let stream = output_device
-            .build_output_stream(
-                stream_config,
-                move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let input = input_buffer_clone.lock().unwrap();
-                    data_callback(&input, output);
-                },
-                move |err| {
-                    error_callback(Error::AudioBackendError(format!("Stream error: {}", err)));
-                },
-                None,
-            )
-            .map_err(|e| {
-                Error::AudioBackendError(format!("Failed to build duplex stream: {}", e))
             })?;
 
         Ok(CpalStream {

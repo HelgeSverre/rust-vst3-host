@@ -161,17 +161,6 @@ fn test_host_with_custom_backend() {
         ) -> std::result::Result<Self::Stream, Self::Error> {
             Ok(MockStream)
         }
-
-        fn create_duplex_stream(
-            &self,
-            _input_device: &Self::Device,
-            _output_device: &Self::Device,
-            _config: AudioConfig,
-            _data_callback: Box<dyn FnMut(&[f32], &mut [f32]) + Send>,
-            _error_callback: Box<dyn FnMut(Self::Error) + Send>,
-        ) -> std::result::Result<Self::Stream, Self::Error> {
-            Ok(MockStream)
-        }
     }
 
     #[allow(dead_code)]

@@ -236,16 +236,6 @@ pub trait AudioBackend: Send + Sync {
         data_callback: Box<dyn FnMut(&[f32]) + Send>,
         error_callback: Box<dyn FnMut(Self::Error) + Send>,
     ) -> Result<Self::Stream, Self::Error>;
-
-    /// Create a duplex stream (input and output)
-    fn create_duplex_stream(
-        &self,
-        input_device: &Self::Device,
-        output_device: &Self::Device,
-        config: AudioConfig,
-        data_callback: Box<dyn FnMut(&[f32], &mut [f32]) + Send>,
-        error_callback: Box<dyn FnMut(Self::Error) + Send>,
-    ) -> Result<Self::Stream, Self::Error>;
 }
 
 /// Write deinterleaved channel buffers to a 32-bit float WAV file (`WAVE_FORMAT_IEEE_FLOAT`).
