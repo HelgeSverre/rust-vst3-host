@@ -52,9 +52,13 @@ correctness fix —
 - **2.5**: input-stream buffer-size negotiation — `create_input_stream` now resolves the
   device's supported range (was an unconditional `BufferSize::Fixed` that CoreAudio rejects)
   via a shared, unit-tested `clamp_block_to_buffer_size` + `resolve_buffer_size`. 4 unit tests.
+- **2.3**: denormal flush guard — `internal::denormal::DenormalGuard` RAII sets MXCSR FTZ/DAZ
+  (x86) / FPCR FZ (aarch64) for the duration of `PluginImpl::process` (covers simple + realtime
+  paths), restoring prior state on drop. **Verified on ARM** (the earlier "unverifiable" note
+  was wrong): a runtime denormal flushes to exactly 0.0 inside the guard and survives outside.
 
-**Next up** (deferred, still open): 2.3 denormal guard (ARM-unverifiable), 4.2/4.3 inspector
-polish, 4.5 inspector audio export, and the rest of Tier 3/4.
+**Next up** (deferred, still open): 4.2/4.3 inspector polish, 4.5 inspector audio export, and
+the rest of Tier 3/4.
 
 **Known flake** (pre-existing, not CI-affecting): `test_isolation_output_midi_parity`
 intermittently SIGABRTs with "Pure virtual function called!" while the helper *loads* Dexed
