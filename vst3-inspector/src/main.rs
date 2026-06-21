@@ -985,6 +985,16 @@ impl VST3Inspector {
                         {
                             self.load_preset_dialog();
                         }
+                        if ui
+                            .button("Export WAV")
+                            .on_hover_text(
+                                "Render the current plugin state offline to a WAV file \
+                                 (4 s, held C3)",
+                            )
+                            .clicked()
+                        {
+                            self.export_wav_dialog();
+                        }
                     });
                 });
                 ui.add_space(8.0);
@@ -2404,6 +2414,65 @@ impl VST3Inspector {
             Err(e) => {
                 self.set_error(format!("Failed to load preset: {e}"));
             }
+        }
+    }
+
+    /// Render the loaded plugin offline to a WAV file (4 s, a held C3), preserving the current
+    /// state. The live plugin is owned by the `AudioHandle` and some plugins (e.g. Dexed) can't
+    /// have two instances at once, so we snapshot state, drop the live instance, render a fresh
+    /// one via the library's `render_to_wav`, then reload to resume the live view.
+    fn export_wav_dialog(&mut self) {
+        use vst3_host::midi::{MidiChannel, MidiEvent};
+
+        if self.audio.is_none() {
+            self.set_error("No plugin loaded");
+            return;
+        }
+        let plugin_path = self.plugin_path.clone();
+
+        let path = match rfd::FileDialog::new()
+            .set_title("Export Audio to WAV")
+            .add_filter("WAV audio", &["wav"])
+            .set_file_name("export.wav")
+            .save_file()
+        {
+            Some(p) => p,
+            None => return, // user cancelled
+        };
+
+        // Snapshot the live state so the export reflects the user's current tweaks.
+        let state = self.audio.as_ref().and_then(|a| a.lock().save_state().ok());
+
+        // Free the live instance before loading a fresh one for the offline render.
+        self.audio = None;
+
+        let render_result = (|| -> Result<(), String> {
+            let mut plugin = self
+                .host
+                .load_plugin(&plugin_path)
+                .map_err(|e| format!("load for export: {e}"))?;
+            if let Some(ref data) = state {
+                let _ = plugin.load_state(data); // best-effort; render defaults if it fails
+            }
+            let note = MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 110,
+            };
+            vst3_host::simple::render_to_wav(&mut plugin, 4.0, &[note], &path)
+                .map_err(|e| format!("render: {e}"))
+        })();
+
+        // Resume the live view by reloading the plugin (restoring snapshot state if any).
+        self.load_plugin(plugin_path);
+        if let (Some(audio), Some(data)) = (self.audio.as_ref(), state.as_ref()) {
+            let _ = audio.lock().load_state(data);
+            let _ = self.refresh_parameter_values();
+        }
+
+        match render_result {
+            Ok(()) => self.set_error(format!("Exported audio to {}", path.display())),
+            Err(e) => self.set_error(format!("Failed to export audio: {e}")),
         }
     }
 
