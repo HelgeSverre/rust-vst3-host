@@ -115,6 +115,14 @@ pub(crate) trait PluginInternal: Send {
     fn get_units(&self) -> Result<Vec<PluginUnit>> {
         Ok(Vec::new())
     }
+    /// Processing latency in samples (`IAudioProcessor::getLatencySamples`). Defaults to 0.
+    fn latency_samples(&self) -> u32 {
+        0
+    }
+    /// Tail length in samples (`IAudioProcessor::getTailSamples`). Defaults to 0.
+    fn tail_samples(&self) -> u32 {
+        0
+    }
     /// Serialize the plugin's current state to an opaque byte blob.
     fn save_state(&self) -> Result<Vec<u8>> {
         Err(Error::Other(
@@ -227,6 +235,28 @@ impl Plugin {
             .as_ref()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .get_units()
+    }
+
+    /// The plugin's reported processing latency in samples (e.g. from look-ahead or
+    /// oversampling), via `IAudioProcessor::getLatencySamples`. Use it to delay-compensate
+    /// when aligning the plugin's output with other signals. `0` if it reports none, or for
+    /// plugins running under process isolation (not bridged).
+    pub fn latency_samples(&self) -> u32 {
+        self.internal
+            .as_ref()
+            .map(|i| i.latency_samples())
+            .unwrap_or(0)
+    }
+
+    /// The plugin's reported tail length in samples (how long it keeps producing output
+    /// after input stops — e.g. reverb/delay), via `IAudioProcessor::getTailSamples`. `0`
+    /// means no tail; `u32::MAX` means an infinite tail. `0` for isolated plugins (not
+    /// bridged).
+    pub fn tail_samples(&self) -> u32 {
+        self.internal
+            .as_ref()
+            .map(|i| i.tail_samples())
+            .unwrap_or(0)
     }
 
     /// Get a parameter value by ID
