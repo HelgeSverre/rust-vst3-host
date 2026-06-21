@@ -11,7 +11,9 @@ use crate::{
     plugin::{PluginInfo, PluginInternal},
     process_isolation::{HostCommand, HostResponse, PluginHostProcess},
 };
+use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 /// Plugin implementation that communicates with an isolated process
 pub struct IsolatedPluginImpl {
@@ -41,6 +43,10 @@ pub struct IsolatedPluginImpl {
     /// MIDI the plugin has emitted across the boundary, buffered for the host to poll
     /// (mirrors PluginImpl::output_midi). Capped to bound growth if never read.
     output_midi: Mutex<Vec<MidiEvent>>,
+    /// Explicit helper-binary path override (re-used when respawning after a crash).
+    helper_path: Option<PathBuf>,
+    /// Per-command IPC response timeout (re-used when respawning after a crash).
+    response_timeout: Duration,
 }
 
 /// Cap on buffered output MIDI, matching the in-process path's MAX_OUTPUT_MIDI.
@@ -58,6 +64,8 @@ impl IsolatedPluginImpl {
         time_sig_numerator: i32,
         time_sig_denominator: i32,
         output_channels: usize,
+        helper_path: Option<PathBuf>,
+        response_timeout: Duration,
     ) -> Self {
         Self {
             process: Mutex::new(process),
@@ -72,6 +80,8 @@ impl IsolatedPluginImpl {
             editor_size: None,
             output_channels,
             output_midi: Mutex::new(Vec::new()),
+            helper_path,
+            response_timeout,
         }
     }
 
@@ -326,7 +336,7 @@ impl PluginInternal for IsolatedPluginImpl {
             .map_err(|e| Error::Other(format!("Failed to lock process: {}", e)))?;
 
         // Spawn a fresh helper and reload the plugin from the original path + settings.
-        let mut fresh = PluginHostProcess::new()
+        let mut fresh = PluginHostProcess::new(self.helper_path.clone(), self.response_timeout)
             .map_err(|e| Error::ProcessError(format!("Failed to respawn helper: {e}")))?;
         match fresh.send_command(HostCommand::LoadPlugin {
             path: self.info.path.display().to_string(),

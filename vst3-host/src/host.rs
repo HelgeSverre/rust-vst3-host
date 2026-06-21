@@ -21,6 +21,10 @@ pub struct Vst3Host {
     pub(crate) auto_isolate_problematic: bool,
     /// Whether to scan default system paths for plugins
     pub(crate) scan_default_paths: bool,
+    /// Explicit path to the isolation helper binary (overrides the heuristic search).
+    pub(crate) helper_path: Option<PathBuf>,
+    /// How long to wait for an isolated helper response before declaring a timeout.
+    pub(crate) response_timeout: std::time::Duration,
 }
 
 impl Vst3Host {
@@ -179,10 +183,11 @@ impl Vst3Host {
         if !path.exists() {
             return ProbeResult::Failed("plugin path does not exist".to_string());
         }
-        let mut process = match PluginHostProcess::new() {
-            Ok(p) => p,
-            Err(e) => return ProbeResult::Failed(format!("helper unavailable: {e}")),
-        };
+        let mut process =
+            match PluginHostProcess::new(self.helper_path.clone(), self.response_timeout) {
+                Ok(p) => p,
+                Err(e) => return ProbeResult::Failed(format!("helper unavailable: {e}")),
+            };
         match process.send_command(HostCommand::LoadPlugin {
             path: path.display().to_string(),
             sample_rate: self.config.sample_rate,
@@ -245,8 +250,9 @@ impl Vst3Host {
         use crate::process_isolation::{HostCommand, HostResponse, PluginHostProcess};
 
         // Create and start the isolated plugin process
-        let mut process = PluginHostProcess::new()
-            .map_err(|e| Error::Other(format!("Failed to create isolated process: {}", e)))?;
+        let mut process =
+            PluginHostProcess::new(self.helper_path.clone(), self.response_timeout)
+                .map_err(|e| Error::Other(format!("Failed to create isolated process: {}", e)))?;
 
         // Load the plugin in the isolated process
         let response = process
@@ -316,6 +322,8 @@ impl Vst3Host {
             self.config.time_sig_numerator,
             self.config.time_sig_denominator,
             output_channels,
+            self.helper_path.clone(),
+            self.response_timeout,
         );
 
         let plugin = Plugin {
@@ -346,6 +354,8 @@ impl Default for Vst3Host {
             use_process_isolation: false,
             auto_isolate_problematic: false,
             scan_default_paths: true, // Default to true for backward compatibility
+            helper_path: None,
+            response_timeout: crate::process_isolation::DEFAULT_RESPONSE_TIMEOUT,
         }
     }
 }
@@ -361,6 +371,8 @@ pub struct Vst3HostBuilder {
     use_process_isolation: bool,
     auto_isolate_problematic: bool,
     scan_default_paths: bool,
+    helper_path: Option<PathBuf>,
+    response_timeout: Option<std::time::Duration>,
 }
 
 impl Vst3HostBuilder {
@@ -437,7 +449,22 @@ impl Vst3HostBuilder {
         self
     }
 
-    /// Build the VST3 host
+    /// How long to wait for an isolated helper to respond before treating the plugin as hung
+    /// (and killing the helper). Defaults to 5 seconds. Only affects process-isolated loads.
+    pub fn response_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.response_timeout = Some(timeout);
+        self
+    }
+
+    /// Override the path to the `vst3-host-helper` binary used for process isolation, instead
+    /// of the default heuristic search. The `VST3_HOST_HELPER_PATH` environment variable does
+    /// the same. Useful when the helper ships in a non-standard location.
+    pub fn helper_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+        self.helper_path = Some(path.into());
+        self
+    }
+
+    /// Build the configured host.
     pub fn build(self) -> Result<Vst3Host> {
         Ok(Vst3Host {
             config: self.config,
@@ -445,6 +472,10 @@ impl Vst3HostBuilder {
             use_process_isolation: self.use_process_isolation,
             auto_isolate_problematic: self.auto_isolate_problematic,
             scan_default_paths: self.scan_default_paths,
+            helper_path: self.helper_path,
+            response_timeout: self
+                .response_timeout
+                .unwrap_or(crate::process_isolation::DEFAULT_RESPONSE_TIMEOUT),
         })
     }
 }

@@ -20,12 +20,19 @@ correctness fix —
 - **Test coverage**: new `tests/feature_coverage_tests.rs` (params, presets, transport audio,
   variable/oversized blocks, process-before-start, .vstpreset error paths) + transport
   state-flag regression test; `find_test_plugin` made robust against licensed system plugins.
+- **1.2**: `Plugin::get_units()` enumerates `IUnitInfo` units + program lists.
+- **1.5/1.6**: `Plugin::latency_samples()`/`tail_samples()` accessors.
+- **2.1**: live audio-input duplex (`play_with_input`, `play_with_input_backend` — built;
+  manual real-device verification pending). **2.2**: offline render (`simple::render_to_wav`,
+  dep-free `audio::write_wav`). **2.6**: duplex API cleanup.
+- **5.2**: Windows + Linux egui editor embedding (`WinEmbed`/`LinuxEmbed`, CI compile-verified).
+- **3.2/3.3**: configurable IPC response timeout + helper-path override
+  (`Vst3HostBuilder::response_timeout()`/`helper_path()`, `VST3_HOST_HELPER_PATH` env),
+  threaded through crash recovery; missing override path fails fast with a clear error.
 
-**Next up** (deferred, still open): 1.2 `IUnitInfo`/program lists, 5.2 Windows/Linux egui
-embedding, 2.3 denormal guard, 4.2/4.3 inspector polish, 2.1/4.6 live audio input (effect
-hosting), 2.2 offline render; plus the low-value/cross-cutting accessors (1.5 latency, 1.6
-tail, 1.7 sample-accurate MIDI, 3.2 timeout, 3.3 helper-path, 2.5 input buffer, 7.3 metering)
-and the rest of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
+**Next up** (deferred, still open): 2.3 denormal guard (ARM-unverifiable), 4.2/4.3 inspector
+polish, 4.5 inspector audio export, 1.7 sample-accurate MIDI, 1.8 `IMidiMapping`, 2.4 runtime
+reconfigure, 2.5 input buffer, 7.3 metering, and the rest of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
 every installed plugin and can be aborted by a licensed plugin's C++ exception — isolating
 discovery is a future robustness item.
 
