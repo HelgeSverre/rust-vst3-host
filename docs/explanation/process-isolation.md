@@ -37,6 +37,31 @@ with a deadline (5 seconds by default):
 - **Hang** — if the plugin stops responding, the call times out, the helper is killed, and
   you get a timeout error rather than a permanently blocked thread.
 
+## Configuring the helper
+
+Two builder options tune the isolated path; both are honored on the initial load and on
+[`Plugin::recover()`](#recovery):
+
+```rust
+use std::time::Duration;
+use vst3_host::Vst3Host;
+
+let host = Vst3Host::builder()
+    .with_process_isolation(true)
+    // Slower plugins may need longer than the 5s default before a call is treated as hung.
+    .response_timeout(Duration::from_secs(15))
+    // Point at a helper binary in a non-standard location instead of the heuristic search.
+    .helper_path("/opt/myapp/bin/vst3-host-helper")
+    .build()?;
+```
+
+- **`response_timeout`** — how long a single command waits before the helper is declared hung
+  and killed. Defaults to 5 seconds. Only affects isolated loads.
+- **`helper_path`** — an explicit path to the `vst3-host-helper` binary, overriding the
+  default search (executable dir, then common `target/` locations). The
+  `VST3_HOST_HELPER_PATH` environment variable does the same. A configured path that doesn't
+  exist fails fast with a clear error rather than silently falling back to the search.
+
 ## Why it's opt-in, not the default
 
 The headline vision was "isolation by default," but defaulting it on has a real cost:
