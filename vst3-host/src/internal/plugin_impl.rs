@@ -868,10 +868,17 @@ impl PluginInternal for PluginImpl {
     }
 
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()> {
+        self.send_midi_event_at(event, 0)
+    }
+
+    fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
+        // Clamp to non-negative; the host clamps to the block length at process time, but the
+        // VST3 SDK treats a negative sampleOffset as undefined.
+        let sample_offset = sample_offset.max(0);
         unsafe {
             let mut vst_event: Event = std::mem::zeroed();
             vst_event.busIndex = 0;
-            vst_event.sampleOffset = 0;
+            vst_event.sampleOffset = sample_offset;
             vst_event.ppqPosition = 0.0;
             vst_event.flags = Event_::EventFlags_::kIsLive as u16;
 
@@ -908,7 +915,7 @@ impl PluginInternal for PluginImpl {
                 } => {
                     // For now, convert to legacy MIDI
                     // In the future, could use PolyPressureEvent for some CCs
-                    return self.send_legacy_midi_cc(channel, controller, value);
+                    return self.send_legacy_midi_cc(channel, controller, value, sample_offset);
                 }
                 MidiEvent::PitchBend { channel, value } => {
                     // 14-bit pitch bend (0..=16383) carried as two MIDI data bytes via
@@ -1367,11 +1374,12 @@ impl PluginImpl {
         channel: MidiChannel,
         controller: u8,
         value: u8,
+        sample_offset: i32,
     ) -> Result<()> {
         let event = unsafe {
             let mut event: Event = std::mem::zeroed();
             event.busIndex = 0;
-            event.sampleOffset = 0;
+            event.sampleOffset = sample_offset.max(0);
             event.ppqPosition = 0.0;
             event.flags = Event_::EventFlags_::kIsLive as u16;
             event.r#type = kLegacyMIDICCOutEvent as u16;

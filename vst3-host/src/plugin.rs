@@ -98,6 +98,12 @@ pub(crate) trait PluginInternal: Send {
     fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()>;
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()>;
+    /// Schedule a MIDI event at a sample offset within the next process block.
+    /// Defaults to a block-start event (ignores the offset) for implementations that don't
+    /// support sample-accurate scheduling (e.g. process isolation).
+    fn send_midi_event_at(&mut self, event: MidiEvent, _sample_offset: i32) -> Result<()> {
+        self.send_midi_event(event)
+    }
     fn start_processing(&mut self) -> Result<()>;
     fn stop_processing(&mut self) -> Result<()>;
     fn has_editor(&self) -> bool;
@@ -359,6 +365,24 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .send_midi_event(event)
+    }
+
+    /// Schedule a MIDI event at a sample offset within the **next** [`process_audio`] block.
+    ///
+    /// Use this for sample-accurate sequencing: an event sent with `sample_offset = N` takes
+    /// effect `N` frames into the next processed block, rather than at its start. Keep the
+    /// offset within the upcoming block's frame count ([`Plugin::block_size`] is the maximum);
+    /// a negative offset is treated as 0, and an offset past the block end is plugin-defined.
+    ///
+    /// Under process isolation the offset is not marshalled across the boundary — the event is
+    /// delivered at block start (offset 0), same as [`Self::send_midi_event`].
+    ///
+    /// [`process_audio`]: Self::process_audio
+    pub fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .send_midi_event_at(event, sample_offset)
     }
 
     /// Start audio processing
