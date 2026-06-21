@@ -57,8 +57,15 @@ correctness fix —
   paths), restoring prior state on drop. **Verified on ARM** (the earlier "unverifiable" note
   was wrong): a runtime denormal flushes to exactly 0.0 inside the guard and survives outside.
 
-**Next up** (deferred, still open): 4.2/4.3 inspector polish, 4.5 inspector audio export, and
-the rest of Tier 3/4.
+- **4.2**: inspector error surfacing — `set_error()` helper sets the header status line with a
+  timestamp + 3s auto-clear; all GUI `println!("Failed…")` and direct `last_error` writes now
+  route through it (preset save/load, GUI open, params, processing, MIDI, prefs). CLI selftest
+  `eprintln!`s left as-is.
+- **4.3**: inspector session persistence — restores last window size, last tab, last MIDI
+  channel, and auto-reloads the last-loaded plugin on launch (`persist_session_if_changed`
+  writes only on change). `sample_rate`/`block_size` intentionally skipped (not user-editable).
+
+**Next up** (deferred, still open): 4.5 inspector audio export, and the rest of Tier 3/4.
 
 **Known flake** (pre-existing, not CI-affecting): `test_isolation_output_midi_parity`
 intermittently SIGABRTs with "Pure virtual function called!" while the helper *loads* Dexed
