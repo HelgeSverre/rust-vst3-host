@@ -36,10 +36,14 @@ correctness fix —
   time injected for determinism) and `audio::RmsWindow` (moving RMS). Adopted in the inspector's
   VU meter (replaced its hand-rolled `*0.95` decay + `(f32, Instant)` hold). 8 unit tests + 2
   doctests; exported from the crate root and prelude.
+- **2.4**: runtime reconfigure — `Plugin::reconfigure(sample_rate, block_size)` re-runs
+  `setupProcessing` (deactivate → setup → reactivate) and rebuilds buffers; errors while
+  processing / on invalid args / under isolation. Verified: reconfigured 48k/512 → 44.1k/256
+  still produces audio (peak 0.1255) and reports the new settings.
 
 **Next up** (deferred, still open): 2.3 denormal guard (ARM-unverifiable), 4.2/4.3 inspector
-polish, 4.5 inspector audio export, 1.8 `IMidiMapping`, 2.4 runtime reconfigure, 2.5 input
-buffer, 3.5 isolated sample-accurate automation (pairs with 1.7), and the rest of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
+polish, 4.5 inspector audio export, 1.8 `IMidiMapping`, 2.5 input buffer, 3.5 isolated
+sample-accurate automation (pairs with 1.7), and the rest of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
 every installed plugin and can be aborted by a licensed plugin's C++ exception — isolating
 discovery is a future robustness item.
 
