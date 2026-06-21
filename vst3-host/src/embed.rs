@@ -307,8 +307,8 @@ mod linux {
                     .ok_or_else(|| Error::Other("No X11 screen found".to_string()))?;
                 screen.root_visual()
             };
-            // SAFETY: `parent_id` is a live X11 window id from the host's RawWindowHandle.
-            let parent_win: x::Window = unsafe { x::Window::new(parent_id) };
+            // `parent_id` is a live X11 window id from the host's RawWindowHandle.
+            let parent_win: x::Window = x::Window::new(parent_id);
             let child = connection.generate_id();
 
             connection
