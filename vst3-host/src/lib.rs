@@ -77,7 +77,10 @@ pub mod process_isolation;
 
 mod internal;
 
-pub use audio::{AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStream, ChannelLevel};
+pub use audio::{
+    AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStream, ChannelLevel, PeakMeter,
+    RmsWindow,
+};
 pub use discovery::{
     get_detailed_plugin_info, BusInfo, BusLayout, ClassInfo, DetailedPluginInfo, FactoryInfo,
     PluginReport,
@@ -99,7 +102,10 @@ pub use window::PluginWindow;
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::{
-        audio::{AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStream, ChannelLevel},
+        audio::{
+            AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStream, ChannelLevel,
+            PeakMeter, RmsWindow,
+        },
         // NOTE: `Result` is intentionally NOT re-exported here. A single-type-param
         // `Result<T>` alias in a glob prelude shadows `std::result::Result` and breaks
         // any `Result<T, E>` written by consumers. Use `vst3_host::Result` explicitly.

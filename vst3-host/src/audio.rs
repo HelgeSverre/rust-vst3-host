@@ -153,6 +153,195 @@ impl AudioLevels {
     }
 }
 
+/// A single-channel peak meter with falling ballistics and a timed peak-hold marker —
+/// the behaviour a level meter UI wants but [`AudioLevels`]'s sticky `peak_hold` doesn't give.
+///
+/// Time is **injected** ([`push`](Self::push) takes `now: Instant`) so the meter is
+/// deterministic and independent of any clock — pass `Instant::now()` from real code, or
+/// synthetic instants in tests. Feed it the per-block peak amplitude; read [`level`](Self::level)
+/// for the falling meter value and [`peak_hold`](Self::peak_hold) for the held marker.
+///
+/// ```
+/// use std::time::{Duration, Instant};
+/// use vst3_host::audio::PeakMeter;
+///
+/// let mut meter = PeakMeter::new(20.0, Duration::from_secs(2)); // 20 dB/s fall, 2 s hold
+/// let t0 = Instant::now();
+/// meter.push(0.8, t0);
+/// assert_eq!(meter.level(), 0.8);
+/// // After silence the displayed level falls but the hold marker stays put (within the window).
+/// meter.push(0.0, t0 + Duration::from_millis(100));
+/// assert!(meter.level() < 0.8 && meter.level() > 0.0);
+/// assert_eq!(meter.peak_hold(), 0.8);
+/// ```
+#[derive(Debug, Clone)]
+pub struct PeakMeter {
+    fall_db_per_sec: f32,
+    hold: std::time::Duration,
+    level: f32,
+    peak_hold: f32,
+    peak_hold_at: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+}
+
+impl PeakMeter {
+    /// Below this the level snaps to exactly 0.0 (≈ -100 dB), so a meter fully empties
+    /// instead of asymptotically approaching zero forever.
+    const SILENCE: f32 = 1e-5;
+
+    /// Create a meter that falls at `fall_db_per_sec` decibels per second and holds the peak
+    /// marker for `hold` before it, too, begins to fall. A typical UI meter uses ~20 dB/s and
+    /// a 1–3 second hold.
+    pub fn new(fall_db_per_sec: f32, hold: std::time::Duration) -> Self {
+        Self {
+            fall_db_per_sec: fall_db_per_sec.max(0.0),
+            hold,
+            level: 0.0,
+            peak_hold: 0.0,
+            peak_hold_at: None,
+            last: None,
+        }
+    }
+
+    /// Linear gain after falling for `dt`, e.g. `10^(-(dB/s · dt)/20)`.
+    fn decay(&self, dt: std::time::Duration) -> f32 {
+        let db = self.fall_db_per_sec * dt.as_secs_f32();
+        10f32.powf(-db / 20.0)
+    }
+
+    /// Update with a new block's peak amplitude (`0.0..`) observed at `now`. The displayed
+    /// level rises instantly to a louder peak and decays toward quieter input; the hold marker
+    /// latches the loudest value and only starts falling once `hold` has elapsed since it was set.
+    pub fn push(&mut self, block_peak: f32, now: std::time::Instant) {
+        let block_peak = block_peak.max(0.0);
+        let decay = match self.last {
+            Some(prev) => self.decay(now.saturating_duration_since(prev)),
+            None => 1.0,
+        };
+
+        self.level = (self.level * decay).max(block_peak);
+        if self.level < Self::SILENCE {
+            self.level = 0.0;
+        }
+
+        if block_peak >= self.peak_hold {
+            // New loudest value — latch it and restart the hold timer.
+            self.peak_hold = block_peak;
+            self.peak_hold_at = Some(now);
+        } else if self
+            .peak_hold_at
+            .is_some_and(|at| now.saturating_duration_since(at) > self.hold)
+        {
+            // Hold window expired — the marker falls at the same ballistic, never below `level`.
+            self.peak_hold = (self.peak_hold * decay).max(self.level);
+            if self.peak_hold < Self::SILENCE {
+                self.peak_hold = 0.0;
+            }
+        }
+
+        self.last = Some(now);
+    }
+
+    /// The current falling-meter level (`0.0..`).
+    pub fn level(&self) -> f32 {
+        self.level
+    }
+
+    /// The held peak marker (`0.0..`).
+    pub fn peak_hold(&self) -> f32 {
+        self.peak_hold
+    }
+
+    /// Reset the meter to silence.
+    pub fn reset(&mut self) {
+        self.level = 0.0;
+        self.peak_hold = 0.0;
+        self.peak_hold_at = None;
+        self.last = None;
+    }
+}
+
+/// A moving-window RMS estimator over the most recent `N` samples.
+///
+/// Unlike [`AudioLevels`]'s per-block RMS (which resets every buffer), this gives a smooth
+/// level over a fixed time window regardless of block size — feed it samples or whole blocks
+/// and read [`rms`](Self::rms). The window length in samples is `window_secs · sample_rate`.
+///
+/// ```
+/// use vst3_host::audio::RmsWindow;
+///
+/// let mut rms = RmsWindow::new(4);
+/// for _ in 0..4 { rms.push_sample(0.5); }
+/// assert!((rms.rms() - 0.5).abs() < 1e-6); // constant 0.5 → RMS 0.5
+/// ```
+#[derive(Debug, Clone)]
+pub struct RmsWindow {
+    capacity: usize,
+    squares: std::collections::VecDeque<f32>,
+    sum: f32,
+}
+
+impl RmsWindow {
+    /// Create a window holding the most recent `window_samples` samples (minimum 1).
+    pub fn new(window_samples: usize) -> Self {
+        let capacity = window_samples.max(1);
+        Self {
+            capacity,
+            squares: std::collections::VecDeque::with_capacity(capacity),
+            sum: 0.0,
+        }
+    }
+
+    /// Create a window sized for `window_secs` of audio at `sample_rate` Hz.
+    pub fn from_duration(window_secs: f32, sample_rate: f64) -> Self {
+        Self::new((window_secs.max(0.0) as f64 * sample_rate).round() as usize)
+    }
+
+    /// Add one sample, evicting the oldest if the window is full.
+    pub fn push_sample(&mut self, sample: f32) {
+        let sq = sample * sample;
+        if self.squares.len() == self.capacity {
+            if let Some(old) = self.squares.pop_front() {
+                self.sum -= old;
+            }
+        }
+        self.squares.push_back(sq);
+        self.sum += sq;
+    }
+
+    /// Add a whole block of samples.
+    pub fn push_block(&mut self, block: &[f32]) {
+        for &s in block {
+            self.push_sample(s);
+        }
+    }
+
+    /// Current RMS over the samples in the window (`0.0` when empty).
+    pub fn rms(&self) -> f32 {
+        if self.squares.is_empty() {
+            return 0.0;
+        }
+        // Guard against tiny negative drift from float subtraction.
+        (self.sum.max(0.0) / self.squares.len() as f32).sqrt()
+    }
+
+    /// Number of samples currently in the window.
+    pub fn len(&self) -> usize {
+        self.squares.len()
+    }
+
+    /// Whether the window holds no samples yet.
+    pub fn is_empty(&self) -> bool {
+        self.squares.is_empty()
+    }
+
+    /// Drop all samples.
+    pub fn clear(&mut self) {
+        self.squares.clear();
+        self.sum = 0.0;
+    }
+}
+
 /// Audio processing configuration
 #[derive(Debug, Clone, Copy)]
 pub struct AudioConfig {
@@ -307,5 +496,106 @@ mod wav_tests {
         );
         // 4 frames * 2 ch * 4 bytes = 32 bytes of data; file = 44-byte header + 32.
         assert_eq!(bytes.len(), 44 + 32);
+    }
+}
+
+#[cfg(test)]
+mod meter_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn peak_meter_rises_instantly_and_holds() {
+        let mut m = PeakMeter::new(20.0, Duration::from_secs(2));
+        let t0 = Instant::now();
+        m.push(0.7, t0);
+        assert_eq!(m.level(), 0.7);
+        assert_eq!(m.peak_hold(), 0.7);
+
+        // A louder block snaps both up immediately.
+        m.push(0.9, t0 + Duration::from_millis(10));
+        assert_eq!(m.level(), 0.9);
+        assert_eq!(m.peak_hold(), 0.9);
+    }
+
+    #[test]
+    fn peak_meter_level_falls_but_hold_latches() {
+        let mut m = PeakMeter::new(20.0, Duration::from_secs(3));
+        let t0 = Instant::now();
+        m.push(1.0, t0);
+
+        // 0.5 s of silence: 20 dB/s → -10 dB ≈ 0.316 linear. Level fell; hold latched.
+        m.push(0.0, t0 + Duration::from_millis(500));
+        let lvl = m.level();
+        assert!(
+            lvl < 1.0 && lvl > 0.0,
+            "level should be mid-fall, got {lvl}"
+        );
+        assert!((lvl - 0.316).abs() < 0.02, "≈-10 dB expected, got {lvl}");
+        assert_eq!(m.peak_hold(), 1.0, "hold must latch within its window");
+    }
+
+    #[test]
+    fn peak_meter_hold_falls_after_window() {
+        let mut m = PeakMeter::new(20.0, Duration::from_secs(1));
+        let t0 = Instant::now();
+        m.push(1.0, t0);
+        // Past the 1 s hold window, with continued silence the marker starts falling too.
+        m.push(0.0, t0 + Duration::from_millis(1500));
+        assert!(
+            m.peak_hold() < 1.0,
+            "hold should fall after the window expired, got {}",
+            m.peak_hold()
+        );
+    }
+
+    #[test]
+    fn peak_meter_reaches_silence_floor() {
+        let mut m = PeakMeter::new(60.0, Duration::from_millis(0));
+        let t0 = Instant::now();
+        m.push(0.5, t0);
+        // A long gap of silence fully empties the meter (snaps to exactly 0).
+        m.push(0.0, t0 + Duration::from_secs(10));
+        assert_eq!(m.level(), 0.0);
+        assert_eq!(m.peak_hold(), 0.0);
+    }
+
+    #[test]
+    fn rms_window_constant_signal() {
+        let mut r = RmsWindow::new(8);
+        for _ in 0..8 {
+            r.push_sample(0.5);
+        }
+        assert!((r.rms() - 0.5).abs() < 1e-6);
+        assert_eq!(r.len(), 8);
+    }
+
+    #[test]
+    fn rms_window_slides_and_evicts() {
+        let mut r = RmsWindow::new(3);
+        r.push_block(&[1.0, 1.0, 1.0]);
+        assert!((r.rms() - 1.0).abs() < 1e-6);
+        // Push three zeros: the loud samples are evicted, RMS returns to 0.
+        r.push_block(&[0.0, 0.0, 0.0]);
+        assert_eq!(r.len(), 3);
+        assert!(
+            r.rms() < 1e-6,
+            "window should have slid to silence, got {}",
+            r.rms()
+        );
+    }
+
+    #[test]
+    fn rms_window_empty_is_zero() {
+        let r = RmsWindow::new(16);
+        assert!(r.is_empty());
+        assert_eq!(r.rms(), 0.0);
+    }
+
+    #[test]
+    fn rms_window_from_duration_sizes_correctly() {
+        // 10 ms at 48 kHz = 480 samples.
+        let r = RmsWindow::from_duration(0.01, 48_000.0);
+        assert_eq!(r.capacity, 480);
     }
 }

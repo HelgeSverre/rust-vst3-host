@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use vst3_host::midi::MidiChannel;
-use vst3_host::{AudioHandle, Vst3Host};
+use vst3_host::{AudioHandle, PeakMeter, Vst3Host};
 
 // Import modules
 mod data_structures;
@@ -509,12 +509,9 @@ struct VST3Inspector {
     max_midi_events: usize,
     // Preferences
     preferences: Preferences,
-    // VU meter
-    peak_level_left: Arc<Mutex<f32>>,
-    peak_level_right: Arc<Mutex<f32>>,
-    // Peak hold
-    peak_hold_left: Arc<Mutex<(f32, Instant)>>, // (level, time)
-    peak_hold_right: Arc<Mutex<(f32, Instant)>>,
+    // VU meters: the library's PeakMeter handles falling ballistics + timed peak-hold.
+    meter_left: Arc<Mutex<PeakMeter>>,
+    meter_right: Arc<Mutex<PeakMeter>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -711,31 +708,12 @@ impl VST3Inspector {
         let peak_left = levels.channels.first().map(|c| c.peak).unwrap_or(0.0);
         let peak_right = levels.channels.get(1).map(|c| c.peak).unwrap_or(peak_left);
 
-        const SILENCE_THRESHOLD: f32 = 0.00001; // -100 dB
-        const PEAK_HOLD_TIME: f64 = 3.0;
         let now = Instant::now();
-
-        if let Ok(mut level) = self.peak_level_left.lock() {
-            *level = (*level * 0.95).max(peak_left);
-            if *level < SILENCE_THRESHOLD {
-                *level = 0.0;
-            }
+        if let Ok(mut m) = self.meter_left.lock() {
+            m.push(peak_left, now);
         }
-        if let Ok(mut level) = self.peak_level_right.lock() {
-            *level = (*level * 0.95).max(peak_right);
-            if *level < SILENCE_THRESHOLD {
-                *level = 0.0;
-            }
-        }
-        if let Ok(mut hold) = self.peak_hold_left.lock() {
-            if peak_left > hold.0 || now.duration_since(hold.1).as_secs_f64() > PEAK_HOLD_TIME {
-                *hold = (peak_left, now);
-            }
-        }
-        if let Ok(mut hold) = self.peak_hold_right.lock() {
-            if peak_right > hold.0 || now.duration_since(hold.1).as_secs_f64() > PEAK_HOLD_TIME {
-                *hold = (peak_right, now);
-            }
+        if let Ok(mut m) = self.meter_right.lock() {
+            m.push(peak_right, now);
         }
     }
 
@@ -1778,11 +1756,14 @@ impl VST3Inspector {
                 ui.group(|ui| {
                     ui.label("Output Levels (VU Meter):");
 
-                    let peak_left = *self.peak_level_left.lock().unwrap();
-                    let peak_right = *self.peak_level_right.lock().unwrap();
-
-                    let (peak_hold_left, _) = *self.peak_hold_left.lock().unwrap();
-                    let (peak_hold_right, _) = *self.peak_hold_right.lock().unwrap();
+                    let (peak_left, peak_hold_left) = {
+                        let m = self.meter_left.lock().unwrap();
+                        (m.level(), m.peak_hold())
+                    };
+                    let (peak_right, peak_hold_right) = {
+                        let m = self.meter_right.lock().unwrap();
+                        (m.level(), m.peak_hold())
+                    };
 
                     // Convert to dB
                     const MIN_DB: f32 = -60.0;
@@ -2695,18 +2676,11 @@ impl VST3Inspector {
         }
         self.is_processing = false;
 
-        if let Ok(mut level) = self.peak_level_left.lock() {
-            *level = 0.0;
+        if let Ok(mut m) = self.meter_left.lock() {
+            m.reset();
         }
-        if let Ok(mut level) = self.peak_level_right.lock() {
-            *level = 0.0;
-        }
-        let now = Instant::now();
-        if let Ok(mut hold) = self.peak_hold_left.lock() {
-            *hold = (0.0, now);
-        }
-        if let Ok(mut hold) = self.peak_hold_right.lock() {
-            *hold = (0.0, now);
+        if let Ok(mut m) = self.meter_right.lock() {
+            m.reset();
         }
         println!("Audio panic complete");
     }
@@ -3114,10 +3088,9 @@ impl VST3Inspector {
             midi_monitor_paused: Arc::new(Mutex::new(false)),
             max_midi_events: 1000,
             preferences: Preferences::load(),
-            peak_level_left: Arc::new(Mutex::new(0.0)),
-            peak_level_right: Arc::new(Mutex::new(0.0)),
-            peak_hold_left: Arc::new(Mutex::new((0.0, Instant::now()))),
-            peak_hold_right: Arc::new(Mutex::new((0.0, Instant::now()))),
+            // 20 dB/s fall, 3 s peak-hold — the classic VU-meter ballistic.
+            meter_left: Arc::new(Mutex::new(PeakMeter::new(20.0, Duration::from_secs(3)))),
+            meter_right: Arc::new(Mutex::new(PeakMeter::new(20.0, Duration::from_secs(3)))),
         }
     }
 }
