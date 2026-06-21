@@ -253,9 +253,10 @@ impl PluginImpl {
                     let view_type = c"editor".as_ptr();
                     let view_ptr = ctrl.createView(view_type);
                     if !view_ptr.is_null() {
-                        // Clean up the test view immediately
-                        let view = ComPtr::<IPlugView>::from_raw(view_ptr).unwrap();
-                        view.removed();
+                        // Clean up the test view immediately (ptr is non-null here).
+                        if let Some(view) = ComPtr::<IPlugView>::from_raw(view_ptr) {
+                            view.removed();
+                        }
                         true
                     } else {
                         false
@@ -996,9 +997,10 @@ impl PluginInternal for PluginImpl {
                 let view_type = c"editor".as_ptr();
                 let view_ptr = controller.createView(view_type);
                 if !view_ptr.is_null() {
-                    // Clean up the test view
-                    let view = ComPtr::<IPlugView>::from_raw(view_ptr).unwrap();
-                    view.removed();
+                    // Clean up the test view (ptr is non-null here).
+                    if let Some(view) = ComPtr::<IPlugView>::from_raw(view_ptr) {
+                        view.removed();
+                    }
                     true
                 } else {
                     false
@@ -1095,7 +1097,8 @@ impl PluginInternal for PluginImpl {
                     ));
                 }
 
-                let view = ComPtr::<IPlugView>::from_raw(view_ptr).unwrap();
+                let view = ComPtr::<IPlugView>::from_raw(view_ptr)
+                    .ok_or_else(|| Error::Other("Failed to wrap plug view".to_string()))?;
 
                 // Get view size
                 let mut view_rect = ViewRect {

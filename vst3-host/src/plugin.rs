@@ -175,9 +175,9 @@ impl Plugin {
     }
 
     /// Get a parameter value by ID
-    pub fn get_parameter(&mut self, id: u32) -> Result<f64> {
+    pub fn get_parameter(&self, id: u32) -> Result<f64> {
         self.internal
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .get_parameter(id)
     }

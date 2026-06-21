@@ -186,8 +186,9 @@ impl ParameterAutomation {
             value,
             curve: AutomationCurve::Linear,
         });
-        self.points
-            .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+        // `total_cmp` orders NaN deterministically instead of panicking like
+        // `partial_cmp(..).unwrap()` would on a NaN time from this public API.
+        self.points.sort_by(|a, b| a.time.total_cmp(&b.time));
         self
     }
 
@@ -292,5 +293,21 @@ impl ParameterAutomation {
 impl Default for ParameterAutomation {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_point_with_nan_time_does_not_panic() {
+        // A NaN time used to panic via `partial_cmp(..).unwrap()` in the sort; `total_cmp`
+        // orders it deterministically instead.
+        let auto = ParameterAutomation::new()
+            .add_point(0.0, 0.1)
+            .add_point(f64::NAN, 0.5)
+            .add_point(1.0, 0.9);
+        assert_eq!(auto.points.len(), 3);
     }
 }

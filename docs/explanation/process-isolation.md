@@ -61,9 +61,9 @@ plugin; it's explicit (not inline) so the expensive respawn stays off the audio 
 
 ## Current limits
 
-- **No GUI across the boundary** — opening a plugin's editor in isolated mode isn't
-  supported; the editor lives in the host process's window system, and forwarding a native
-  view handle across processes isn't implemented.
+- **GUI across the boundary is macOS-only** — on macOS the helper process owns the editor
+  window (the helper runs its own UI run loop), so `open_editor` works and the editor stays
+  in the isolated process. On Windows and Linux it isn't implemented yet and returns an error.
 - **Recovery loses live state** — `recover()` reloads from the default state; re-apply
   parameters/preset with `save_state`/`load_state` if you need them preserved.
 - **IPC overhead per audio block** — driving audio through isolation marshals each block

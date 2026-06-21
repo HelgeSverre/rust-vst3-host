@@ -105,8 +105,9 @@ PID for monitoring.
 
 - **Not the runtime default.** The default load path is in-process. Isolation is opt-in
   because it requires the helper binary to be present where your app runs.
-- **No GUI across the boundary.** Opening a plugin's editor in isolated mode is not
-  supported yet (`open_editor` returns an error).
+- **GUI across the boundary is macOS-only.** On macOS, `open_editor` on an isolated plugin
+  opens the editor in a window owned by the helper process (so a crash stays contained). On
+  Windows and Linux it still returns an error.
 - **Recovery is explicit, not inline.** A crash surfaces as `Error::PluginCrashed`; call
   `recover()` off the audio thread (it respawns + reloads, which is too slow to do inside a
   process callback).

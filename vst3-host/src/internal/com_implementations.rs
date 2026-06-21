@@ -878,11 +878,18 @@ impl IParamValueQueueTrait for ParameterValueQueue {
     }
 
     unsafe fn getPointCount(&self) -> i32 {
-        self.points.lock().unwrap().len() as i32
+        // These run as COM FFI callbacks; a panic (e.g. from `.unwrap()` on a poisoned
+        // lock) would unwind across the C++ boundary — UB. Recover the lock instead.
+        self.points.lock().unwrap_or_else(|p| p.into_inner()).len() as i32
     }
 
     unsafe fn getPoint(&self, index: i32, sample_offset: *mut i32, value: *mut f64) -> i32 {
-        if let Some((offset, val)) = self.points.lock().unwrap().get(index as usize) {
+        if let Some((offset, val)) = self
+            .points
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(index as usize)
+        {
             if !sample_offset.is_null() {
                 *sample_offset = *offset;
             }
@@ -896,7 +903,7 @@ impl IParamValueQueueTrait for ParameterValueQueue {
     }
 
     unsafe fn addPoint(&self, sample_offset: i32, value: f64, index: *mut i32) -> i32 {
-        let mut points = self.points.lock().unwrap();
+        let mut points = self.points.lock().unwrap_or_else(|p| p.into_inner());
 
         // Find insertion point
         let insert_pos = points

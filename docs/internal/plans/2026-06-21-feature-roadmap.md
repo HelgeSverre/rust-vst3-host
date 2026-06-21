@@ -1,5 +1,3 @@
-I'll write the roadmap directly from the verified findings provided. No need to re-investigate since each item is already grounded in code evidence.
-
 # vst3-host Implementation Roadmap
 
 ## Summary

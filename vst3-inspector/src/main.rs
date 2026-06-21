@@ -2265,7 +2265,7 @@ impl VST3Inspector {
             None => return Err("No plugin loaded".to_string()),
         };
 
-        let mut plugin = audio.lock();
+        let plugin = audio.lock();
         if let Some(ref mut plugin_info) = self.plugin_info {
             if let Some(ref mut controller_info) = plugin_info.controller_info {
                 for param in &mut controller_info.parameters {
