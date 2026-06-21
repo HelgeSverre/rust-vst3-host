@@ -693,9 +693,10 @@ fn test_isolation_crash_recovery() {
 #[test]
 #[ignore = "Requires the helper binary"]
 fn test_isolation_dead_helper_errors_fast() {
+    use std::time::Duration;
     use vst3_host::process_isolation::{HostCommand, PluginHostProcess};
 
-    let mut proc = match PluginHostProcess::new() {
+    let mut proc = match PluginHostProcess::new(None, Duration::from_secs(5)) {
         Ok(p) => p,
         Err(e) => {
             println!("Helper not available ({e}), skipping");

@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Default time to wait for a helper response before treating the plugin as hung.
-const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Commands that can be sent to the isolated plugin process.
 ///
@@ -191,7 +191,24 @@ pub struct PluginHostProcess {
 
 impl PluginHostProcess {
     /// Create a new isolated plugin host process
-    pub fn new() -> Result<Self, String> {
+    pub fn new(
+        helper_override: Option<std::path::PathBuf>,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        // An explicit helper path (builder option or the VST3_HOST_HELPER_PATH env var) wins
+        // over the heuristic search below — and a missing one is reported clearly here.
+        let override_path = helper_override
+            .or_else(|| std::env::var_os("VST3_HOST_HELPER_PATH").map(std::path::PathBuf::from));
+        if let Some(p) = override_path {
+            if !p.exists() {
+                return Err(format!(
+                    "Configured helper path does not exist: {}",
+                    p.display()
+                ));
+            }
+            return Self::spawn(p, timeout);
+        }
+
         // Get the path to our helper executable
         let exe_path =
             std::env::current_exe().map_err(|e| format!("Failed to get current exe: {}", e))?;
@@ -254,7 +271,11 @@ impl PluginHostProcess {
         let helper_path = helper_path
             .ok_or_else(|| format!("Helper executable not found. Searched in {:?} and parent directories. Make sure to build with --bins flag.", exe_dir))?;
 
-        // Start the helper process
+        Self::spawn(helper_path, timeout)
+    }
+
+    /// Spawn the helper at `helper_path` and wire up the response reader thread.
+    fn spawn(helper_path: std::path::PathBuf, timeout: Duration) -> Result<Self, String> {
         let mut child = Command::new(&helper_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -291,7 +312,7 @@ impl PluginHostProcess {
             stdin: Some(stdin),
             responses: rx,
             reader: Some(reader),
-            timeout: DEFAULT_RESPONSE_TIMEOUT,
+            timeout,
             dead: false,
         })
     }
@@ -536,6 +557,26 @@ mod wire_tests {
             HostResponse::State { data } => assert_eq!(data, blob),
             other => panic!("State round-trip changed the variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn explicit_helper_override_missing_path_reports_clearly() {
+        // An explicit helper path that doesn't exist must fail with a clear, path-naming
+        // error *before* spawning — not fall through to the heuristic search. This is the
+        // observable contract for the builder's `helper_path()` override (roadmap 3.3).
+        let bogus = std::path::PathBuf::from("/nonexistent/vst3-host-helper-xyz");
+        let err = match PluginHostProcess::new(Some(bogus.clone()), DEFAULT_RESPONSE_TIMEOUT) {
+            Ok(_) => panic!("a missing override path must error, not spawn"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("does not exist"),
+            "error should explain the missing path, got: {err}"
+        );
+        assert!(
+            err.contains("vst3-host-helper-xyz"),
+            "error should name the offending path, got: {err}"
+        );
     }
 }
 
