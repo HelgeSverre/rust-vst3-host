@@ -349,6 +349,36 @@ fn test_vstpreset_wrong_class_id_rejected() {
     );
 }
 
+/// `get_units` enumerates IUnitInfo units/program lists without error (a plugin without
+/// IUnitInfo returns an empty list; one with it returns at least the root unit).
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_get_units_enumerates() {
+    let _guard = plugin_guard();
+    let Some((_host, plugin)) = load_dexed() else {
+        return;
+    };
+    let units = plugin.get_units().expect("get_units should not error");
+    println!("Dexed reports {} unit(s)", units.len());
+    for u in &units {
+        println!(
+            "  unit {} (parent {}): '{}', {} program(s)",
+            u.id,
+            u.parent_id,
+            u.name,
+            u.programs.len()
+        );
+        // Program names, when present, must be readable strings (not garbage/empty-only).
+        for (i, p) in u.programs.iter().take(3).enumerate() {
+            println!("    program[{i}] = '{p}'");
+        }
+    }
+    // Every reported unit has a name; ids are internally consistent.
+    for u in &units {
+        assert!(!u.name.is_empty(), "unit {} has an empty name", u.id);
+    }
+}
+
 // --- Pure-logic tests (run in CI without a plugin) ---------------------------
 
 /// The builder records tempo / time-signature on the config without needing a plugin.

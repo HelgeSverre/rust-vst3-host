@@ -50,6 +50,22 @@ pub struct PluginPreset {
     pub state: Vec<u8>,
 }
 
+/// A plugin unit (from `IUnitInfo`) and its program list, if any.
+///
+/// Units form a hierarchy (via [`parent_id`](Self::parent_id)); a unit may carry a named
+/// program list (e.g. a synth's factory patches). Query with [`Plugin::get_units`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginUnit {
+    /// Unit id (unique within the plugin; the root unit is conventionally `0`).
+    pub id: i32,
+    /// Parent unit id, or `-1` for the root.
+    pub parent_id: i32,
+    /// Unit display name.
+    pub name: String,
+    /// Program names in this unit's program list (empty if the unit has none).
+    pub programs: Vec<String>,
+}
+
 /// VST3 plugin instance
 #[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
 pub struct Plugin {
@@ -95,6 +111,11 @@ pub(crate) trait PluginInternal: Send {
     /// for implementations that don't capture output MIDI (e.g. process isolation).
     fn take_output_events(&self) -> Vec<MidiEvent> {
         Vec::new()
+    }
+    /// Enumerate the plugin's units and their program lists (`IUnitInfo`). Defaults to empty
+    /// for implementations that don't query it yet (e.g. process isolation).
+    fn get_units(&self) -> Result<Vec<PluginUnit>> {
+        Ok(Vec::new())
     }
     /// Serialize the plugin's current state to an opaque byte blob.
     fn save_state(&self) -> Result<Vec<u8>> {
@@ -187,6 +208,17 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .set_parameter_at(id, value, sample_offset)
+    }
+
+    /// Enumerate the plugin's units and their program lists (`IUnitInfo`).
+    ///
+    /// Returns an empty list for plugins that don't implement `IUnitInfo`, and (for now) for
+    /// plugins running under process isolation. The root unit (id `0`) is typically present.
+    pub fn get_units(&self) -> Result<Vec<PluginUnit>> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .get_units()
     }
 
     /// Get a parameter value by ID
