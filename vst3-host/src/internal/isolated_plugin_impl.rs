@@ -27,6 +27,8 @@ pub struct IsolatedPluginImpl {
     is_processing: bool,
     /// Whether the plugin has an open editor
     has_open_editor: bool,
+    /// Editor size reported by the helper when the GUI was created (helper-owned window).
+    editor_size: Option<(i32, i32)>,
     /// Total output audio channels (reported by the helper's introspection).
     output_channels: usize,
     /// MIDI the plugin has emitted across the boundary, buffered for the host to poll
@@ -53,6 +55,7 @@ impl IsolatedPluginImpl {
             block_size,
             is_processing: false,
             has_open_editor: false,
+            editor_size: None,
             output_channels,
             output_midi: Mutex::new(Vec::new()),
         }
@@ -219,6 +222,12 @@ impl PluginInternal for IsolatedPluginImpl {
         let response = self.send_command(HostCommand::CreateGui)?;
 
         match response {
+            // The helper owns the window and reports its real size.
+            HostResponse::GuiCreated { width, height } => {
+                self.editor_size = Some((width, height));
+                self.has_open_editor = true;
+                Ok(())
+            }
             HostResponse::Success { .. } => {
                 self.has_open_editor = true;
                 Ok(())
@@ -254,8 +263,9 @@ impl PluginInternal for IsolatedPluginImpl {
     }
 
     fn get_editor_size(&self) -> Result<(i32, i32)> {
-        // TODO: Query the isolated process for editor size
-        Ok((800, 600))
+        // The real size is learned when the helper creates the editor (GuiCreated);
+        // fall back to a sensible default before the GUI has been opened.
+        Ok(self.editor_size.unwrap_or((800, 600)))
     }
 
     fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
