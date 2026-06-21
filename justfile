@@ -74,6 +74,11 @@ linux-check:
 isolated PLUGIN_PATH=PLUGIN: helper
     cargo run -p vst3-host --example isolated_host --features process-isolation -- "{{ PLUGIN_PATH }}"
 
+# Show a plugin's editor across the isolation boundary (helper-owned window, macOS)
+[group('run')]
+isolated-gui PLUGIN_PATH=PLUGIN: helper
+    cargo run -p vst3-host --example isolated_gui --features cpal-backend,process-isolation -- "{{ PLUGIN_PATH }}"
+
 # Format the code
 [group('lint')]
 fmt:

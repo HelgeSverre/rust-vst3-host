@@ -39,13 +39,20 @@ raw-window-handle = { version = "0.6", optional = true }
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry"] }
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSGeometry",
+    "NSDate",
+    "NSRunLoop",
+] }
 core-foundation = "0.10"
 objc2-app-kit = { version = "0.3.2", features = [
+    "NSApplication",
     "NSWindow",
     "NSView",
     "NSResponder",
     "NSGraphics",
+    "NSEvent",
 ] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -80,6 +87,10 @@ required-features = ["cpal-backend"]
 [[example]]
 name = "isolated_host"
 required-features = ["process-isolation"]
+
+[[example]]
+name = "isolated_gui"
+required-features = ["cpal-backend", "process-isolation"]
 
 [[example]]
 name = "compatibility_matrix"
