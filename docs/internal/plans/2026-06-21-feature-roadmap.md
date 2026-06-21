@@ -40,10 +40,14 @@ correctness fix —
   `setupProcessing` (deactivate → setup → reactivate) and rebuilds buffers; errors while
   processing / on invalid args / under isolation. Verified: reconfigured 48k/512 → 44.1k/256
   still produces audio (peak 0.1255) and reports the new settings.
+- **1.8**: `IMidiMapping` introspection — `Plugin::midi_cc_to_parameter(bus, channel, cc)`
+  resolves a controller to its parameter id via `getMidiControllerAssignment`. Verified: Dexed
+  maps all 130 controllers (CC 0–127 + aftertouch + pitch-bend) to real parameter ids,
+  deterministically.
 
 **Next up** (deferred, still open): 2.3 denormal guard (ARM-unverifiable), 4.2/4.3 inspector
-polish, 4.5 inspector audio export, 1.8 `IMidiMapping`, 2.5 input buffer, 3.5 isolated
-sample-accurate automation (pairs with 1.7), and the rest of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
+polish, 4.5 inspector audio export, 2.5 input buffer, 3.5 isolated sample-accurate automation
+(pairs with 1.7), and the rest of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
 every installed plugin and can be aborted by a licensed plugin's C++ exception — isolating
 discovery is a future robustness item.
 

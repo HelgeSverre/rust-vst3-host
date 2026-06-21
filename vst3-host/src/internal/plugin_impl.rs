@@ -1216,6 +1216,18 @@ impl PluginInternal for PluginImpl {
         unsafe { self.processor.getTailSamples() }
     }
 
+    fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
+        let controller = self.controller.as_ref()?;
+        let mapping = controller.cast::<IMidiMapping>()?;
+        unsafe {
+            let mut id: ParamID = 0;
+            let result =
+                mapping.getMidiControllerAssignment(bus, channel, cc as CtrlNumber, &mut id);
+            // kResultTrue == kResultOk: a mapping exists and `id` was written.
+            (result == kResultOk).then_some(id)
+        }
+    }
+
     fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
         use crate::plugin::PluginUnit;
         let Some(ref controller) = self.controller else {

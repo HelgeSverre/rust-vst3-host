@@ -273,6 +273,60 @@ fn test_sample_accurate_midi_offset_delays_onset() {
     );
 }
 
+/// `IMidiMapping`: querying CC→parameter assignments returns valid parameter ids (when the
+/// plugin implements the interface) and never panics. Mappings are stable across repeat calls.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_midi_cc_to_parameter_mapping() {
+    let _guard = plugin_guard();
+    let Some((_host, plugin)) = load_dexed() else {
+        return;
+    };
+
+    // Collect the set of valid parameter ids to validate any returned mapping against.
+    let param_ids: std::collections::HashSet<u32> = plugin
+        .get_parameters()
+        .unwrap()
+        .iter()
+        .map(|p| p.id)
+        .collect();
+
+    // Sweep the standard MIDI CCs plus the VST3 specials (modwheel, aftertouch, pitch-bend…)
+    // on bus 0, channel 0.
+    let mut mappings = Vec::new();
+    for cc in 0u16..=129 {
+        if let Some(id) = plugin.midi_cc_to_parameter(0, 0, cc) {
+            mappings.push((cc, id));
+            assert!(
+                param_ids.contains(&id),
+                "CC {cc} mapped to id {id}, which is not a real parameter"
+            );
+        }
+    }
+
+    println!(
+        "Dexed reported {} CC→param mappings: {mappings:?}",
+        mappings.len()
+    );
+
+    // The query must be deterministic: a second pass returns identical results.
+    for &(cc, id) in &mappings {
+        assert_eq!(
+            plugin.midi_cc_to_parameter(0, 0, cc),
+            Some(id),
+            "CC {cc} mapping changed between calls"
+        );
+    }
+
+    // Dexed implements IMidiMapping (modulation, breath, foot, pitch-bend → DX7 controllers),
+    // so we expect at least one mapping. (If a future test plugin doesn't implement it this
+    // would need relaxing — see the printed count above.)
+    assert!(
+        !mappings.is_empty(),
+        "expected at least one CC→param mapping from Dexed"
+    );
+}
+
 /// Runtime reconfigure: after `reconfigure(44100, 256)` the plugin reports the new settings,
 /// still produces audio for a held note at the new rate, and refuses to reconfigure while
 /// processing.
