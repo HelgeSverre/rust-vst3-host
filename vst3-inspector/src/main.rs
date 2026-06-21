@@ -540,14 +540,18 @@ impl eframe::App for VST3Inspector {
     fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Pull current output levels from the library and feed the VU meter cache.
+        // Pull current output levels, plugin-emitted MIDI, and plugin-side parameter edits.
         self.update_vu_meters();
+        self.poll_plugin_output_midi();
+        self.poll_plugin_parameter_changes();
 
-        // Keep the UI live (continuous repaint). egui is reactive by default — it only
-        // repaints on input events — which makes a host UI feel unresponsive (clicks/VU
-        // meters only update while the mouse moves). Requesting a repaint every frame keeps
-        // it animating and immediately responsive, like a DAW.
-        ctx.request_repaint();
+        // Keep the UI live without busy-looping. egui is reactive by default (repaints only
+        // on input), which makes a host UI feel dead between events; an *unbounded*
+        // `request_repaint()` instead pegs the render loop at the monitor refresh rate and
+        // hammers the plugin mutex (contending with the audio thread → input lag). Capping at
+        // ~60 fps with `request_repaint_after` keeps meters/clicks responsive at far lower
+        // cost. (Input events still trigger an immediate repaint.)
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
         // Top header panel
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
@@ -630,6 +634,72 @@ impl eframe::App for VST3Inspector {
 }
 
 impl VST3Inspector {
+    /// Drain MIDI the plugin emitted during processing (arpeggiators, MPE, step
+    /// sequencers, ...) and log it in the MIDI monitor as Output. The plugin only emits
+    /// while it is processing audio, so this is a no-op when nothing is playing.
+    fn poll_plugin_output_midi(&mut self) {
+        use vst3_host::midi::MidiEvent;
+        let events = match &self.audio {
+            Some(a) => a.lock().take_output_midi(),
+            None => return,
+        };
+        for ev in events {
+            let (ty, ch, d1, d2): (u16, u8, u8, u8) = match ev {
+                MidiEvent::NoteOn {
+                    channel,
+                    note,
+                    velocity,
+                } => (0, channel.as_index(), note, velocity),
+                MidiEvent::NoteOff {
+                    channel,
+                    note,
+                    velocity,
+                } => (1, channel.as_index(), note, velocity),
+                MidiEvent::ControlChange {
+                    channel,
+                    controller,
+                    value,
+                } => (3, channel.as_index(), controller, value),
+                MidiEvent::ProgramChange { channel, program } => {
+                    (4, channel.as_index(), program, 0)
+                }
+                MidiEvent::ChannelAftertouch { channel, pressure } => {
+                    (2, channel.as_index(), pressure, 0)
+                }
+                MidiEvent::PolyAftertouch {
+                    channel,
+                    note,
+                    pressure,
+                } => (2, channel.as_index(), note, pressure),
+                // PitchBend and any future variants aren't shown in the monitor's note grid.
+                _ => continue,
+            };
+            self.log_midi_event(MidiDirection::Output, ty, ch, d1, d2);
+        }
+    }
+
+    /// Reflect parameter changes the plugin made through its own editor (turning a knob in
+    /// the plugin GUI calls back via the component handler) into the inspector's parameter
+    /// list, so the displayed values stay in sync with the plugin's editor.
+    fn poll_plugin_parameter_changes(&mut self) {
+        let changes = match &self.audio {
+            Some(a) => a.lock().get_parameter_changes(),
+            None => return,
+        };
+        if changes.is_empty() {
+            return;
+        }
+        if let Some(plugin_info) = &mut self.plugin_info {
+            if let Some(controller_info) = &mut plugin_info.controller_info {
+                for (id, value) in changes {
+                    if let Some(p) = controller_info.parameters.iter_mut().find(|p| p.id == id) {
+                        p.current_value = value;
+                    }
+                }
+            }
+        }
+    }
+
     /// Pull the latest output levels from the playing plugin and feed the VU meter
     /// (peak + peak-hold) caches that the Processing tab reads.
     fn update_vu_meters(&mut self) {
