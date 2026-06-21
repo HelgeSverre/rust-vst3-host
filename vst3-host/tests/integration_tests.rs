@@ -449,6 +449,55 @@ fn test_process_isolation() {
     println!("Isolated plugin produced audio (peak {max_peak:.4})");
 }
 
+/// Roadmap 3.5: sample-accurate parameter automation crosses the isolation boundary.
+/// `set_parameter_at`'s offset is now forwarded (it used to be silently dropped); the
+/// helper's in-process plugin applies it. We verify the command path end-to-end: the
+/// scheduled change is accepted across IPC, a process block consumes it, and the value
+/// is reflected afterwards (the sample-accuracy itself rides the verified in-process path).
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the helper binary and the bundled test plugin"]
+fn test_isolation_set_parameter_at() {
+    let plugin_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(plugin_path).exists() {
+        println!("Test plugin not found at {plugin_path}, skipping");
+        return;
+    }
+
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .with_process_isolation(true)
+        .build()
+        .expect("build isolated host");
+    let mut plugin = host.load_plugin(plugin_path).expect("load isolated");
+
+    let id = plugin.get_parameters().expect("params")[0].id;
+    plugin
+        .start_processing()
+        .expect("start_processing over IPC");
+
+    // Schedule a change 256 frames into the next block — across the process boundary.
+    plugin
+        .set_parameter_at(id, 0.8, 256)
+        .expect("set_parameter_at over IPC");
+
+    // Process a block so the helper consumes the scheduled change.
+    let mut buffers = AudioBuffers::new(0, 2, 512, 48000.0);
+    plugin
+        .process_audio(&mut buffers)
+        .expect("process over IPC");
+
+    // The value is applied on the far side.
+    let got = plugin.get_parameter(id).expect("get_parameter over IPC");
+    assert!(
+        (got - 0.8).abs() < 0.05,
+        "scheduled parameter not applied across isolation: {got}"
+    );
+    plugin.stop_processing().expect("stop over IPC");
+    println!("Isolated set_parameter_at applied value {got:.3}");
+}
+
 /// Track D: plugin state save/restore survives the process-isolation boundary.
 #[cfg(feature = "process-isolation")]
 #[test]

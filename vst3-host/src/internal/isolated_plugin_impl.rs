@@ -137,6 +137,17 @@ impl PluginInternal for IsolatedPluginImpl {
         self.expect_success(HostCommand::SetParameter { id, value }, "SetParameter")
     }
 
+    fn set_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
+        self.expect_success(
+            HostCommand::SetParameterAt {
+                id,
+                value,
+                offset: sample_offset,
+            },
+            "SetParameterAt",
+        )
+    }
+
     fn get_parameter(&self, id: u32) -> Result<f64> {
         match self.send_command(HostCommand::GetParameter { id })? {
             HostResponse::ParameterValue { value } => Ok(value),
