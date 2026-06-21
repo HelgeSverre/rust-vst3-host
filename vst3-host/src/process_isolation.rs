@@ -129,6 +129,14 @@ pub enum HostResponse {
         /// The serialized state.
         data: Vec<u8>,
     },
+    /// The isolated editor window was created (reply to `CreateGui`); carries the
+    /// plugin-reported editor size so the host can report it without a second round-trip.
+    GuiCreated {
+        /// Editor width in pixels.
+        width: i32,
+        /// Editor height in pixels.
+        height: i32,
+    },
     /// Plugin information
     PluginInfo {
         /// Vendor / manufacturer.
