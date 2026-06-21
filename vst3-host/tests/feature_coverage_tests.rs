@@ -327,6 +327,67 @@ fn test_midi_cc_to_parameter_mapping() {
     );
 }
 
+/// Mirrors the inspector's "Export WAV" path (roadmap 4.5): snapshot a live plugin's state,
+/// load a fresh instance, restore the state, and offline-render to a non-silent WAV via the
+/// library's `render_to_wav`. Exercised here against Dexed (single-instance: the first is
+/// dropped before the second loads).
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_export_render_with_state_roundtrip() {
+    use vst3_host::midi::{MidiChannel, MidiEvent};
+
+    let _guard = plugin_guard();
+    let Some(path) = dexed_path() else {
+        return;
+    };
+
+    // First instance: tweak a parameter, snapshot state, then drop it.
+    let state = {
+        let mut host = Vst3Host::builder()
+            .sample_rate(48000.0)
+            .block_size(512)
+            .build()
+            .expect("build host");
+        let mut plugin = host.load_plugin(path).expect("load Dexed");
+        let param = pick_writable_param(&mut plugin);
+        plugin.set_parameter(param.id, 0.42).expect("set param");
+        plugin.save_state().expect("save_state")
+    };
+
+    // Fresh instance: restore the state and render offline to a WAV.
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .build()
+        .expect("build host 2");
+    let mut plugin = host.load_plugin(path).expect("reload Dexed");
+    plugin.load_state(&state).expect("load_state");
+
+    let out = std::env::temp_dir().join(format!("vst3-host-export-{}.wav", std::process::id()));
+    let note = MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 110,
+    };
+    vst3_host::simple::render_to_wav(&mut plugin, 1.0, &[note], &out).expect("render_to_wav");
+
+    // The file exists and is a non-trivial WAV (44-byte header + a second of stereo f32).
+    let bytes = std::fs::read(&out).expect("read exported wav");
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(&bytes[0..4], b"RIFF", "not a RIFF/WAV file");
+    assert!(
+        bytes.len() > 44 + 48000 * 2 * 4 / 2,
+        "exported WAV is implausibly small: {} bytes",
+        bytes.len()
+    );
+
+    // Confirm the audio isn't pure silence: scan the f32 sample data for a non-zero.
+    let any_nonzero = bytes[44..]
+        .chunks_exact(4)
+        .any(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]).abs() > 1e-4);
+    assert!(any_nonzero, "exported WAV is silent");
+}
+
 /// Runtime reconfigure: after `reconfigure(44100, 256)` the plugin reports the new settings,
 /// still produces audio for a held note at the new rate, and refuses to reconfigure while
 /// processing.

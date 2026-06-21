@@ -317,9 +317,13 @@ fn main() {
 
     println!("Starting VST3 Host...");
 
+    // Restore the last window size (falling back to the default) from saved preferences.
+    let startup_prefs = Preferences::load();
+    let (win_w, win_h) = startup_prefs.window_size.unwrap_or((1200.0, 800.0));
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
+            .with_inner_size([win_w, win_h])
             .with_title("VST3 Plugin Inspector"),
         ..Default::default()
     };
@@ -333,15 +337,27 @@ fn main() {
             let mut inspector = VST3Inspector::from_path(PLUGIN_PATH);
 
             // Scan for available plugins
-            let prefs = Preferences::load();
-            inspector.discovered_plugins = discover_vst3_paths(&prefs.custom_plugin_paths);
+            inspector.discovered_plugins =
+                discover_vst3_paths(&inspector.preferences.custom_plugin_paths);
 
-            // Try to load the default plugin through the library.
+            // Load the default plugin, or fall back to the last-loaded plugin from the
+            // previous session if the default isn't present.
             let default_path = inspector.plugin_path.clone();
-            if std::path::Path::new(&default_path).exists() {
-                inspector.load_plugin(default_path);
+            let to_load = if std::path::Path::new(&default_path).exists() {
+                Some(default_path)
             } else {
-                println!("ℹDefault plugin not found, none loaded at startup");
+                inspector
+                    .preferences
+                    .last_loaded_plugin
+                    .clone()
+                    .filter(|p| std::path::Path::new(p).exists())
+            };
+            match to_load {
+                Some(path) => {
+                    inspector.plugin_path = path.clone();
+                    inspector.load_plugin(path);
+                }
+                None => println!("No default or last-loaded plugin found, none loaded at startup"),
             }
 
             Ok(Box::new(inspector))
@@ -429,11 +445,15 @@ impl Default for MidiEventFilter {
 }
 
 #[derive(Serialize, Deserialize, Default)]
+#[serde(default)] // tolerate older config files missing the newer session fields
 struct Preferences {
     custom_plugin_paths: Vec<String>,
     last_loaded_plugin: Option<String>,
     auto_start_processing: bool,
     window_size: Option<(f32, f32)>,
+    // Session state restored on next launch.
+    last_tab: Option<Tab>,
+    last_midi_channel: Option<i16>,
 }
 
 impl Preferences {
@@ -476,8 +496,10 @@ struct VST3Inspector {
     // The currently loaded + playing plugin. `Some` when a plugin is loaded; the
     // `Plugin` lives entirely inside this `AudioHandle` for its whole lifetime.
     audio: Option<AudioHandle>,
-    // Last user-facing error (e.g. for not-yet-ported features).
+    // Last user-facing error/status message, shown in the header and auto-cleared.
     last_error: Option<String>,
+    // When `last_error` was set, for the auto-clear timer.
+    last_error_time: Option<Instant>,
     // GUI management
     gui_attached: bool,
     // Parameter editing
@@ -514,7 +536,7 @@ struct VST3Inspector {
     meter_right: Arc<Mutex<PeakMeter>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum Tab {
     Plugins,
     Plugin,
@@ -537,6 +559,15 @@ impl eframe::App for VST3Inspector {
     fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Auto-clear the status/error line a few seconds after it was set.
+        if self
+            .last_error_time
+            .is_some_and(|t| t.elapsed() > Duration::from_secs(3))
+        {
+            self.last_error = None;
+            self.last_error_time = None;
+        }
+
         // Pull current output levels, plugin-emitted MIDI, and plugin-side parameter edits.
         self.update_vu_meters();
         self.poll_plugin_output_midi();
@@ -594,7 +625,7 @@ impl eframe::App for VST3Inspector {
                                 .clicked()
                             {
                                 if let Err(e) = self.create_plugin_gui() {
-                                    println!("Failed to create plugin GUI: {}", e);
+                                    self.set_error(format!("Failed to create plugin GUI: {e}"));
                                 }
                             }
                         } else {
@@ -627,6 +658,10 @@ impl eframe::App for VST3Inspector {
             Tab::Processing => self.show_processing_tab(ctx),
             Tab::MidiMonitor => self.show_midi_monitor_tab(ctx),
         }
+
+        // Persist session state (tab, channel, window size) whenever it changes, so the next
+        // launch restores it. Captured here after the UI ran, debounced to only write on change.
+        self.persist_session_if_changed(ctx);
     }
 }
 
@@ -699,6 +734,44 @@ impl VST3Inspector {
 
     /// Pull the latest output levels from the playing plugin and feed the VU meter
     /// (peak + peak-hold) caches that the Processing tab reads.
+    /// Set the header status/error line, stamping it so it auto-clears after a few seconds.
+    fn set_error(&mut self, msg: impl Into<String>) {
+        self.last_error = Some(msg.into());
+        self.last_error_time = Some(Instant::now());
+    }
+
+    /// Snapshot session state into `preferences` and save it to disk, but only when something
+    /// changed — so a steady 60 fps UI doesn't rewrite the config file every frame.
+    fn persist_session_if_changed(&mut self, ctx: &egui::Context) {
+        let size = ctx.screen_rect().size();
+        let window_size = Some((size.x, size.y));
+        let last_tab = Some(self.current_tab.clone());
+        let last_midi_channel = Some(self.selected_midi_channel);
+        // The loaded plugin path, so it can be auto-reloaded next launch.
+        let last_loaded_plugin = self
+            .audio
+            .as_ref()
+            .map(|_| self.plugin_path.clone())
+            .or_else(|| self.preferences.last_loaded_plugin.clone());
+
+        let changed = self.preferences.window_size != window_size
+            || self.preferences.last_tab != last_tab
+            || self.preferences.last_midi_channel != last_midi_channel
+            || self.preferences.last_loaded_plugin != last_loaded_plugin;
+        if !changed {
+            return;
+        }
+
+        self.preferences.window_size = window_size;
+        self.preferences.last_tab = last_tab;
+        self.preferences.last_midi_channel = last_midi_channel;
+        self.preferences.last_loaded_plugin = last_loaded_plugin;
+        if let Err(e) = self.preferences.save() {
+            // Don't spam the status line every frame; a console note is enough.
+            eprintln!("Failed to persist session preferences: {e}");
+        }
+    }
+
     fn update_vu_meters(&mut self) {
         let levels = match &self.audio {
             Some(a) => a.lock().get_output_levels(),
@@ -740,7 +813,7 @@ impl VST3Inspector {
                         if !self.preferences.custom_plugin_paths.contains(&folder_path) {
                             self.preferences.custom_plugin_paths.push(folder_path);
                             if let Err(e) = self.preferences.save() {
-                                println!("Failed to save preferences: {}", e);
+                                self.set_error(format!("Failed to save preferences: {e}"));
                             }
                             // Refresh plugin list
                             self.discovered_plugins =
@@ -770,7 +843,7 @@ impl VST3Inspector {
                     for idx in paths_to_remove.into_iter().rev() {
                         self.preferences.custom_plugin_paths.remove(idx);
                         if let Err(e) = self.preferences.save() {
-                            println!("Failed to save preferences: {}", e);
+                            self.set_error(format!("Failed to save preferences: {e}"));
                         }
                         // Refresh plugin list
                         self.discovered_plugins =
@@ -911,6 +984,16 @@ impl VST3Inspector {
                             .clicked()
                         {
                             self.load_preset_dialog();
+                        }
+                        if ui
+                            .button("Export WAV")
+                            .on_hover_text(
+                                "Render the current plugin state offline to a WAV file \
+                                 (4 s, held C3)",
+                            )
+                            .clicked()
+                        {
+                            self.export_wav_dialog();
                         }
                     });
                 });
@@ -1187,7 +1270,9 @@ impl VST3Inspector {
                                 ui.horizontal(|ui| {
                                     if ui.button("Refresh Values").clicked() {
                                         if let Err(e) = self.refresh_parameter_values() {
-                                            println!("Failed to refresh parameters: {}", e);
+                                            self.set_error(format!(
+                                                "Failed to refresh parameters: {e}"
+                                            ));
                                         }
                                     }
                                 });
@@ -1511,7 +1596,9 @@ impl VST3Inspector {
                                             if let Err(e) =
                                                 self.set_parameter_value(param.id, new_value as f64)
                                             {
-                                                println!("Failed to set parameter: {}", e);
+                                                self.set_error(format!(
+                                                    "Failed to set parameter: {e}"
+                                                ));
                                             }
                                         }
                                         combo_response.response
@@ -1529,7 +1616,9 @@ impl VST3Inspector {
                                             if let Err(e) =
                                                 self.set_parameter_value(param.id, new_value as f64)
                                             {
-                                                println!("Failed to set parameter: {}", e);
+                                                self.set_error(format!(
+                                                    "Failed to set parameter: {e}"
+                                                ));
                                             }
                                         }
 
@@ -1585,7 +1674,7 @@ impl VST3Inspector {
                                         param.id,
                                         param.default_normalized_value,
                                     ) {
-                                        println!("Failed to reset parameter: {}", e);
+                                        self.set_error(format!("Failed to reset parameter: {e}"));
                                     }
                                 }
 
@@ -1636,7 +1725,7 @@ impl VST3Inspector {
 
                         if slider_response.changed() {
                             if let Err(e) = self.set_parameter_value(param.id, new_value as f64) {
-                                println!("Failed to set parameter: {}", e);
+                                self.set_error(format!("Failed to set parameter: {e}"));
                             }
                         }
                     });
@@ -1646,19 +1735,19 @@ impl VST3Inspector {
                             if let Err(e) =
                                 self.set_parameter_value(param.id, param.default_normalized_value)
                             {
-                                println!("Failed to reset parameter: {}", e);
+                                self.set_error(format!("Failed to reset parameter: {e}"));
                             }
                         }
 
                         if ui.button("Set to 0.0").clicked() {
                             if let Err(e) = self.set_parameter_value(param.id, 0.0) {
-                                println!("Failed to set parameter: {}", e);
+                                self.set_error(format!("Failed to set parameter: {e}"));
                             }
                         }
 
                         if ui.button("Set to 1.0").clicked() {
                             if let Err(e) = self.set_parameter_value(param.id, 1.0) {
-                                println!("Failed to set parameter: {}", e);
+                                self.set_error(format!("Failed to set parameter: {e}"));
                             }
                         }
 
@@ -1694,7 +1783,7 @@ impl VST3Inspector {
                     ui.colored_label(egui::Color32::RED, "Stopped");
                     if ui.button("Start Processing").clicked() {
                         if let Err(e) = self.start_processing() {
-                            println!("Failed to start processing: {}", e);
+                            self.set_error(format!("Failed to start processing: {e}"));
                         }
                     }
                 }
@@ -2224,7 +2313,7 @@ impl VST3Inspector {
         let mut window = vst3_host::PluginWindow::new(audio.plugin());
         if let Err(e) = window.open() {
             let msg = format!("Failed to open editor: {e}");
-            self.last_error = Some(msg.clone());
+            self.set_error(msg.clone());
             return Err(msg);
         }
         self.plugin_window = Some(window);
@@ -2245,7 +2334,7 @@ impl VST3Inspector {
         let audio = match &self.audio {
             Some(a) => a,
             None => {
-                self.last_error = Some("No plugin loaded".to_string());
+                self.set_error("No plugin loaded");
                 return;
             }
         };
@@ -2275,10 +2364,10 @@ impl VST3Inspector {
 
         match result {
             Ok(()) => {
-                self.last_error = Some(format!("Saved preset to {}", path.display()));
+                self.set_error(format!("Saved preset to {}", path.display()));
             }
             Err(e) => {
-                self.last_error = Some(format!("Failed to save preset: {e}"));
+                self.set_error(format!("Failed to save preset: {e}"));
             }
         }
     }
@@ -2289,7 +2378,7 @@ impl VST3Inspector {
     /// Surfaces the result through `last_error`.
     fn load_preset_dialog(&mut self) {
         if self.audio.is_none() {
-            self.last_error = Some("No plugin loaded".to_string());
+            self.set_error("No plugin loaded");
             return;
         }
 
@@ -2320,11 +2409,70 @@ impl VST3Inspector {
             Ok(()) => {
                 // Re-sync the cached parameter values with the restored plugin state.
                 let _ = self.refresh_parameter_values();
-                self.last_error = Some(format!("Loaded preset from {}", path.display()));
+                self.set_error(format!("Loaded preset from {}", path.display()));
             }
             Err(e) => {
-                self.last_error = Some(format!("Failed to load preset: {e}"));
+                self.set_error(format!("Failed to load preset: {e}"));
             }
+        }
+    }
+
+    /// Render the loaded plugin offline to a WAV file (4 s, a held C3), preserving the current
+    /// state. The live plugin is owned by the `AudioHandle` and some plugins (e.g. Dexed) can't
+    /// have two instances at once, so we snapshot state, drop the live instance, render a fresh
+    /// one via the library's `render_to_wav`, then reload to resume the live view.
+    fn export_wav_dialog(&mut self) {
+        use vst3_host::midi::{MidiChannel, MidiEvent};
+
+        if self.audio.is_none() {
+            self.set_error("No plugin loaded");
+            return;
+        }
+        let plugin_path = self.plugin_path.clone();
+
+        let path = match rfd::FileDialog::new()
+            .set_title("Export Audio to WAV")
+            .add_filter("WAV audio", &["wav"])
+            .set_file_name("export.wav")
+            .save_file()
+        {
+            Some(p) => p,
+            None => return, // user cancelled
+        };
+
+        // Snapshot the live state so the export reflects the user's current tweaks.
+        let state = self.audio.as_ref().and_then(|a| a.lock().save_state().ok());
+
+        // Free the live instance before loading a fresh one for the offline render.
+        self.audio = None;
+
+        let render_result = (|| -> Result<(), String> {
+            let mut plugin = self
+                .host
+                .load_plugin(&plugin_path)
+                .map_err(|e| format!("load for export: {e}"))?;
+            if let Some(ref data) = state {
+                let _ = plugin.load_state(data); // best-effort; render defaults if it fails
+            }
+            let note = MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 110,
+            };
+            vst3_host::simple::render_to_wav(&mut plugin, 4.0, &[note], &path)
+                .map_err(|e| format!("render: {e}"))
+        })();
+
+        // Resume the live view by reloading the plugin (restoring snapshot state if any).
+        self.load_plugin(plugin_path);
+        if let (Some(audio), Some(data)) = (self.audio.as_ref(), state.as_ref()) {
+            let _ = audio.lock().load_state(data);
+            let _ = self.refresh_parameter_values();
+        }
+
+        match render_result {
+            Ok(()) => self.set_error(format!("Exported audio to {}", path.display())),
+            Err(e) => self.set_error(format!("Failed to export audio: {e}")),
         }
     }
 
@@ -2427,14 +2575,13 @@ impl VST3Inspector {
         self.gui_attached = false;
         self.is_processing = false;
         self.last_error = None;
+        self.last_error_time = None;
 
         // Build the inspector's detailed PluginInfo from the library's introspection.
         let detail = match vst3_host::get_detailed_plugin_info(std::path::Path::new(&plugin_path)) {
             Ok(d) => d,
             Err(e) => {
-                let msg = format!("Failed to introspect plugin: {e}");
-                println!("{msg}");
-                self.last_error = Some(msg);
+                self.set_error(format!("Failed to introspect plugin: {e}"));
                 return;
             }
         };
@@ -2443,9 +2590,7 @@ impl VST3Inspector {
         let plugin = match self.host.load_plugin(&plugin_path) {
             Ok(p) => p,
             Err(e) => {
-                let msg = format!("Failed to load plugin: {e}");
-                println!("{msg}");
-                self.last_error = Some(msg);
+                self.set_error(format!("Failed to load plugin: {e}"));
                 return;
             }
         };
@@ -2456,9 +2601,7 @@ impl VST3Inspector {
         let audio = match self.host.play(plugin) {
             Ok(a) => a,
             Err(e) => {
-                let msg = format!("Failed to start audio playback: {e}");
-                println!("{msg}");
-                self.last_error = Some(msg);
+                self.set_error(format!("Failed to start audio playback: {e}"));
                 return;
             }
         };
@@ -2477,7 +2620,7 @@ impl VST3Inspector {
         // Auto-start processing if enabled in preferences.
         if self.preferences.auto_start_processing {
             if let Err(e) = self.start_processing() {
-                println!("Failed to auto-start processing: {}", e);
+                self.set_error(format!("Failed to auto-start processing: {e}"));
             }
         }
 
@@ -3019,7 +3162,7 @@ impl VST3Inspector {
                 if !self.pressed_keys.contains(&note) {
                     self.pressed_keys.insert(note);
                     if let Err(e) = self.send_midi_note_on(self.selected_midi_channel, note, 0.8) {
-                        println!("Failed to send note on: {}", e);
+                        self.set_error(format!("Failed to send note on: {e}"));
                     }
                 }
             }
@@ -3030,7 +3173,7 @@ impl VST3Inspector {
             // Mouse up - send note off for all pressed keys
             for &note in self.pressed_keys.clone().iter() {
                 if let Err(e) = self.send_midi_note_off(self.selected_midi_channel, note, 0.0) {
-                    println!("Failed to send note off: {}", e);
+                    self.set_error(format!("Failed to send note off: {e}"));
                 }
             }
             self.pressed_keys.clear();
@@ -3042,6 +3185,11 @@ impl VST3Inspector {
     fn from_path(path: &str) -> Self {
         let sample_rate = 48000.0;
         let block_size = 512;
+
+        // Restore persisted session state (tab, MIDI channel) from preferences.
+        let preferences = Preferences::load();
+        let current_tab = preferences.last_tab.clone().unwrap_or(Tab::Plugins);
+        let selected_midi_channel = preferences.last_midi_channel.unwrap_or(0).clamp(0, 15);
 
         // Build the library host once. If this fails we still construct a usable (but
         // plugin-less) inspector so the GUI can launch and surface the error.
@@ -3068,6 +3216,7 @@ impl VST3Inspector {
             host,
             audio: None,
             last_error: None,
+            last_error_time: None,
             gui_attached: false,
             selected_parameter: None,
             parameter_search: String::new(),
@@ -3076,18 +3225,18 @@ impl VST3Inspector {
             table_scroll_to_selected: false,
             current_page: 0,
             items_per_page: 50,
-            current_tab: Tab::Plugins,
+            current_tab,
             parameter_being_edited: None,
             is_processing: false,
             block_size,
             sample_rate,
             pressed_keys: HashSet::new(),
-            selected_midi_channel: 0, // Default to channel 1 (0-based)
+            selected_midi_channel,
             midi_events: Arc::new(Mutex::new(Vec::new())),
             midi_event_filter: MidiEventFilter::default(),
             midi_monitor_paused: Arc::new(Mutex::new(false)),
             max_midi_events: 1000,
-            preferences: Preferences::load(),
+            preferences,
             // 20 dB/s fall, 3 s peak-hold — the classic VU-meter ballistic.
             meter_left: Arc::new(Mutex::new(PeakMeter::new(20.0, Duration::from_secs(3)))),
             meter_right: Arc::new(Mutex::new(PeakMeter::new(20.0, Duration::from_secs(3)))),
