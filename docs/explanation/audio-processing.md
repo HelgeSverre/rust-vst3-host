@@ -26,6 +26,12 @@ each `process` call may ask for fewer frames. `process_audio` sets the per-call 
 accordingly and copies only that many samples. If you call it yourself, size your
 `AudioBuffers` to the block you want rendered (up to the configured maximum).
 
+If the *maximum* itself needs to change — or the sample rate does, e.g. the output device
+switches rate mid-session — call `Plugin::reconfigure(sample_rate, block_size)`. It re-runs
+the plugin's `setupProcessing` and rebuilds the audio buffers, so it must be called while the
+plugin is **not** processing (`stop_processing` first, then `start_processing` again).
+Reconfigure is not yet marshalled across [process isolation](process-isolation.md).
+
 ## Parameter and MIDI changes during playback
 
 The plugin runs on the audio thread (inside the device callback). Your control thread

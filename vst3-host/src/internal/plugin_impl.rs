@@ -867,6 +867,40 @@ impl PluginInternal for PluginImpl {
         }
     }
 
+    fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
+        if self.is_processing {
+            return Err(Error::Other(
+                "cannot reconfigure while processing".to_string(),
+            ));
+        }
+        unsafe {
+            // VST3 requires the component to be inactive when setupProcessing is called.
+            let was_active = self.is_active;
+            if was_active {
+                self.component.setActive(0);
+                self.is_active = false;
+            }
+
+            self.sample_rate = sample_rate;
+            self.block_size = block_size;
+
+            // Re-run setupProcessing and rebuild process data / buffers for the new size.
+            self.setup_processing()?;
+
+            if was_active {
+                let result = self.component.setActive(1);
+                if result != kResultOk {
+                    return Err(Error::Other(format!(
+                        "Failed to reactivate after reconfigure: {:#x}",
+                        result
+                    )));
+                }
+                self.is_active = true;
+            }
+        }
+        Ok(())
+    }
+
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()> {
         self.send_midi_event_at(event, 0)
     }

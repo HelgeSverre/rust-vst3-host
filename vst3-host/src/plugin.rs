@@ -97,6 +97,13 @@ pub(crate) trait PluginInternal: Send {
     fn get_all_parameters(&self) -> Result<Vec<Parameter>>;
     fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()>;
+    /// Re-run `setupProcessing` for a new sample rate / block size. Defaults to unsupported
+    /// (e.g. process isolation, where reconfigure isn't marshalled across the boundary).
+    fn reconfigure(&mut self, _sample_rate: f64, _block_size: usize) -> Result<()> {
+        Err(Error::Other(
+            "runtime reconfigure is not supported for this plugin".to_string(),
+        ))
+    }
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()>;
     /// Schedule a MIDI event at a sample offset within the next process block.
     /// Defaults to a block-start event (ignores the offset) for implementations that don't
@@ -176,6 +183,40 @@ impl Plugin {
     /// The maximum block size (frames per `process_audio` call) configured at load.
     pub fn block_size(&self) -> usize {
         self.block_size
+    }
+
+    /// Reconfigure the plugin for a new sample rate and/or maximum block size, re-running the
+    /// plugin's `setupProcessing` and rebuilding its audio buffers.
+    ///
+    /// Use this when the audio device's sample rate changes mid-session instead of reloading.
+    /// The plugin must **not** be processing: call [`Self::stop_processing`] first, reconfigure,
+    /// then [`Self::start_processing`] again. Returns an error if called while processing, on an
+    /// invalid sample rate / zero block size, or under process isolation (not yet marshalled).
+    pub fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
+        if self.is_processing {
+            return Err(Error::Other(
+                "cannot reconfigure while processing; call stop_processing() first".to_string(),
+            ));
+        }
+        if !(sample_rate.is_finite() && sample_rate > 0.0) {
+            return Err(Error::InvalidParameter(format!(
+                "sample rate must be finite and positive, got {sample_rate}"
+            )));
+        }
+        if block_size == 0 {
+            return Err(Error::InvalidParameter(
+                "block size must be greater than 0".to_string(),
+            ));
+        }
+
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .reconfigure(sample_rate, block_size)?;
+
+        self.sample_rate = sample_rate;
+        self.block_size = block_size;
+        Ok(())
     }
 
     /// Get all parameters

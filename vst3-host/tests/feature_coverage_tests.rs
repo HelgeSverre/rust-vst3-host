@@ -273,6 +273,64 @@ fn test_sample_accurate_midi_offset_delays_onset() {
     );
 }
 
+/// Runtime reconfigure: after `reconfigure(44100, 256)` the plugin reports the new settings,
+/// still produces audio for a held note at the new rate, and refuses to reconfigure while
+/// processing.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_runtime_reconfigure_changes_settings() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed() else {
+        return;
+    };
+
+    // Starts at the host-configured 48 kHz / 512.
+    assert_eq!(plugin.block_size(), 512);
+    assert!((plugin.sample_rate() - 48000.0).abs() < 1.0);
+
+    // Reconfiguring while processing is rejected.
+    plugin.start_processing().expect("start_processing");
+    let err = plugin.reconfigure(44100.0, 256);
+    assert!(
+        err.is_err(),
+        "reconfigure while processing must error, got {err:?}"
+    );
+    plugin.stop_processing().ok();
+
+    // Now reconfigure to a new sample rate and block size.
+    plugin
+        .reconfigure(44100.0, 256)
+        .expect("reconfigure to 44100/256");
+    assert_eq!(plugin.block_size(), 256);
+    assert!((plugin.sample_rate() - 44100.0).abs() < 1.0);
+
+    // The plugin still produces audio at the new configuration.
+    plugin.start_processing().expect("restart processing");
+    plugin
+        .send_midi_note(60, 110, MidiChannel::Ch1)
+        .expect("note on");
+    let mut peak = 0.0f32;
+    for _ in 0..40 {
+        let mut buffers = AudioBuffers::new(0, 2, 256, 44100.0);
+        plugin.process_audio(&mut buffers).expect("process_audio");
+        assert_eq!(buffers.outputs[0].len(), 256);
+        for ch in &buffers.outputs {
+            for &s in ch {
+                peak = peak.max(s.abs());
+            }
+        }
+    }
+    plugin.send_midi_note_off(60, MidiChannel::Ch1).ok();
+    plugin.stop_processing().ok();
+
+    println!("post-reconfigure peak: {peak:.4}");
+    assert!(peak > 0.0, "no audio after reconfigure (peak {peak})");
+
+    // Invalid arguments are rejected.
+    assert!(plugin.reconfigure(0.0, 256).is_err(), "zero sample rate");
+    assert!(plugin.reconfigure(44100.0, 0).is_err(), "zero block size");
+}
+
 /// Variable block sizes: 64, 128, and 512 frames all process without error and the
 /// configured-max path (512) still produces audio for a held note.
 #[test]
