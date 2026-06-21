@@ -32,11 +32,14 @@ correctness fix —
 - **1.7**: sample-accurate MIDI — `Plugin::send_midi_event_at(event, sample_offset)` populates
   the per-event `Event.sampleOffset` (was hardcoded 0). Verified end-to-end: a note at
   offset 256 leaves the block's leading window silent while the offset-0 control fills it.
+- **7.3**: metering ergonomics — new `audio::PeakMeter` (falling-ballistic + timed peak-hold,
+  time injected for determinism) and `audio::RmsWindow` (moving RMS). Adopted in the inspector's
+  VU meter (replaced its hand-rolled `*0.95` decay + `(f32, Instant)` hold). 8 unit tests + 2
+  doctests; exported from the crate root and prelude.
 
 **Next up** (deferred, still open): 2.3 denormal guard (ARM-unverifiable), 4.2/4.3 inspector
 polish, 4.5 inspector audio export, 1.8 `IMidiMapping`, 2.4 runtime reconfigure, 2.5 input
-buffer, 7.3 metering, 3.5 isolated sample-accurate automation (pairs with 1.7), and the rest
-of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
+buffer, 3.5 isolated sample-accurate automation (pairs with 1.7), and the rest of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
 every installed plugin and can be aborted by a licensed plugin's C++ exception — isolating
 discovery is a future robustness item.
 

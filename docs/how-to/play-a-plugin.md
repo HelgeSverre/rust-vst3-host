@@ -53,6 +53,25 @@ It owns the running stream and the plugin:
   # }
   ```
 
+- **Drive a VU meter** with [`PeakMeter`](https://docs.rs/vst3-host/latest/vst3_host/audio/struct.PeakMeter.html):
+  feed it each poll's peak and it handles the falling ballistic and timed peak-hold (the
+  raw `peak_hold` on `AudioLevels` is sticky and won't fall). [`RmsWindow`](https://docs.rs/vst3-host/latest/vst3_host/audio/struct.RmsWindow.html)
+  gives a smooth RMS over a fixed time window.
+
+  ```rust
+  # use std::time::{Duration, Instant};
+  # use vst3_host::{simple, audio::PeakMeter};
+  # fn main() -> vst3_host::Result<()> {
+  # let audio = simple::play(simple::load_plugin("/x.vst3")?)?;
+  let mut meter = PeakMeter::new(20.0, Duration::from_secs(3)); // 20 dB/s fall, 3 s hold
+  let levels = audio.lock().get_output_levels();
+  let peak = levels.channels.first().map(|c| c.peak).unwrap_or(0.0);
+  meter.push(peak, Instant::now());
+  // meter.level() drives the bar; meter.peak_hold() drives the hold marker.
+  # Ok(())
+  # }
+  ```
+
 - **Stop** by dropping it (`drop(audio)`) or calling `audio.stop()`.
 
 ## How the audio gets there

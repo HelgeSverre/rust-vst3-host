@@ -31,6 +31,7 @@ reach for each.
 | [`play_with_backend`](https://docs.rs/vst3-host/latest/vst3_host/playback/fn.play_with_backend.html) / `play_realtime_with_backend` | Drive a plugin with any `AudioBackend` (mutex or lock-free). |
 | [`CpalBackend`](https://docs.rs/vst3-host/latest/vst3_host/backends/struct.CpalBackend.html) | The bundled CPAL backend (feature `cpal-backend`). |
 | [`AudioBackend`](https://docs.rs/vst3-host/latest/vst3_host/audio/trait.AudioBackend.html) / [`AudioBuffers`](https://docs.rs/vst3-host/latest/vst3_host/audio/struct.AudioBuffers.html) / [`AudioLevels`](https://docs.rs/vst3-host/latest/vst3_host/audio/struct.AudioLevels.html) | Custom backends, manual processing, metering. |
+| [`PeakMeter`](https://docs.rs/vst3-host/latest/vst3_host/audio/struct.PeakMeter.html) / [`RmsWindow`](https://docs.rs/vst3-host/latest/vst3_host/audio/struct.RmsWindow.html) | UI level meters: falling peak + timed hold, windowed RMS. |
 
 ## Other
 
