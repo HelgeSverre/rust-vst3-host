@@ -247,3 +247,75 @@ pub trait AudioBackend: Send + Sync {
         error_callback: Box<dyn FnMut(Self::Error) + Send>,
     ) -> Result<Self::Stream, Self::Error>;
 }
+
+/// Write deinterleaved channel buffers to a 32-bit float WAV file (`WAVE_FORMAT_IEEE_FLOAT`).
+///
+/// `channels[ch][frame]`; all channels must be the same length. Used by offline rendering
+/// (e.g. [`crate::simple::render_to_wav`]) and audio export. No external dependency.
+pub fn write_wav<P: AsRef<std::path::Path>>(
+    path: P,
+    channels: &[Vec<f32>],
+    sample_rate: u32,
+) -> crate::error::Result<()> {
+    use crate::error::Error;
+    use std::io::Write;
+
+    let num_channels = channels.len().max(1) as u16;
+    let frames = channels.iter().map(|c| c.len()).min().unwrap_or(0);
+    let bits_per_sample: u16 = 32;
+    let block_align = num_channels * (bits_per_sample / 8);
+    let byte_rate = sample_rate * block_align as u32;
+    let data_size = (frames * num_channels as usize * (bits_per_sample / 8) as usize) as u32;
+
+    let mut buf: Vec<u8> = Vec::with_capacity(44 + data_size as usize);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(36 + data_size).to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+    buf.extend_from_slice(&num_channels.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+    // Interleave channels frame by frame.
+    for f in 0..frames {
+        for ch in channels {
+            buf.extend_from_slice(&ch[f].to_le_bytes());
+        }
+    }
+
+    let mut file =
+        std::fs::File::create(path).map_err(|e| Error::Other(format!("create wav: {e}")))?;
+    file.write_all(&buf)
+        .map_err(|e| Error::Other(format!("write wav: {e}")))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod wav_tests {
+    use super::*;
+
+    #[test]
+    fn write_wav_has_correct_header_and_size() {
+        let ch = vec![vec![0.0f32, 0.5, -0.5, 1.0], vec![0.1, 0.2, 0.3, 0.4]];
+        let path = std::env::temp_dir().join("vh_write_wav_test.wav");
+        write_wav(&path, &ch, 48_000).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(u16::from_le_bytes([bytes[20], bytes[21]]), 3); // IEEE float
+        assert_eq!(u16::from_le_bytes([bytes[22], bytes[23]]), 2); // channels
+        assert_eq!(
+            u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
+            48_000
+        );
+        // 4 frames * 2 ch * 4 bytes = 32 bytes of data; file = 44-byte header + 32.
+        assert_eq!(bytes.len(), 44 + 32);
+    }
+}

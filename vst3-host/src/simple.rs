@@ -40,8 +40,10 @@
 //! ```
 
 use crate::{
+    audio::AudioBuffers,
     error::{Error, Result},
     host::Vst3Host,
+    midi::MidiEvent,
     plugin::{Plugin, PluginInfo},
 };
 use std::path::Path;
@@ -306,6 +308,60 @@ pub fn is_valid_plugin<P: AsRef<Path>>(path: P) -> bool {
     }
 
     false
+}
+
+/// Render a plugin offline to a 32-bit float WAV file.
+///
+/// Drives `process_audio` faster-than-realtime for `duration_secs` (at the plugin's
+/// configured sample rate and block size), starting/stopping processing for you, and writes
+/// the output to `path`. Any `midi` events are sent at the start — pass a held `NoteOn` to
+/// bounce an instrument, or an empty slice for an effect (feed input via the lower-level
+/// `process_audio` loop if you need to process a signal). No audio hardware is used.
+///
+/// ```no_run
+/// use vst3_host::{simple, midi::{MidiEvent, MidiChannel}};
+/// # fn main() -> vst3_host::Result<()> {
+/// let mut plugin = simple::load_plugin("/path/synth.vst3")?;
+/// let note = MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 60, velocity: 100 };
+/// simple::render_to_wav(&mut plugin, 2.0, &[note], "out.wav")?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn render_to_wav<P: AsRef<Path>>(
+    plugin: &mut Plugin,
+    duration_secs: f64,
+    midi: &[MidiEvent],
+    path: P,
+) -> Result<()> {
+    if duration_secs < 0.0 {
+        return Err(Error::Other("duration must be non-negative".to_string()));
+    }
+    let sample_rate = plugin.sample_rate();
+    let block = plugin.block_size().max(1);
+    let out_channels = plugin.output_channel_count().max(1);
+    let total_frames = (duration_secs * sample_rate).round() as usize;
+
+    plugin.start_processing()?;
+    for &event in midi {
+        plugin.send_midi_event(event)?;
+    }
+
+    let mut channels: Vec<Vec<f32>> = vec![Vec::with_capacity(total_frames); out_channels];
+    let mut rendered = 0;
+    while rendered < total_frames {
+        let frames = block.min(total_frames - rendered);
+        let mut buffers = AudioBuffers::new(0, out_channels, frames, sample_rate);
+        plugin.process_audio(&mut buffers)?;
+        for (ch, dst) in channels.iter_mut().enumerate() {
+            if let Some(src) = buffers.outputs.get(ch) {
+                dst.extend_from_slice(&src[..frames.min(src.len())]);
+            }
+        }
+        rendered += frames;
+    }
+    plugin.stop_processing()?;
+
+    crate::audio::write_wav(path, &channels, sample_rate as u32)
 }
 
 #[cfg(test)]
