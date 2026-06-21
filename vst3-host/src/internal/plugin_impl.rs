@@ -1167,6 +1167,57 @@ impl PluginInternal for PluginImpl {
         self.editor_resize.lock().ok().and_then(|mut s| s.take())
     }
 
+    fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
+        use crate::plugin::PluginUnit;
+        let Some(ref controller) = self.controller else {
+            return Ok(Vec::new());
+        };
+        // IUnitInfo is optional; plugins without it (no units/program lists) return empty.
+        let Some(unit_info) = controller.cast::<IUnitInfo>() else {
+            return Ok(Vec::new());
+        };
+        unsafe {
+            // First resolve program lists (id -> program names), then attach to units.
+            let mut lists: std::collections::HashMap<i32, Vec<String>> =
+                std::collections::HashMap::new();
+            let list_count = unit_info.getProgramListCount();
+            for i in 0..list_count {
+                let mut pl: ProgramListInfo = std::mem::zeroed();
+                if unit_info.getProgramListInfo(i, &mut pl) != kResultOk {
+                    continue;
+                }
+                let mut programs = Vec::with_capacity(pl.programCount.max(0) as usize);
+                for p in 0..pl.programCount {
+                    let mut name: String128 = std::mem::zeroed();
+                    let s = if unit_info.getProgramName(pl.id, p, &mut name) == kResultOk {
+                        crate::internal::utils::vst_string_to_string(&name)
+                    } else {
+                        String::new()
+                    };
+                    programs.push(s);
+                }
+                lists.insert(pl.id, programs);
+            }
+
+            let unit_count = unit_info.getUnitCount();
+            let mut units = Vec::with_capacity(unit_count.max(0) as usize);
+            for i in 0..unit_count {
+                let mut ui: UnitInfo = std::mem::zeroed();
+                if unit_info.getUnitInfo(i, &mut ui) != kResultOk {
+                    continue;
+                }
+                let programs = lists.get(&ui.programListId).cloned().unwrap_or_default();
+                units.push(PluginUnit {
+                    id: ui.id,
+                    parent_id: ui.parentUnitId,
+                    name: crate::internal::utils::vst_string_to_string(&ui.name),
+                    programs,
+                });
+            }
+            Ok(units)
+        }
+    }
+
     fn output_channel_count(&self) -> usize {
         unsafe {
             let bus_count = self.component.getBusCount(kAudio as i32, kOutput as i32);
