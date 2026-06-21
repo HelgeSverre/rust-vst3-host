@@ -44,10 +44,18 @@ correctness fix —
   resolves a controller to its parameter id via `getMidiControllerAssignment`. Verified: Dexed
   maps all 130 controllers (CC 0–127 + aftertouch + pitch-bend) to real parameter ids,
   deterministically.
+- **3.5**: sample-accurate automation across isolation — `HostCommand::SetParameterAt`
+  carries `set_parameter_at`'s offset to the helper (was silently dropped); the helper's
+  in-process plugin applies it. Wire round-trip test + isolation integration test (value
+  applied across the boundary). Completes the 1.7 sample-accurate story for both paths.
 
 **Next up** (deferred, still open): 2.3 denormal guard (ARM-unverifiable), 4.2/4.3 inspector
-polish, 4.5 inspector audio export, 2.5 input buffer, 3.5 isolated sample-accurate automation
-(pairs with 1.7), and the rest of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
+polish, 4.5 inspector audio export, 2.5 input buffer, and the rest of Tier 3/4.
+
+**Known flake** (pre-existing, not CI-affecting): `test_isolation_output_midi_parity`
+intermittently SIGABRTs with "Pure virtual function called!" while the helper *loads* Dexed
+(~1 in 3). It's `#[ignore]`d (never runs in CI) and unrelated to feature code — a transient
+C++ init crash in the isolated Dexed instance. Known pre-existing fragility: `discover_plugins()` instantiates
 every installed plugin and can be aborted by a licensed plugin's C++ exception — isolating
 discovery is a future robustness item.
 

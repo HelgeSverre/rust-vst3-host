@@ -261,8 +261,8 @@ impl Plugin {
     /// receives the changes at their offsets in the next `process_audio`. Like
     /// [`Self::set_parameter`], `value` is normalized `0.0..=1.0`.
     ///
-    /// `sample_offset` is clamped to the block. Under process isolation the offset is not
-    /// carried across the boundary (the change applies at the block start).
+    /// `sample_offset` is clamped to the block. Under process isolation the offset **is** now
+    /// carried across the boundary and applied by the helper's in-process plugin.
     ///
     /// [`ParameterAutomation::points_for_block`]: crate::parameters::ParameterAutomation::points_for_block
     pub fn set_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {

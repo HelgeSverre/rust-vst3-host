@@ -201,6 +201,14 @@ fn handle(
                 Err(e) => err("SetParameter", e),
             })
         }
+        HostCommand::SetParameterAt { id, value, offset } => {
+            with(plugin, |p| match p.set_parameter_at(id, value, offset) {
+                Ok(()) => HostResponse::Success {
+                    message: "parameter scheduled".to_string(),
+                },
+                Err(e) => err("SetParameterAt", e),
+            })
+        }
         HostCommand::GetParameter { id } => with(plugin, |p| match p.get_parameter(id) {
             Ok(value) => HostResponse::ParameterValue { value },
             Err(e) => err("GetParameter", e),

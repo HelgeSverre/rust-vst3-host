@@ -52,6 +52,15 @@ pub enum HostCommand {
         /// Normalized value.
         value: f64,
     },
+    /// Schedule a parameter change at a sample offset within the next process block.
+    SetParameterAt {
+        /// Parameter id.
+        id: u32,
+        /// Normalized value.
+        value: f64,
+        /// Sample offset within the next processed block.
+        offset: i32,
+    },
     /// Read a parameter's current normalized value.
     GetParameter {
         /// Parameter id.
@@ -556,6 +565,26 @@ mod wire_tests {
         match serde_json::from_str::<HostResponse>(&state_json).expect("deserialize State") {
             HostResponse::State { data } => assert_eq!(data, blob),
             other => panic!("State round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_parameter_at_round_trips_across_the_wire() {
+        // The sample-accurate automation command must survive the JSON transport intact
+        // (roadmap 3.5 — the offset is now carried across the isolation boundary).
+        let cmd = HostCommand::SetParameterAt {
+            id: 42,
+            value: 0.75,
+            offset: 256,
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize SetParameterAt");
+        match serde_json::from_str::<HostCommand>(&json).expect("deserialize SetParameterAt") {
+            HostCommand::SetParameterAt { id, value, offset } => {
+                assert_eq!(id, 42);
+                assert_eq!(value, 0.75);
+                assert_eq!(offset, 256);
+            }
+            other => panic!("round-trip changed the variant: {other:?}"),
         }
     }
 
