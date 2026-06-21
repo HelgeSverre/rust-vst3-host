@@ -806,6 +806,12 @@ impl PluginInternal for PluginImpl {
                     return Err(Error::Other(format!("Process failed: {:#x}", result)));
                 }
 
+                // Advance the transport so tempo-synced DSP (LFOs, sync'd delays/arps) sees
+                // a moving playhead instead of a frozen time-0. The context describes the
+                // block that was just processed; advancing here means the next block starts
+                // at the new sample position.
+                advance_process_context(&mut data.process_context, frames as i64);
+
                 // Clear input events AFTER processing so plugin can see them
                 self.input_events.clear();
                 // Clear the input parameter queue too, so this block's values don't
@@ -1484,6 +1490,41 @@ impl Drop for PluginImpl {
             }
             self.component.terminate();
         }
+    }
+}
+
+/// Advance the transport in a `ProcessContext` by `frames` samples after a processed block.
+/// Keeps `continousTimeSamples`/`projectTimeSamples` (and the musical playhead derived from
+/// the current tempo) moving so tempo-synced plugins don't see a frozen time-0.
+fn advance_process_context(ctx: &mut ProcessContext, frames: i64) {
+    ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
+    ctx.projectTimeSamples = ctx.projectTimeSamples.wrapping_add(frames);
+    if ctx.sampleRate > 0.0 {
+        // Quarter notes elapsed = seconds * (BPM / 60).
+        let secs = ctx.projectTimeSamples as f64 / ctx.sampleRate;
+        ctx.projectTimeMusic = secs * (ctx.tempo / 60.0);
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn advance_moves_playhead_and_musical_time() {
+        let mut ctx: ProcessContext = unsafe { std::mem::zeroed() };
+        ctx.sampleRate = 48_000.0;
+        ctx.tempo = 120.0;
+        // One second of audio at 48 kHz in 512-sample blocks.
+        let blocks = 48_000 / 512;
+        for _ in 0..blocks {
+            advance_process_context(&mut ctx, 512);
+        }
+        let advanced = (blocks * 512) as i64;
+        assert_eq!(ctx.projectTimeSamples, advanced);
+        assert_eq!(ctx.continousTimeSamples, advanced);
+        // ~0.992 s elapsed at 120 BPM → ~1.98 quarter notes; just assert it moved forward.
+        assert!(ctx.projectTimeMusic > 1.9 && ctx.projectTimeMusic < 2.1);
     }
 }
 
