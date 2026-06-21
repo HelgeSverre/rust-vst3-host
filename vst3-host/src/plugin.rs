@@ -72,11 +72,9 @@ pub struct Plugin {
     // Internal state is hidden from public API
     pub(crate) info: PluginInfo,
     pub(crate) is_processing: bool,
-    /// Configured sample rate (diagnostics / config record)
-    #[allow(dead_code)]
+    /// Configured sample rate (exposed via [`Plugin::sample_rate`]).
     pub(crate) sample_rate: f64,
-    /// Configured block size (diagnostics / config record)
-    #[allow(dead_code)]
+    /// Configured max block size (exposed via [`Plugin::block_size`]).
     pub(crate) block_size: usize,
     pub(crate) audio_levels: Arc<Mutex<AudioLevels>>,
     pub(crate) parameter_change_callback: Option<Box<dyn Fn(u32, f64) + Send + 'static>>,
@@ -154,6 +152,16 @@ impl Plugin {
     /// Get plugin information
     pub fn info(&self) -> &PluginInfo {
         &self.info
+    }
+
+    /// The sample rate (Hz) this plugin was configured with at load.
+    pub fn sample_rate(&self) -> f64 {
+        self.sample_rate
+    }
+
+    /// The maximum block size (frames per `process_audio` call) configured at load.
+    pub fn block_size(&self) -> usize {
+        self.block_size
     }
 
     /// Get all parameters

@@ -379,6 +379,48 @@ fn test_get_units_enumerates() {
     }
 }
 
+/// Offline render-to-WAV: bounce a held note from Dexed to a WAV file and verify the file
+/// has a valid float-WAV header and non-silent audio.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_render_to_wav_produces_audio() {
+    use vst3_host::midi::{MidiChannel, MidiEvent};
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed() else {
+        return;
+    };
+    let path = std::env::temp_dir().join("vh_render_test.wav");
+    let note = MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 110,
+    };
+    vst3_host::simple::render_to_wav(&mut plugin, 0.5, &[note], &path).expect("render_to_wav");
+
+    let bytes = std::fs::read(&path).expect("read rendered wav");
+    let _ = std::fs::remove_file(&path);
+    // Header: RIFF/WAVE, IEEE float, 48 kHz (the load_dexed sample rate).
+    assert_eq!(&bytes[0..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WAVE");
+    assert_eq!(u16::from_le_bytes([bytes[20], bytes[21]]), 3, "IEEE float");
+    let sr = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+    assert_eq!(sr, 48_000);
+    // 0.5 s of stereo float at 48 kHz ~ 192 KB of data; assert a substantial file.
+    assert!(
+        bytes.len() > 100_000,
+        "rendered wav too small: {}",
+        bytes.len()
+    );
+    // Scan the float samples for non-silence.
+    let mut peak = 0.0f32;
+    for chunk in bytes[44..].chunks_exact(4) {
+        let s = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        peak = peak.max(s.abs());
+    }
+    assert!(peak > 0.0, "rendered wav is silent");
+    println!("rendered {} bytes, peak {peak:.3}", bytes.len());
+}
+
 // --- Pure-logic tests (run in CI without a plugin) ---------------------------
 
 /// The builder records tempo / time-signature on the config without needing a plugin.
