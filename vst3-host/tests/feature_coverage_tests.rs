@@ -199,6 +199,80 @@ fn test_held_note_produces_audio() {
     assert!(peak > 0.0, "held note produced no audio (peak {peak})");
 }
 
+/// Sample-accurate MIDI (`send_midi_event_at`): a note scheduled at a non-zero sample
+/// offset must leave the block's leading samples silent and only start sounding at the
+/// offset. We prove this differentially — the *same* note at offset 0 fills the leading
+/// window with audio, while at offset 256 that window stays (near) silent.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_sample_accurate_midi_offset_delays_onset() {
+    let _guard = plugin_guard();
+
+    const BLOCK: usize = 512;
+    const OFFSET: i32 = 256;
+    // Measure peak amplitude in the block's leading window (before the offset).
+    const WINDOW: usize = 200;
+
+    // Render one 512-frame block with a note-on scheduled at `offset`, returning the
+    // peak amplitude in [0, WINDOW) and in [OFFSET, BLOCK).
+    fn render_onset(offset: i32) -> Option<(f32, f32)> {
+        let (_host, mut plugin) = load_dexed()?;
+        plugin.start_processing().expect("start_processing");
+        let note = MidiEvent::NoteOn {
+            channel: MidiChannel::Ch1,
+            note: 60,
+            velocity: 110,
+        };
+        plugin
+            .send_midi_event_at(note, offset)
+            .expect("send_midi_event_at");
+
+        let mut buffers = AudioBuffers::new(0, 2, BLOCK, 48000.0);
+        plugin.process_audio(&mut buffers).expect("process_audio");
+
+        let peak = |range: std::ops::Range<usize>| {
+            buffers
+                .outputs
+                .iter()
+                .flat_map(|ch| ch[range.clone()].iter())
+                .fold(0.0f32, |m, &s| m.max(s.abs()))
+        };
+        let early = peak(0..WINDOW);
+        let late = peak(OFFSET as usize..BLOCK);
+        plugin.stop_processing().ok();
+        Some((early, late))
+    }
+
+    // Control: offset 0 — audio is present from the very first sample.
+    let Some((early_at_0, _)) = render_onset(0) else {
+        return;
+    };
+    // Test: offset 256 — the leading window must be (near) silent, audio starts later.
+    let (early_at_256, late_at_256) = render_onset(OFFSET).expect("second load");
+
+    println!(
+        "offset0 early-peak={early_at_0:.5}  offset256 early-peak={early_at_256:.5} late-peak={late_at_256:.5}"
+    );
+
+    // The control must actually make sound in the leading window (else the test proves nothing).
+    assert!(
+        early_at_0 > 1e-4,
+        "control (offset 0) produced no audio in the leading window (peak {early_at_0})"
+    );
+    // The scheduled note must produce audio somewhere in the block.
+    assert!(
+        late_at_256 > 1e-4,
+        "offset-256 note produced no audio at all (late peak {late_at_256})"
+    );
+    // The heart of the test: scheduling at offset 256 keeps the leading window quiet —
+    // dramatically quieter than the offset-0 control over the same samples.
+    assert!(
+        early_at_256 < early_at_0 * 0.1,
+        "offset did not delay onset: leading-window peak {early_at_256} (offset 256) \
+         vs {early_at_0} (offset 0) — expected the offset window to be near-silent"
+    );
+}
+
 /// Variable block sizes: 64, 128, and 512 frames all process without error and the
 /// configured-max path (512) still produces audio for a held note.
 #[test]

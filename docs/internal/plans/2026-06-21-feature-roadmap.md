@@ -29,10 +29,14 @@ correctness fix —
 - **3.2/3.3**: configurable IPC response timeout + helper-path override
   (`Vst3HostBuilder::response_timeout()`/`helper_path()`, `VST3_HOST_HELPER_PATH` env),
   threaded through crash recovery; missing override path fails fast with a clear error.
+- **1.7**: sample-accurate MIDI — `Plugin::send_midi_event_at(event, sample_offset)` populates
+  the per-event `Event.sampleOffset` (was hardcoded 0). Verified end-to-end: a note at
+  offset 256 leaves the block's leading window silent while the offset-0 control fills it.
 
 **Next up** (deferred, still open): 2.3 denormal guard (ARM-unverifiable), 4.2/4.3 inspector
-polish, 4.5 inspector audio export, 1.7 sample-accurate MIDI, 1.8 `IMidiMapping`, 2.4 runtime
-reconfigure, 2.5 input buffer, 7.3 metering, and the rest of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
+polish, 4.5 inspector audio export, 1.8 `IMidiMapping`, 2.4 runtime reconfigure, 2.5 input
+buffer, 7.3 metering, 3.5 isolated sample-accurate automation (pairs with 1.7), and the rest
+of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
 every installed plugin and can be aborted by a licensed plugin's C++ exception — isolating
 discovery is a future robustness item.
 

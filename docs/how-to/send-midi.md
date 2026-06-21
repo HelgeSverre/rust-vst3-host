@@ -32,6 +32,26 @@ plugin.send_midi_event(MidiEvent::PolyAftertouch { channel: MidiChannel::Ch1, no
 The `cc` module has named constants (`MODULATION`, `VOLUME`, `SUSTAIN`, `PAN`, …). Pitch
 bend is a 14-bit value (`0–16383`, center `8192`).
 
+## Sample-accurate timing
+
+`send_midi_event` and `send_midi_note` deliver at the start of the next processed block.
+For sample-accurate sequencing, `send_midi_event_at` schedules an event at a sample offset
+*within* the next block:
+
+```rust
+# use vst3_host::{simple, midi::{MidiEvent, MidiChannel}};
+# fn main() -> vst3_host::Result<()> {
+# let mut plugin = simple::load_plugin("/x.vst3")?;
+let note = MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 60, velocity: 110 };
+plugin.send_midi_event_at(note, 256)?;   // sounds 256 frames into the next block
+# Ok(())
+# }
+```
+
+Keep the offset within the upcoming block's frame count (`plugin.block_size()` is the
+maximum). Under [process isolation](../explanation/process-isolation.md) the offset is not
+marshalled across the boundary — the event lands at block start.
+
 ## Panic (all notes off)
 
 ```rust
