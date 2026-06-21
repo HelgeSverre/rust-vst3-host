@@ -176,6 +176,7 @@ impl AutomationDemo {
             block_size: 512,
             input_channels: 0,
             output_channels: 2,
+            ..AudioConfig::default()
         };
 
         // Create shared state for the automation performance

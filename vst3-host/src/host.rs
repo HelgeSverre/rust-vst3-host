@@ -187,6 +187,9 @@ impl Vst3Host {
             path: path.display().to_string(),
             sample_rate: self.config.sample_rate,
             block_size: self.config.block_size as u32,
+            tempo: self.config.tempo,
+            time_sig_numerator: self.config.time_sig_numerator,
+            time_sig_denominator: self.config.time_sig_denominator,
         }) {
             Ok(HostResponse::PluginInfo { .. }) => ProbeResult::Ok,
             Ok(HostResponse::Error { message }) => ProbeResult::Failed(message),
@@ -200,7 +203,15 @@ impl Vst3Host {
     /// Load a plugin in-process
     fn load_plugin_internal(&mut self, path: &Path) -> Result<Plugin> {
         // Load the plugin implementation directly - it will handle path resolution
-        let plugin_impl = crate::internal::plugin_impl::PluginImpl::load(path)?;
+        let mut plugin_impl = crate::internal::plugin_impl::PluginImpl::load(path)?;
+
+        // Thread the configured transport into the plugin's host ProcessContext so
+        // tempo-synced DSP sees the host tempo / time signature.
+        plugin_impl.set_transport(
+            self.config.tempo,
+            self.config.time_sig_numerator,
+            self.config.time_sig_denominator,
+        );
 
         // Get the updated info from the plugin implementation (has_gui might have been updated)
         let updated_info = plugin_impl.info.clone();
@@ -243,6 +254,9 @@ impl Vst3Host {
                 path: path.display().to_string(),
                 sample_rate: self.config.sample_rate,
                 block_size: self.config.block_size as u32,
+                tempo: self.config.tempo,
+                time_sig_numerator: self.config.time_sig_numerator,
+                time_sig_denominator: self.config.time_sig_denominator,
             })
             .map_err(|e| Error::Other(format!("Failed to load plugin in isolation: {}", e)))?;
 
@@ -298,6 +312,9 @@ impl Vst3Host {
             loaded_info.clone(),
             self.config.sample_rate,
             self.config.block_size,
+            self.config.tempo,
+            self.config.time_sig_numerator,
+            self.config.time_sig_denominator,
             output_channels,
         );
 
@@ -368,6 +385,28 @@ impl Vst3HostBuilder {
     /// Set the number of output channels
     pub fn output_channels(mut self, channels: usize) -> Self {
         self.config.output_channels = channels;
+        self
+    }
+
+    /// Set the transport tempo (beats per minute) advertised to plugins in the host
+    /// `ProcessContext`. Drives tempo-synced DSP (LFOs, synced delays, arpeggiators).
+    /// Defaults to `120.0`. Non-finite or non-positive values are ignored (a tempo of 0 or
+    /// less would freeze/reverse the derived musical playhead), keeping the previous tempo.
+    pub fn tempo(mut self, bpm: f64) -> Self {
+        if bpm.is_finite() && bpm > 0.0 {
+            self.config.tempo = bpm;
+        }
+        self
+    }
+
+    /// Set the transport time signature advertised to plugins in the host
+    /// `ProcessContext` (`num`/`den`, e.g. `4, 4`). Defaults to `4/4`. Non-positive values
+    /// are ignored (a malformed time signature), keeping the previous setting.
+    pub fn time_signature(mut self, num: i32, den: i32) -> Self {
+        if num > 0 && den > 0 {
+            self.config.time_sig_numerator = num;
+            self.config.time_sig_denominator = den;
+        }
         self
     }
 
@@ -520,5 +559,30 @@ impl Vst3Host {
             ..self.config
         };
         crate::playback::play_realtime_with_backend(&backend, plugin, config, command_capacity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_defaults_to_120_bpm_4_4() {
+        let host = Vst3HostBuilder::default().build().unwrap();
+        assert_eq!(host.config().tempo, 120.0);
+        assert_eq!(host.config().time_sig_numerator, 4);
+        assert_eq!(host.config().time_sig_denominator, 4);
+    }
+
+    #[test]
+    fn builder_threads_tempo_and_time_signature_into_config() {
+        let host = Vst3HostBuilder::default()
+            .tempo(140.0)
+            .time_signature(7, 8)
+            .build()
+            .unwrap();
+        assert_eq!(host.config().tempo, 140.0);
+        assert_eq!(host.config().time_sig_numerator, 7);
+        assert_eq!(host.config().time_sig_denominator, 8);
     }
 }

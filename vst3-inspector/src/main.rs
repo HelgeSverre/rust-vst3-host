@@ -912,6 +912,30 @@ impl VST3Inspector {
                         }
                     }
                 });
+                ui.add_space(4.0);
+
+                // Save / load the loaded plugin's state as a preset. Enabled only while a
+                // plugin is playing (state lives inside the AudioHandle's plugin). The JSON
+                // PluginPreset is this library's portable format; .vstpreset is the standard
+                // VST3 interchange format readable by other hosts.
+                ui.add_enabled_ui(self.audio.is_some(), |ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Save Preset")
+                            .on_hover_text("Save the current plugin state to a file")
+                            .clicked()
+                        {
+                            self.save_preset_dialog();
+                        }
+                        if ui
+                            .button("Load Preset")
+                            .on_hover_text("Load a previously saved plugin state from a file")
+                            .clicked()
+                        {
+                            self.load_preset_dialog();
+                        }
+                    });
+                });
                 ui.add_space(8.0);
 
                 // Make the plugin information section scrollable
@@ -2231,6 +2255,96 @@ impl VST3Inspector {
         // Dropping the window closes the editor and the native window.
         self.plugin_window = None;
         self.gui_attached = false;
+    }
+
+    /// Prompt for a path and save the loaded plugin's state. Supports the library's JSON
+    /// `PluginPreset` (default) and the standard `.vstpreset` interchange format, chosen by
+    /// the picked file's extension. Surfaces the result through `last_error`.
+    fn save_preset_dialog(&mut self) {
+        let audio = match &self.audio {
+            Some(a) => a,
+            None => {
+                self.last_error = Some("No plugin loaded".to_string());
+                return;
+            }
+        };
+
+        let path = match rfd::FileDialog::new()
+            .set_title("Save Plugin Preset")
+            .add_filter("Plugin Preset (JSON)", &["json"])
+            .add_filter("VST3 Preset", &["vstpreset"])
+            .set_file_name("preset.json")
+            .save_file()
+        {
+            Some(p) => p,
+            None => return, // user cancelled
+        };
+
+        let is_vstpreset = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("vstpreset"));
+
+        let plugin = audio.lock();
+        let result = if is_vstpreset {
+            plugin.save_vstpreset(&path)
+        } else {
+            plugin.save_preset(&path)
+        };
+        drop(plugin);
+
+        match result {
+            Ok(()) => {
+                self.last_error = Some(format!("Saved preset to {}", path.display()));
+            }
+            Err(e) => {
+                self.last_error = Some(format!("Failed to save preset: {e}"));
+            }
+        }
+    }
+
+    /// Prompt for a preset file and apply it to the loaded plugin. Accepts the library's JSON
+    /// `PluginPreset` and the standard `.vstpreset` format (chosen by extension). After a
+    /// successful load, re-reads parameter values so the table reflects the restored state.
+    /// Surfaces the result through `last_error`.
+    fn load_preset_dialog(&mut self) {
+        if self.audio.is_none() {
+            self.last_error = Some("No plugin loaded".to_string());
+            return;
+        }
+
+        let path = match rfd::FileDialog::new()
+            .set_title("Load Plugin Preset")
+            .add_filter("Presets", &["json", "vstpreset"])
+            .pick_file()
+        {
+            Some(p) => p,
+            None => return, // user cancelled
+        };
+
+        let is_vstpreset = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("vstpreset"));
+
+        let result = {
+            let audio = self.audio.as_ref().unwrap();
+            let mut plugin = audio.lock();
+            if is_vstpreset {
+                plugin.load_vstpreset(&path)
+            } else {
+                plugin.load_preset(&path)
+            }
+        };
+
+        match result {
+            Ok(()) => {
+                // Re-sync the cached parameter values with the restored plugin state.
+                let _ = self.refresh_parameter_values();
+                self.last_error = Some(format!("Loaded preset from {}", path.display()));
+            }
+            Err(e) => {
+                self.last_error = Some(format!("Failed to load preset: {e}"));
+            }
+        }
     }
 
     fn set_parameter_value(&mut self, param_id: u32, normalized_value: f64) -> Result<(), String> {

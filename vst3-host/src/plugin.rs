@@ -523,6 +523,42 @@ impl Plugin {
         self.load_state(&preset.state)
     }
 
+    /// Save this plugin's state to a standard Steinberg `.vstpreset` file.
+    ///
+    /// Unlike [`Self::save_preset`] (a JSON wrapper specific to this library), the
+    /// `.vstpreset` container is the interchange format shared by VST3 hosts and plugins, so
+    /// the file can be read by other hosts (and by the plugin's own preset browser). It wraps
+    /// the same opaque bytes from [`Self::save_state`] in a single `"Comp"` (component state)
+    /// chunk, tagged with this plugin's class id ([`PluginInfo::uid`]) so a loader can reject
+    /// presets from a different plugin. Call this on the main thread.
+    pub fn save_vstpreset<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
+        let state = self.save_state()?;
+        let bytes = vstpreset::build(&self.info().uid, &state)?;
+        std::fs::write(path, bytes).map_err(|e| Error::Other(format!("write vstpreset: {e}")))?;
+        Ok(())
+    }
+
+    /// Load a Steinberg `.vstpreset` file and apply its component state to this plugin.
+    ///
+    /// Parses the `.vstpreset` container written by [`Self::save_vstpreset`] (or another VST3
+    /// host), extracts the `"Comp"` (component state) chunk and passes it to
+    /// [`Self::load_state`]. Returns an error if the file's magic is invalid, or if its class
+    /// id doesn't match this plugin (loading another plugin's state is undefined). Call this
+    /// on the main thread.
+    pub fn load_vstpreset<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<()> {
+        let bytes =
+            std::fs::read(path).map_err(|e| Error::Other(format!("read vstpreset: {e}")))?;
+        let parsed = vstpreset::parse(&bytes)?;
+        if parsed.class_id != self.info().uid {
+            return Err(Error::Other(format!(
+                "vstpreset is for a different plugin (class id {}, expected {})",
+                parsed.class_id,
+                self.info().uid
+            )));
+        }
+        self.load_state(&parsed.component_state)
+    }
+
     /// The OS process id of the isolated helper hosting this plugin, or `None` if it runs
     /// in-process. Useful for monitoring an isolated plugin's resource use.
     pub fn isolation_pid(&self) -> Option<u32> {
@@ -611,5 +647,210 @@ impl WindowHandle {
     /// not a pointer to it.
     pub fn from_x11(window_id: u32) -> Self {
         Self(window_id as usize as *mut std::ffi::c_void)
+    }
+}
+
+/// Build and parse the standard Steinberg `.vstpreset` container format.
+///
+/// Layout (all multi-byte integers little-endian, matching the SDK's `PresetFile`):
+///
+/// - Header (48 bytes): magic `b"VST3"` (4) + version `i32` = 1 (4) + 32-char ASCII class
+///   id (the plugin's FUID hex) (32) + `i64` byte offset from the start of the file to the
+///   chunk list (8).
+/// - Body: the chunk payloads, written back to back after the header. We write a single
+///   `"Comp"` (component state) chunk.
+/// - Chunk list (at the header's list offset): magic `b"List"` (4) + entry count `i32` (4),
+///   then per entry: 4-byte chunk id + `i64` absolute offset + `i64` size.
+mod vstpreset {
+    use crate::error::{Error, Result};
+
+    const MAGIC: &[u8; 4] = b"VST3";
+    const LIST_MAGIC: &[u8; 4] = b"List";
+    const COMPONENT_CHUNK: &[u8; 4] = b"Comp";
+    const VERSION: i32 = 1;
+    const CLASS_ID_LEN: usize = 32;
+    const HEADER_SIZE: usize = 4 + 4 + CLASS_ID_LEN + 8;
+
+    /// A parsed `.vstpreset` container.
+    pub(super) struct Parsed {
+        /// The 32-char ASCII class id from the header.
+        pub class_id: String,
+        /// The bytes of the `"Comp"` (component state) chunk.
+        pub component_state: Vec<u8>,
+    }
+
+    /// Build a `.vstpreset` file wrapping `component_state` in a single component chunk,
+    /// tagged with `class_id` (a 32-char ASCII FUID hex string).
+    pub(super) fn build(class_id: &str, component_state: &[u8]) -> Result<Vec<u8>> {
+        let class_bytes = class_id.as_bytes();
+        if class_bytes.len() != CLASS_ID_LEN || !class_id.is_ascii() {
+            return Err(Error::Other(format!(
+                "vstpreset class id must be {CLASS_ID_LEN} ASCII chars, got {:?}",
+                class_id
+            )));
+        }
+
+        let comp_offset = HEADER_SIZE as i64;
+        let comp_size = component_state.len() as i64;
+        let list_offset = HEADER_SIZE + component_state.len();
+
+        let mut out = Vec::with_capacity(list_offset + 8 + 24);
+        // Header.
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&VERSION.to_le_bytes());
+        out.extend_from_slice(class_bytes);
+        out.extend_from_slice(&(list_offset as i64).to_le_bytes());
+        // Body.
+        out.extend_from_slice(component_state);
+        // Chunk list.
+        out.extend_from_slice(LIST_MAGIC);
+        out.extend_from_slice(&1i32.to_le_bytes());
+        out.extend_from_slice(COMPONENT_CHUNK);
+        out.extend_from_slice(&comp_offset.to_le_bytes());
+        out.extend_from_slice(&comp_size.to_le_bytes());
+
+        Ok(out)
+    }
+
+    /// Parse a `.vstpreset` file, extracting the class id and the component-state chunk.
+    pub(super) fn parse(bytes: &[u8]) -> Result<Parsed> {
+        if bytes.len() < HEADER_SIZE {
+            return Err(Error::Other("vstpreset too short for header".to_string()));
+        }
+        if &bytes[0..4] != MAGIC {
+            return Err(Error::Other(format!(
+                "bad vstpreset magic: expected {:?}, got {:?}",
+                MAGIC,
+                &bytes[0..4]
+            )));
+        }
+        let version = read_i32(&bytes[4..8]);
+        if version != VERSION {
+            return Err(Error::Other(format!(
+                "unsupported vstpreset version {version} (expected {VERSION})"
+            )));
+        }
+        let class_id = String::from_utf8(bytes[8..8 + CLASS_ID_LEN].to_vec())
+            .map_err(|e| Error::Other(format!("vstpreset class id not UTF-8: {e}")))?;
+        let list_offset = read_i64(&bytes[8 + CLASS_ID_LEN..HEADER_SIZE]);
+        if list_offset < HEADER_SIZE as i64 || list_offset as usize > bytes.len() {
+            return Err(Error::Other(format!(
+                "vstpreset chunk-list offset {list_offset} out of bounds (len {})",
+                bytes.len()
+            )));
+        }
+        let list = &bytes[list_offset as usize..];
+        if list.len() < 8 || &list[0..4] != LIST_MAGIC {
+            return Err(Error::Other(
+                "vstpreset chunk list missing or malformed".to_string(),
+            ));
+        }
+        let count = read_i32(&list[4..8]);
+        if count < 0 {
+            return Err(Error::Other("vstpreset negative entry count".to_string()));
+        }
+        let mut cursor = 8;
+        for _ in 0..count {
+            if list.len() < cursor + 20 {
+                return Err(Error::Other(
+                    "vstpreset chunk-list entry truncated".to_string(),
+                ));
+            }
+            let id = &list[cursor..cursor + 4];
+            let offset = read_i64(&list[cursor + 4..cursor + 12]);
+            let size = read_i64(&list[cursor + 12..cursor + 20]);
+            cursor += 20;
+            if id == COMPONENT_CHUNK {
+                if offset < 0 || size < 0 {
+                    return Err(Error::Other(
+                        "vstpreset component chunk has negative offset/size".to_string(),
+                    ));
+                }
+                let start = offset as usize;
+                let end = start
+                    .checked_add(size as usize)
+                    .ok_or_else(|| Error::Other("vstpreset chunk size overflow".to_string()))?;
+                if end > bytes.len() {
+                    return Err(Error::Other(format!(
+                        "vstpreset component chunk [{start}..{end}] out of bounds (len {})",
+                        bytes.len()
+                    )));
+                }
+                return Ok(Parsed {
+                    class_id,
+                    component_state: bytes[start..end].to_vec(),
+                });
+            }
+        }
+        Err(Error::Other(
+            "vstpreset has no component (\"Comp\") chunk".to_string(),
+        ))
+    }
+
+    fn read_i32(b: &[u8]) -> i32 {
+        i32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    }
+
+    fn read_i64(b: &[u8]) -> i64 {
+        i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+    }
+}
+
+#[cfg(test)]
+mod vstpreset_tests {
+    use super::vstpreset;
+
+    const TEST_CLASS_ID: &str = "0123456789ABCDEF0123456789ABCDEF";
+
+    #[test]
+    fn build_parse_round_trip() {
+        let state = b"opaque plugin state \x00\x01\x02\xff bytes".to_vec();
+        let bytes = vstpreset::build(TEST_CLASS_ID, &state).expect("build");
+
+        // Sanity-check the header layout.
+        assert_eq!(&bytes[0..4], b"VST3");
+        assert_eq!(
+            i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            1
+        );
+        assert_eq!(&bytes[8..40], TEST_CLASS_ID.as_bytes());
+
+        let parsed = vstpreset::parse(&bytes).expect("parse");
+        assert_eq!(parsed.class_id, TEST_CLASS_ID);
+        assert_eq!(parsed.component_state, state);
+    }
+
+    #[test]
+    fn round_trip_empty_state() {
+        let bytes = vstpreset::build(TEST_CLASS_ID, &[]).expect("build");
+        let parsed = vstpreset::parse(&bytes).expect("parse");
+        assert_eq!(parsed.class_id, TEST_CLASS_ID);
+        assert!(parsed.component_state.is_empty());
+    }
+
+    #[test]
+    fn build_rejects_wrong_length_class_id() {
+        assert!(vstpreset::build("short", b"x").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_bad_magic() {
+        let mut bytes = vstpreset::build(TEST_CLASS_ID, b"x").expect("build");
+        bytes[0] = b'X';
+        assert!(vstpreset::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_truncated_header() {
+        assert!(vstpreset::parse(b"VST3").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_out_of_bounds_list_offset() {
+        let mut bytes = vstpreset::build(TEST_CLASS_ID, b"hello").expect("build");
+        // Corrupt the list offset (bytes 40..48) to point past the end.
+        let bad = (bytes.len() as i64 + 100).to_le_bytes();
+        bytes[40..48].copy_from_slice(&bad);
+        assert!(vstpreset::parse(&bytes).is_err());
     }
 }

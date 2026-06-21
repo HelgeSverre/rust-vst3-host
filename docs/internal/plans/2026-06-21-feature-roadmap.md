@@ -11,13 +11,23 @@ correctness fix —
   1.85), 6.8 (docs.rs), 6.9 (cargo-deny + `deny.toml`), 6.10 (feature matrix), 6.11 (state
   wire tests), 6.12 (helper/example build); 5.1/5.5 (Windows tests + `--all-features`).
 - Accessors: 5.4 (ARM64 discovery), 2.7 (RtControl drop counter).
-- **1.1 core**: the `ProcessContext` playhead now advances per block (was frozen at 0).
+- **1.1**: the `ProcessContext` playhead advances per block AND advertises validity flags
+  (`kContTimeValid`/`kProjectTimeMusicValid`) so conformant plugins honor it; builder
+  `tempo()`/`time_signature()` configure the transport (validated; threaded through the
+  in-process and isolated paths).
+- **1.3**: `.vstpreset` container load/save (`Plugin::save_vstpreset`/`load_vstpreset`).
+- **4.1**: inspector Save/Load Preset buttons (JSON + `.vstpreset`).
+- **Test coverage**: new `tests/feature_coverage_tests.rs` (params, presets, transport audio,
+  variable/oversized blocks, process-before-start, .vstpreset error paths) + transport
+  state-flag regression test; `find_test_plugin` made robust against licensed system plugins.
 
-**Next up** (deferred, still open): 1.1 rest (builder tempo/time-sig + realtime/IPC transport),
-4.1 inspector preset UI (now unblocked by 7.2), 1.3 `.vstpreset`, 1.2 `IUnitInfo`, 5.2
-Windows/Linux egui embedding, 2.3 denormal guard, 4.2/4.3 inspector polish; plus the
-remaining low-value/cross-cutting accessors (1.5 latency, 1.6 tail, 1.7 sample-accurate MIDI,
-3.2 timeout, 3.3 helper-path, 2.5 input buffer, 7.3 metering) and all of Tier 3/4.
+**Next up** (deferred, still open): 1.2 `IUnitInfo`/program lists, 5.2 Windows/Linux egui
+embedding, 2.3 denormal guard, 4.2/4.3 inspector polish, 2.1/4.6 live audio input (effect
+hosting), 2.2 offline render; plus the low-value/cross-cutting accessors (1.5 latency, 1.6
+tail, 1.7 sample-accurate MIDI, 3.2 timeout, 3.3 helper-path, 2.5 input buffer, 7.3 metering)
+and the rest of Tier 3/4. Known pre-existing fragility: `discover_plugins()` instantiates
+every installed plugin and can be aborted by a licensed plugin's C++ exception — isolating
+discovery is a future robustness item.
 
 ## Summary
 

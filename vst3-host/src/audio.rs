@@ -164,6 +164,14 @@ pub struct AudioConfig {
     pub input_channels: usize,
     /// Number of output channels
     pub output_channels: usize,
+    /// Transport tempo in beats per minute, advertised to plugins in the host
+    /// `ProcessContext` (drives tempo-synced DSP such as LFOs and synced delays).
+    pub tempo: f64,
+    /// Time signature numerator (beats per bar), advertised in the `ProcessContext`.
+    pub time_sig_numerator: i32,
+    /// Time signature denominator (note value of one beat), advertised in the
+    /// `ProcessContext`.
+    pub time_sig_denominator: i32,
 }
 
 impl Default for AudioConfig {
@@ -173,6 +181,9 @@ impl Default for AudioConfig {
             block_size: 512,
             input_channels: 0,
             output_channels: 2,
+            tempo: 120.0,
+            time_sig_numerator: 4,
+            time_sig_denominator: 4,
         }
     }
 }
