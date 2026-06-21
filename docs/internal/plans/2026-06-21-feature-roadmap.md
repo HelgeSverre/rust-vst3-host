@@ -1,5 +1,24 @@
 # vst3-host Implementation Roadmap
 
+## Progress (updated 2026-06-21)
+
+**Done** (merged to main, CI green): all of Tier 1's quick wins plus the Tier-2 headline
+correctness fix —
+- Robustness/bugs: 6.1, 6.2, 6.3, 6.4, 3.1.
+- API consistency: 7.1; preset files 7.2 (`Plugin::save_preset`/`load_preset` + `PluginPreset`).
+- Docs corrections: 8.1, 8.2.
+- CI/quality: 6.5 (clippy `--all-targets`), 6.6 (deny missing_docs), 6.7 (MSRV — corrected to
+  1.85), 6.8 (docs.rs), 6.9 (cargo-deny + `deny.toml`), 6.10 (feature matrix), 6.11 (state
+  wire tests), 6.12 (helper/example build); 5.1/5.5 (Windows tests + `--all-features`).
+- Accessors: 5.4 (ARM64 discovery), 2.7 (RtControl drop counter).
+- **1.1 core**: the `ProcessContext` playhead now advances per block (was frozen at 0).
+
+**Next up** (deferred, still open): 1.1 rest (builder tempo/time-sig + realtime/IPC transport),
+4.1 inspector preset UI (now unblocked by 7.2), 1.3 `.vstpreset`, 1.2 `IUnitInfo`, 5.2
+Windows/Linux egui embedding, 2.3 denormal guard, 4.2/4.3 inspector polish; plus the
+remaining low-value/cross-cutting accessors (1.5 latency, 1.6 tail, 1.7 sample-accurate MIDI,
+3.2 timeout, 3.3 helper-path, 2.5 input buffer, 7.3 metering) and all of Tier 3/4.
+
 ## Summary
 
 The `vst3-host` library is a maturing, macOS-first VST3 hosting product with a solid core (discover → load → params → MIDI → play → state → process isolation) and a working egui inspector as its proof-of-API. The biggest opportunities are: (1) closing concrete VST3 protocol gaps that affect whole plugin classes (a frozen playhead/transport in `ProcessContext`, `IUnitInfo`/program lists, `.vstpreset` interop, bus-arrangement negotiation), (2) enabling live/offline audio I/O (audio-input routing, render-to-file), and (3) cheap CI/robustness hardening (Windows tests, denormal/poison-lock fixes, doc corrections). Most defects found are latent or low-severity consistency issues rather than live crashes — the codebase is in good shape, and the highest leverage is in protocol coverage plus a handful of S-effort hardening wins.
