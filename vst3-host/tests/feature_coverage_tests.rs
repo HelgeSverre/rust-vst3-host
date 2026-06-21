@@ -489,6 +489,21 @@ fn test_effect_processes_audio_input() {
     );
 }
 
+/// Latency/tail accessors return the plugin's reported values without error.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_latency_and_tail_accessors() {
+    let _guard = plugin_guard();
+    let Some((_host, plugin)) = load_dexed() else {
+        return;
+    };
+    let latency = plugin.latency_samples();
+    let tail = plugin.tail_samples();
+    println!("Dexed latency={latency} samples, tail={tail} samples");
+    // Sanity: a synth's latency is small; we just assert the calls work and are bounded.
+    assert!(latency < 1_000_000, "implausible latency {latency}");
+}
+
 // --- Pure-logic tests (run in CI without a plugin) ---------------------------
 
 /// The builder records tempo / time-signature on the config without needing a plugin.

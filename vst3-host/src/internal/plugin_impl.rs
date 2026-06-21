@@ -1167,6 +1167,14 @@ impl PluginInternal for PluginImpl {
         self.editor_resize.lock().ok().and_then(|mut s| s.take())
     }
 
+    fn latency_samples(&self) -> u32 {
+        unsafe { self.processor.getLatencySamples() }
+    }
+
+    fn tail_samples(&self) -> u32 {
+        unsafe { self.processor.getTailSamples() }
+    }
+
     fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
         use crate::plugin::PluginUnit;
         let Some(ref controller) = self.controller else {
