@@ -14,6 +14,10 @@ pub(crate) use imp::Guard as DenormalGuard;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 mod imp {
+    // `_mm_getcsr`/`_mm_setcsr` are deprecated (easy to misuse) but remain the supported way to
+    // toggle MXCSR; the deprecation fires on the `use` import too, so allow it module-wide.
+    #![allow(deprecated)]
+
     #[cfg(target_arch = "x86")]
     use core::arch::x86::{_mm_getcsr, _mm_setcsr};
     #[cfg(target_arch = "x86_64")]
