@@ -267,7 +267,10 @@ pub fn get_plugin_info(path: &Path) -> Result<PluginInfo> {
                     );
 
                     if result == kResultOk && !component_ptr.is_null() {
-                        let component = ComPtr::<IComponent>::from_raw(component_ptr).unwrap();
+                        let component =
+                            ComPtr::<IComponent>::from_raw(component_ptr).ok_or_else(|| {
+                                crate::error::Error::Other("Failed to wrap component".to_string())
+                            })?;
 
                         // Initialize with a host context (null crashes u-he/Waves plugins).
                         let host_app =

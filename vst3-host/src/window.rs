@@ -59,7 +59,11 @@ impl PluginWindow {
     /// Open the plugin window
     pub fn open(&mut self) -> Result<()> {
         // Check if plugin has editor
-        let has_editor = self.plugin.lock().unwrap().has_editor();
+        let has_editor = self
+            .plugin
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .has_editor();
         if !has_editor {
             return Err(Error::Other(
                 "Plugin does not have a GUI editor".to_string(),
@@ -72,13 +76,18 @@ impl PluginWindow {
         }
 
         // Get plugin info for window title
-        let plugin_info = self.plugin.lock().unwrap().info().clone();
+        let plugin_info = self
+            .plugin
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .info()
+            .clone();
 
         // Try to get editor size
         let (width, height) = self
             .plugin
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get_editor_size()
             .unwrap_or((800, 600));
 
@@ -133,7 +142,10 @@ impl PluginWindow {
                 &container_view,
             )
                 as *mut std::ffi::c_void);
-            self.plugin.lock().unwrap().open_editor(window_handle)?;
+            self.plugin
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .open_editor(window_handle)?;
 
             // Match the window to the editor size, then show and center it.
             window.setContentSize(container_frame.size);
@@ -206,7 +218,12 @@ impl PluginWindow {
                 // Try to open plugin editor
                 let window_handle =
                     crate::plugin::WindowHandle::from_hwnd(hwnd as *mut std::ffi::c_void);
-                match self.plugin.lock().unwrap().open_editor(window_handle) {
+                match self
+                    .plugin
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .open_editor(window_handle)
+                {
                     Ok(()) => {
                         ShowWindow(hwnd, SW_SHOW);
                         UpdateWindow(hwnd);
@@ -271,7 +288,10 @@ impl PluginWindow {
             let _ = connection.flush();
 
             let handle = crate::plugin::WindowHandle::from_x11(window.resource_id());
-            self.plugin.lock().unwrap().open_editor(handle)?;
+            self.plugin
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .open_editor(handle)?;
 
             self.native_window = Some(XcbWindowState { connection, window });
         }

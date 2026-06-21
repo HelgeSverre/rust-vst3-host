@@ -73,8 +73,9 @@ for event in audio.lock().take_output_midi() {
 ```
 
 Call it regularly (e.g. each UI frame). Output MIDI is captured on the audio thread as the
-plugin processes, so it only flows while the plugin is playing. Plugins running under
-[process isolation](isolate-plugin-crashes.md) don't capture output MIDI yet.
+plugin processes, so it only flows while the plugin is playing. This also works for plugins
+running under [process isolation](isolate-plugin-crashes.md) — emitted events are returned
+alongside each processed audio block.
 
 ## Caveats
 

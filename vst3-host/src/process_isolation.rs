@@ -396,7 +396,25 @@ impl PluginHostProcess {
         self.stdin = None;
 
         if let Some(mut process) = self.process.take() {
-            let _ = process.wait();
+            // Bounded wait, then SIGKILL: this runs from Drop, so a wedged helper must not
+            // be able to hang the host on exit. Poll for a clean exit up to a deadline, then
+            // force-kill (mirrors the kill-on-timeout pattern in send_command).
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                match process.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if std::time::Instant::now() >= deadline => {
+                        let _ = process.kill();
+                        let _ = process.wait();
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                    Err(_) => {
+                        let _ = process.kill();
+                        break;
+                    }
+                }
+            }
         }
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
