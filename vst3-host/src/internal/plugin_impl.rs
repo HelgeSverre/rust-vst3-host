@@ -772,6 +772,11 @@ impl PluginInternal for PluginImpl {
             return Err(Error::Other("Plugin is not processing".to_string()));
         }
 
+        // Flush denormals to zero for the duration of the plugin's processing, restoring the
+        // prior FPU state when this returns. Covers both the simple (mutex) and realtime paths,
+        // since both funnel audio through here.
+        let _denormal = crate::internal::denormal::DenormalGuard::new();
+
         // Drain parameter changes queued since the last block; fed into the processor's
         // input queue below so the DSP — not just the controller — sees them this block.
         let pending = std::mem::take(&mut self.pending_param_changes);

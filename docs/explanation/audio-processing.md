@@ -79,6 +79,11 @@ Even the lock-free runner isn't a fully hardened RT engine yet:
 The runner removes the *cross-thread* lock (the big win) and the per-block allocations; the
 remaining item is the internal uncontended mutex.
 
+**Denormals are flushed** during processing: the host enables flush-to-zero / denormals-are-zero
+(MXCSR on x86, FPCR on ARM) for the span of each `process` call and restores the prior FPU
+state afterward, so a decaying filter/reverb tail can't drag the audio thread into denormal
+CPU spikes.
+
 ## Metering
 
 After each block, [`get_output_levels`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.Plugin.html#method.get_output_levels)
