@@ -543,10 +543,11 @@ impl eframe::App for VST3Inspector {
         // Pull current output levels from the library and feed the VU meter cache.
         self.update_vu_meters();
 
-        // Repaint while audio is running so the VU meter animates.
-        if self.audio.is_some() {
-            ctx.request_repaint();
-        }
+        // Keep the UI live (continuous repaint). egui is reactive by default — it only
+        // repaints on input events — which makes a host UI feel unresponsive (clicks/VU
+        // meters only update while the mouse moves). Requesting a repaint every frame keeps
+        // it animating and immediately responsive, like a DAW.
+        ctx.request_repaint();
         // Top header panel
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
