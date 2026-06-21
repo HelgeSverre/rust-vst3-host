@@ -793,7 +793,7 @@ fn test_realtime_runner_applies_commands_and_renders() {
     assert!(peak > 0.0, "runner produced no audio from the queued note");
 
     // The queued parameter change was applied.
-    let mut plugin = runner.into_plugin();
+    let plugin = runner.into_plugin();
     let v = plugin.get_parameter(cutoff).unwrap();
     assert!(
         (v - 0.9).abs() < 0.05,

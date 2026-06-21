@@ -3,9 +3,9 @@
 /// Audio buffers for plugin processing
 #[derive(Debug)]
 pub struct AudioBuffers {
-    /// Input audio buffers [channel][sample]
+    /// Input audio buffers, indexed `[channel][sample]`.
     pub inputs: Vec<Vec<f32>>,
-    /// Output audio buffers [channel][sample]
+    /// Output audio buffers, indexed `[channel][sample]`.
     pub outputs: Vec<Vec<f32>>,
     /// Sample rate in Hz
     pub sample_rate: f64,

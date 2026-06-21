@@ -22,6 +22,7 @@ use vst3_host::prelude::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use egui::StrokeKind;
 
+#[allow(dead_code)] // some fields are illustrative scaffolding in this example
 struct PluginGuiApp {
     // Core VST3 host
     host: Arc<Mutex<Vst3Host>>,
@@ -57,6 +58,7 @@ struct PluginGuiApp {
     shared_audio_state: Option<Arc<Mutex<SharedAudioState>>>,
 }
 
+#[allow(dead_code)] // illustrative shared-state fields
 #[derive(Clone)]
 struct SharedAudioState {
     sample_rate: f64,

@@ -83,7 +83,7 @@ fn test_discovery_callback() {
     assert!(!events.is_empty());
 
     // Should have at least started event
-    if events.len() > 0 {
+    if !events.is_empty() {
         assert!(events[0].starts_with("Started:"));
     }
 
@@ -118,6 +118,7 @@ fn test_cpal_backend_creation() {
 #[test]
 fn test_host_with_custom_backend() {
     // Create a mock backend for testing
+    #[allow(dead_code)]
     struct MockBackend;
 
     impl vst3_host::audio::AudioBackend for MockBackend {
@@ -173,6 +174,7 @@ fn test_host_with_custom_backend() {
         }
     }
 
+    #[allow(dead_code)]
     struct MockStream;
 
     impl vst3_host::audio::AudioStream for MockStream {

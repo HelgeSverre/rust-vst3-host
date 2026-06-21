@@ -1275,89 +1275,6 @@ pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
     }
 }
 
-#[cfg(test)]
-mod output_midi_tests {
-    use super::*;
-
-    fn blank_event() -> Event {
-        unsafe { std::mem::zeroed() }
-    }
-
-    #[test]
-    fn converts_note_on() {
-        let mut e = blank_event();
-        e.r#type = kNoteOnEvent as u16;
-        e.__field0.noteOn.channel = 0;
-        e.__field0.noteOn.pitch = 60;
-        e.__field0.noteOn.velocity = 1.0;
-        assert_eq!(
-            event_to_midi(&e),
-            Some(MidiEvent::NoteOn {
-                channel: MidiChannel::Ch1,
-                note: 60,
-                velocity: 127
-            })
-        );
-    }
-
-    #[test]
-    fn converts_note_off() {
-        let mut e = blank_event();
-        e.r#type = kNoteOffEvent as u16;
-        e.__field0.noteOff.channel = 1;
-        e.__field0.noteOff.pitch = 64;
-        e.__field0.noteOff.velocity = 0.0;
-        assert_eq!(
-            event_to_midi(&e),
-            Some(MidiEvent::NoteOff {
-                channel: MidiChannel::Ch2,
-                note: 64,
-                velocity: 0
-            })
-        );
-    }
-
-    #[test]
-    fn converts_legacy_cc_and_pitchbend() {
-        // A plain CC.
-        let mut cc = blank_event();
-        cc.r#type = kLegacyMIDICCOutEvent as u16;
-        cc.__field0.midiCCOut.controlNumber = 1; // mod wheel
-        cc.__field0.midiCCOut.channel = 0;
-        cc.__field0.midiCCOut.value = 64;
-        assert_eq!(
-            event_to_midi(&cc),
-            Some(MidiEvent::ControlChange {
-                channel: MidiChannel::Ch1,
-                controller: 1,
-                value: 64
-            })
-        );
-
-        // Pitch bend round-trips the 14-bit value (LSB in value, MSB in value2).
-        let mut pb = blank_event();
-        pb.r#type = kLegacyMIDICCOutEvent as u16;
-        pb.__field0.midiCCOut.controlNumber = ControllerNumbers_::kPitchBend as u8;
-        pb.__field0.midiCCOut.channel = 0;
-        pb.__field0.midiCCOut.value = (10000 & 0x7F) as std::os::raw::c_char;
-        pb.__field0.midiCCOut.value2 = ((10000 >> 7) & 0x7F) as std::os::raw::c_char;
-        assert_eq!(
-            event_to_midi(&pb),
-            Some(MidiEvent::PitchBend {
-                channel: MidiChannel::Ch1,
-                value: 10000
-            })
-        );
-    }
-
-    #[test]
-    fn ignores_unknown_event_types() {
-        let mut e = blank_event();
-        e.r#type = 9999;
-        assert_eq!(event_to_midi(&e), None);
-    }
-}
-
 impl PluginImpl {
     /// Send a legacy MIDI CC event
     fn send_legacy_midi_cc(
@@ -1567,5 +1484,88 @@ impl Drop for PluginImpl {
             }
             self.component.terminate();
         }
+    }
+}
+
+#[cfg(test)]
+mod output_midi_tests {
+    use super::*;
+
+    fn blank_event() -> Event {
+        unsafe { std::mem::zeroed() }
+    }
+
+    #[test]
+    fn converts_note_on() {
+        let mut e = blank_event();
+        e.r#type = kNoteOnEvent as u16;
+        e.__field0.noteOn.channel = 0;
+        e.__field0.noteOn.pitch = 60;
+        e.__field0.noteOn.velocity = 1.0;
+        assert_eq!(
+            event_to_midi(&e),
+            Some(MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 127
+            })
+        );
+    }
+
+    #[test]
+    fn converts_note_off() {
+        let mut e = blank_event();
+        e.r#type = kNoteOffEvent as u16;
+        e.__field0.noteOff.channel = 1;
+        e.__field0.noteOff.pitch = 64;
+        e.__field0.noteOff.velocity = 0.0;
+        assert_eq!(
+            event_to_midi(&e),
+            Some(MidiEvent::NoteOff {
+                channel: MidiChannel::Ch2,
+                note: 64,
+                velocity: 0
+            })
+        );
+    }
+
+    #[test]
+    fn converts_legacy_cc_and_pitchbend() {
+        // A plain CC.
+        let mut cc = blank_event();
+        cc.r#type = kLegacyMIDICCOutEvent as u16;
+        cc.__field0.midiCCOut.controlNumber = 1; // mod wheel
+        cc.__field0.midiCCOut.channel = 0;
+        cc.__field0.midiCCOut.value = 64;
+        assert_eq!(
+            event_to_midi(&cc),
+            Some(MidiEvent::ControlChange {
+                channel: MidiChannel::Ch1,
+                controller: 1,
+                value: 64
+            })
+        );
+
+        // Pitch bend round-trips the 14-bit value (LSB in value, MSB in value2).
+        let mut pb = blank_event();
+        pb.r#type = kLegacyMIDICCOutEvent as u16;
+        pb.__field0.midiCCOut.controlNumber = ControllerNumbers_::kPitchBend as u8;
+        pb.__field0.midiCCOut.channel = 0;
+        pb.__field0.midiCCOut.value = (10000 & 0x7F) as std::os::raw::c_char;
+        pb.__field0.midiCCOut.value2 = ((10000 >> 7) & 0x7F) as std::os::raw::c_char;
+        assert_eq!(
+            event_to_midi(&pb),
+            Some(MidiEvent::PitchBend {
+                channel: MidiChannel::Ch1,
+                value: 10000
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_unknown_event_types() {
+        let mut e = blank_event();
+        e.r#type = 9999;
+        assert_eq!(event_to_midi(&e), None);
     }
 }

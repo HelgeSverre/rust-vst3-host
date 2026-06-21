@@ -88,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Main automation demo application
+#[allow(dead_code)] // `backend` is kept alive for the stream's lifetime, not read directly
 struct AutomationDemo {
     host: Vst3Host,
     backend: Option<CpalBackend>,
@@ -272,7 +273,7 @@ impl AutomationDemo {
             }
 
             // Handle user input (non-blocking)
-            if let Ok(_) = stdin.read_exact(&mut input_buffer) {
+            if stdin.read_exact(&mut input_buffer).is_ok() {
                 match input_buffer[0] {
                     b'q' | b'Q' => {
                         println!("Stopping automation...");
@@ -383,7 +384,7 @@ impl AutomationPerformance {
 
         for event in &sequence.events {
             if (beat_time - event.time).abs() < 0.1 {
-                self.plugin.send_midi_event(event.event.clone())?;
+                self.plugin.send_midi_event(event.event)?;
             }
         }
 
@@ -414,6 +415,7 @@ impl AutomationPerformance {
 }
 
 /// Automation pattern definition
+#[allow(dead_code)] // illustrative fields not all read in this demo
 #[derive(Debug, Clone)]
 struct AutomationPattern {
     name: String,

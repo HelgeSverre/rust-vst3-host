@@ -59,16 +59,16 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     if args.len() < 2 {
         eprintln!("VST3 Plugin Loading Test");
         eprintln!("========================");
-        eprintln!("");
+        eprintln!();
         eprintln!("Usage: {} <vst3_plugin_path>", args[0]);
-        eprintln!("");
+        eprintln!();
         eprintln!("Examples:");
         eprintln!("  {} /Library/Audio/Plug-Ins/VST3/SomePlugin.vst3", args[0]);
         eprintln!(
             "  {} \"C:\\Program Files\\Common Files\\VST3\\SomePlugin.vst3\"",
             args[0]
         );
-        eprintln!("");
+        eprintln!();
         eprintln!("This tool will:");
         eprintln!("  • Load the specified VST3 plugin");
         eprintln!("  • Display plugin information and capabilities");
@@ -179,7 +179,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         param.value,
                         param.value * 100.0
                     );
-                    if param.unit.len() > 0 {
+                    if !param.unit.is_empty() {
                         println!("     Unit: {}", param.unit);
                     }
                     println!();

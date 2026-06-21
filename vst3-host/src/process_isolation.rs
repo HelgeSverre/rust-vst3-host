@@ -505,6 +505,32 @@ mod wire_tests {
             other => panic!("round-trip changed the variant: {other:?}"),
         }
     }
+
+    #[test]
+    fn state_commands_round_trip_across_the_wire() {
+        // SaveState/LoadState/State carry the opaque plugin state blob across isolation.
+        let blob: Vec<u8> = vec![0, 1, 2, 250, 255, 42];
+
+        let save = serde_json::to_string(&HostCommand::SaveState).expect("serialize SaveState");
+        assert!(matches!(
+            serde_json::from_str::<HostCommand>(&save).expect("deserialize SaveState"),
+            HostCommand::SaveState
+        ));
+
+        let load = HostCommand::LoadState { data: blob.clone() };
+        let load_json = serde_json::to_string(&load).expect("serialize LoadState");
+        match serde_json::from_str::<HostCommand>(&load_json).expect("deserialize LoadState") {
+            HostCommand::LoadState { data } => assert_eq!(data, blob),
+            other => panic!("LoadState round-trip changed the variant: {other:?}"),
+        }
+
+        let state = HostResponse::State { data: blob.clone() };
+        let state_json = serde_json::to_string(&state).expect("serialize State");
+        match serde_json::from_str::<HostResponse>(&state_json).expect("deserialize State") {
+            HostResponse::State { data } => assert_eq!(data, blob),
+            other => panic!("State round-trip changed the variant: {other:?}"),
+        }
+    }
 }
 
 /// Crash protection utilities for in-process plugins
