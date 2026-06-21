@@ -33,7 +33,7 @@ rtrb = "0.3"
 
 # Optional dependencies
 cpal = { version = "0.18", optional = true }
-egui = { version = "0.31.1", optional = true }
+egui = { version = "0.34", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 
 # Platform-specific dependencies
@@ -77,7 +77,7 @@ egui-widgets = ["egui", "raw-window-handle"]
 [dev-dependencies]
 env_logger = "0.11"
 rfd = "0.17"
-eframe = "0.31"
+eframe = "0.34"
 raw-window-handle = "0.6"
 
 [[example]]

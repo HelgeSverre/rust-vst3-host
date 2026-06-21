@@ -275,6 +275,33 @@ fn run_selftest(path: &str) -> i32 {
     0
 }
 
+/// Apply a Catppuccin Frappé-flavoured dark theme to egui (replaces the `catppuccin-egui`
+/// crate, which lags egui's releases).
+fn apply_frappe_theme(ctx: &egui::Context) {
+    use egui::Color32;
+    let base = Color32::from_rgb(0x30, 0x34, 0x46);
+    let mantle = Color32::from_rgb(0x29, 0x2c, 0x3c);
+    let surface0 = Color32::from_rgb(0x41, 0x45, 0x59);
+    let surface1 = Color32::from_rgb(0x51, 0x57, 0x6d);
+    let text = Color32::from_rgb(0xc6, 0xd0, 0xf5);
+    let blue = Color32::from_rgb(0x8c, 0xaa, 0xee);
+
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(text);
+    v.panel_fill = base;
+    v.window_fill = mantle;
+    v.extreme_bg_color = mantle;
+    v.faint_bg_color = surface0;
+    v.hyperlink_color = blue;
+    v.widgets.noninteractive.bg_fill = base;
+    v.widgets.inactive.bg_fill = surface0;
+    v.widgets.hovered.bg_fill = surface1;
+    v.widgets.active.bg_fill = surface1;
+    v.selection.bg_fill = blue.gamma_multiply(0.4);
+    v.selection.stroke = egui::Stroke::new(1.0, blue);
+    ctx.set_visuals(v);
+}
+
 fn main() {
     // Headless self-test mode: `vst3-inspector --selftest [plugin.vst3]`.
     let args: Vec<String> = std::env::args().collect();
@@ -301,7 +328,7 @@ fn main() {
         "VST3 Plugin Inspector",
         options,
         Box::new(|cc| {
-            catppuccin_egui::set_theme(&cc.egui_ctx, catppuccin_egui::FRAPPE);
+            apply_frappe_theme(&cc.egui_ctx);
 
             let mut inspector = VST3Inspector::from_path(PLUGIN_PATH);
 
@@ -508,6 +535,10 @@ enum ParameterFilter {
 }
 
 impl eframe::App for VST3Inspector {
+    // eframe 0.34 made `ui` the required trait method; this app builds its own panels on the
+    // `Context` from `update` (still called by eframe each frame), so `ui` is unused.
+    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Pull current output levels from the library and feed the VU meter cache.
         self.update_vu_meters();
@@ -2836,7 +2867,7 @@ impl VST3Inspector {
         }
 
         // Check for released keys
-        if response.drag_released() || !response.is_pointer_button_down_on() {
+        if response.drag_stopped() || !response.is_pointer_button_down_on() {
             // Mouse up - send note off for all pressed keys
             for &note in self.pressed_keys.clone().iter() {
                 if let Err(e) = self.send_midi_note_off(self.selected_midi_channel, note, 0.0) {

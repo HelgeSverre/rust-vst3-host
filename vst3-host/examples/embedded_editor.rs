@@ -4,6 +4,10 @@
 //! Run: `cargo run -p vst3-host --example embedded_editor --features egui-widgets`
 //! (optionally pass a `.vst3` path; defaults to the bundled Dexed).
 
+// egui 0.34 deprecated the ctx-based panel API (`Panel::show` → `show_inside`); the inspector
+// suppresses the same way. Migrating to `show_inside` is a tracked follow-up.
+#![allow(deprecated)]
+
 use eframe::egui;
 use raw_window_handle::HasWindowHandle;
 use std::sync::{Arc, Mutex};
@@ -59,6 +63,10 @@ impl App {
 }
 
 impl eframe::App for App {
+    // eframe 0.34 requires `ui`; this example builds its panels on the `Context` in `update`
+    // (still called each frame), so `ui` is unused.
+    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.frame += 1;
         if self.smoke {

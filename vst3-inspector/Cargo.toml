@@ -15,9 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 vst3-host = { path = "../vst3-host", features = ["cpal-backend"] }
-catppuccin-egui = { version = "5.5.0", default-features = false, features = ["egui31"] }
-eframe = "0.31.1"
-egui_extras = "0.31.1"
+eframe = "0.34"
+egui_extras = "0.34"
 serde = { workspace = true }
 serde_json = { workspace = true }
 directories = "6.0.0"

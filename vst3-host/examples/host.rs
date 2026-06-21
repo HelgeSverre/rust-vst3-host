@@ -1,5 +1,8 @@
 //! VST3 host with EGUI interface
 
+// egui 0.34 deprecated the ctx-based panel API; suppressed here as in the inspector.
+#![allow(deprecated)]
+
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 use vst3_host::prelude::*;
@@ -305,6 +308,8 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Update parameter values from plugin GUI
         self.update_parameter_values();
