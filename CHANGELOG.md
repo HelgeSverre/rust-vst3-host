@@ -14,12 +14,19 @@ All notable changes to `vst3-host` are documented here. The format is based on
   `note_expressions()` discovers what a plugin supports (`INoteExpressionController`). Verified
   end-to-end against a new in-repo `test-plugin/` VST3 synth (`just test-plugin`) — a Tuning
   expression bends one voice an octave.
+- `AudioHandle::try_lock` — non-blocking plugin lock for UI/render threads. Returns `None`
+  when the audio callback holds the lock (held for each `process_audio` block) instead of
+  stalling the caller.
 
 ### Fixed
 
 - The builder's `sample_rate` / `block_size` are now applied to in-process plugins at load
   (they were ignored — plugins ran at the 44100/512 defaults while `Plugin::sample_rate()`
   reported the configured value).
+- Inspector input lag / dropped clicks: the UI thread blocked on the audio mutex every frame
+  (VU meters, output-MIDI drain, parameter sync), stalling winit event processing while the
+  audio callback was mid-block. These per-frame reads now use `AudioHandle::try_lock` and skip
+  a frame under contention rather than blocking.
 
 ## [0.2.1] - 2026-06-22
 

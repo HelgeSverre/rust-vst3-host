@@ -43,6 +43,22 @@ impl AudioHandle {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Try to lock the plugin without blocking, returning `None` if the audio
+    /// callback currently holds the lock (it is held for the duration of each
+    /// `process_audio` call).
+    ///
+    /// Use this on a UI/render thread for best-effort, per-frame reads (VU
+    /// meters, output-MIDI drain, parameter sync): skipping a frame when the
+    /// audio thread is mid-block is invisible, and it keeps the UI thread from
+    /// stalling on the (unfair) mutex — which otherwise shows up as input lag.
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, Plugin>> {
+        match self.plugin.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
     /// A shared handle to the plugin, e.g. to move into another thread.
     pub fn plugin(&self) -> Arc<Mutex<Plugin>> {
         Arc::clone(&self.plugin)

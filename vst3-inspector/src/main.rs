@@ -763,8 +763,13 @@ impl VST3Inspector {
     /// while it is processing audio, so this is a no-op when nothing is playing.
     fn poll_plugin_output_midi(&mut self) {
         use vst3_host::midi::MidiEvent;
+        // Best-effort, non-blocking: if the audio callback holds the lock this frame, skip —
+        // the events drain next frame. Blocking here stalls the UI thread (input lag).
         let events = match &self.audio {
-            Some(a) => a.lock().take_output_midi(),
+            Some(a) => match a.try_lock() {
+                Some(p) => p.take_output_midi(),
+                None => return,
+            },
             None => return,
         };
         for ev in events {
@@ -806,8 +811,13 @@ impl VST3Inspector {
     /// the plugin GUI calls back via the component handler) into the inspector's parameter
     /// list, so the displayed values stay in sync with the plugin's editor.
     fn poll_plugin_parameter_changes(&mut self) {
+        // Non-blocking: skip this frame if the audio callback holds the lock (see
+        // poll_plugin_output_midi); the changes are picked up next frame.
         let changes = match &self.audio {
-            Some(a) => a.lock().get_parameter_changes(),
+            Some(a) => match a.try_lock() {
+                Some(p) => p.get_parameter_changes(),
+                None => return,
+            },
             None => return,
         };
         if changes.is_empty() {
@@ -867,8 +877,13 @@ impl VST3Inspector {
     }
 
     fn update_vu_meters(&mut self) {
+        // Non-blocking: meters are cosmetic, so skip a frame rather than block the UI
+        // thread on the audio mutex (see poll_plugin_output_midi).
         let levels = match &self.audio {
-            Some(a) => a.lock().get_output_levels(),
+            Some(a) => match a.try_lock() {
+                Some(p) => p.get_output_levels(),
+                None => return,
+            },
             None => return,
         };
 
