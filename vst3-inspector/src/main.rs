@@ -1,6 +1,3 @@
-// egui 0.34 deprecated several Panel/Rounding/screen_rect APIs we still use; migrating
-// those is a separate task (they change layout semantics). The id_salt migration is done.
-#![allow(deprecated)]
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
 
@@ -658,8 +655,25 @@ impl eframe::App for VST3Inspector {
         // ~60 fps with `request_repaint_after` keeps meters/clicks responsive at far lower
         // cost. (Input events still trigger an immediate repaint.)
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
+
+        // egui 0.34 deprecated top-level `Panel::show(ctx, ..)` in favour of building a root
+        // `Ui` once and `show_inside`-ing every panel on it. Panels reserve space from the
+        // parent `Ui` (top panel advances the cursor, central fills the remainder), so showing
+        // them in sequence on this one `root_ui` reproduces the old header→side→central chain.
+        // `root_ui` must stay the *only* top-level `Ui` in `update()` for that to hold.
+        // (`show_inside` skips the `allocate_*_panel` pass-state the old path emitted for native
+        // shrink-to-content — fine here, the window is user-resizable rather than auto-fit.)
+        let mut root_ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("inspector_root"),
+            egui::UiBuilder::new()
+                .layer_id(egui::LayerId::background())
+                .max_rect(ctx.content_rect()),
+        );
+        root_ui.set_clip_rect(ctx.content_rect());
+
         // Top header panel
-        egui::TopBottomPanel::top("header").show(ctx, |ui| {
+        egui::Panel::top("header").show_inside(&mut root_ui, |ui| {
             ui.add_space(8.0);
 
             // Plugin info - always shown at top
@@ -731,10 +745,10 @@ impl eframe::App for VST3Inspector {
 
         // Route to appropriate tab content
         match self.current_tab {
-            Tab::Plugins => self.show_plugins_tab(ctx),
-            Tab::Plugin => self.show_plugin_tab(ctx),
-            Tab::Processing => self.show_processing_tab(ctx),
-            Tab::MidiMonitor => self.show_midi_monitor_tab(ctx),
+            Tab::Plugins => self.show_plugins_tab(&mut root_ui),
+            Tab::Plugin => self.show_plugin_tab(&mut root_ui),
+            Tab::Processing => self.show_processing_tab(&mut root_ui),
+            Tab::MidiMonitor => self.show_midi_monitor_tab(&mut root_ui),
         }
 
         // Persist session state (tab, channel, window size) whenever it changes, so the next
@@ -823,7 +837,7 @@ impl VST3Inspector {
     fn persist_session_if_changed(&mut self, ctx: &egui::Context) {
         // Quantize to whole points so sub-point jitter / DPI rounding during a resize doesn't
         // report "changed" every frame and rewrite the config file in a tight loop.
-        let size = ctx.screen_rect().size();
+        let size = ctx.content_rect().size();
         let window_size = Some((size.x.round(), size.y.round()));
         let last_tab = Some(self.current_tab.clone());
         let last_midi_channel = Some(self.selected_midi_channel);
@@ -870,8 +884,8 @@ impl VST3Inspector {
         }
     }
 
-    fn show_plugins_tab(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn show_plugins_tab(&mut self, root_ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show_inside(root_ui, |ui| {
             ui.add_space(8.0);
             ui.heading("Available VST3 Plugins");
             ui.add_space(8.0);
@@ -1016,14 +1030,14 @@ impl VST3Inspector {
             });
     }
 
-    fn show_plugin_tab(&mut self, ctx: &egui::Context) {
+    fn show_plugin_tab(&mut self, root_ui: &mut egui::Ui) {
         // Left sidebar for plugin information
-        egui::SidePanel::left("plugin_info_panel")
+        egui::Panel::left("plugin_info_panel")
             .resizable(true)
-            .default_width(300.0)
-            .min_width(250.0)
-            .max_width(500.0)
-            .show(ctx, |ui| {
+            .default_size(300.0)
+            .min_size(250.0)
+            .max_size(500.0)
+            .show_inside(root_ui, |ui| {
                 ui.add_space(8.0);
 
                 ui.heading("Plugin Information");
@@ -1039,7 +1053,7 @@ impl VST3Inspector {
                         .clicked()
                     {
                         if let Some(json) = &self.report_json {
-                            ctx.copy_text(json.clone());
+                            ui.ctx().copy_text(json.clone());
                         }
                     }
                 });
@@ -1327,7 +1341,7 @@ impl VST3Inspector {
             });
 
         // Central panel for parameters
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(root_ui, |ui| {
             ui.add_space(8.0);
             ui.heading("Parameter Control");
             ui.add_space(8.0);
@@ -1877,8 +1891,8 @@ impl VST3Inspector {
         });
     }
 
-    fn show_processing_tab(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn show_processing_tab(&mut self, root_ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show_inside(root_ui, |ui| {
             ui.add_space(8.0);
             ui.heading("Audio & MIDI Processing");
             ui.add_space(8.0);
@@ -2493,8 +2507,8 @@ impl VST3Inspector {
         });
     }
 
-    fn show_midi_monitor_tab(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn show_midi_monitor_tab(&mut self, root_ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show_inside(root_ui, |ui| {
             ui.heading("MIDI Monitor");
             ui.add_space(8.0);
 
@@ -3499,10 +3513,10 @@ impl VST3Inspector {
                     egui::Color32::WHITE
                 };
 
-                painter.rect_filled(key_rect, egui::Rounding::ZERO, color);
+                painter.rect_filled(key_rect, egui::CornerRadius::ZERO, color);
                 painter.rect_stroke(
                     key_rect,
-                    egui::Rounding::ZERO,
+                    egui::CornerRadius::ZERO,
                     egui::Stroke::new(1.0, egui::Color32::BLACK),
                     egui::epaint::StrokeKind::Middle,
                 );
@@ -3570,10 +3584,10 @@ impl VST3Inspector {
                     egui::Color32::BLACK
                 };
 
-                painter.rect_filled(key_rect, egui::Rounding::ZERO, color);
+                painter.rect_filled(key_rect, egui::CornerRadius::ZERO, color);
                 painter.rect_stroke(
                     key_rect,
-                    egui::Rounding::ZERO,
+                    egui::CornerRadius::ZERO,
                     egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
                     egui::epaint::StrokeKind::Middle,
                 );
