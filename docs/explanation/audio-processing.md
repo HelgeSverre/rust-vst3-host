@@ -34,10 +34,27 @@ Reconfigure is not yet marshalled across [process isolation](process-isolation.m
 
 ## Parameter and MIDI changes during playback
 
-The plugin runs on the audio thread (inside the device callback). Your control thread
-reaches it through `AudioHandle::lock()`, which takes the same mutex the audio callback
-uses. A `set_parameter` or `send_midi_note` call therefore briefly contends with the audio
-thread for the lock; the change is applied on the next block.
+The plugin runs on the audio thread (inside the device callback). Even on the mutex path,
+you don't have to take the audio mutex to reach a playing plugin: `AudioHandle` exposes
+**lock-free side channels** that never contend with the callback.
+
+- **In:** `send_midi`, `set_parameter` (normalized), and `midi_panic` queue commands over a
+  ring; the audio thread drains and applies them at the start of the next block. They return
+  `false` only if the ring is momentarily full.
+- **Out:** `output_levels` (per-channel peak, reset on read), `drain_output_midi`, and
+  `drain_parameter_changes` (parameter edits the plugin made in its own editor — see below)
+  let a UI poll the plugin without blocking the audio thread.
+- `try_lock` gives a best-effort full-`Plugin` read, returning `None` if the audio thread
+  currently holds the lock.
+
+`AudioHandle::lock()` is still available — it takes the **same** mutex the audio callback
+uses, so a call briefly contends with the audio thread and the change lands on the next
+block — but you only need it now for the rarer operations the side channels don't cover
+(opening the editor, saving/loading state, full introspection).
+
+Parameter changes a user makes **in the plugin's own editor GUI** (the plugin calling
+`performEdit`) now also reach the audio processor, so the sound follows the editor; surface
+those edits to your UI with `drain_parameter_changes`.
 
 ## Two paths: convenient (mutex) vs. real-time (lock-free)
 

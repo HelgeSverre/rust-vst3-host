@@ -10,7 +10,7 @@ A backend implements [`AudioBackend`](https://docs.rs/vst3-host/latest/vst3_host
 which produces an [`AudioStream`](https://docs.rs/vst3-host/latest/vst3_host/audio/trait.AudioStream.html).
 The key method creates an output stream whose data callback fills an interleaved `&mut [f32]`:
 
-```rust
+```rust,ignore
 use vst3_host::{AudioBackend, AudioConfig};
 
 // Sketch — see backends/cpal_backend.rs for a complete reference implementation.
@@ -29,9 +29,16 @@ impl AudioBackend for MyBackend {
         error_callback: Box<dyn FnMut(Self::Error) + Send>,
     ) -> Result<Self::Stream, Self::Error> { /* drive data_callback from your audio thread */ }
 
-    // ...plus enumerate_*_devices, default_input_device, create_input_stream, create_duplex_stream
+    // ...plus enumerate_output_devices, enumerate_input_devices,
+    //         default_input_device, create_input_stream
 }
 ```
+
+The full method set is `enumerate_output_devices`, `enumerate_input_devices`,
+`default_output_device`, `default_input_device`, `create_output_stream`, and
+`create_input_stream`. There is no duplex method — to run an effect on live input, you don't
+need a custom backend at all: [`play_with_input_backend`](https://docs.rs/vst3-host/latest/vst3_host/playback/fn.play_with_input_backend.html)
+opens an input stream alongside the output and feeds captured audio through the plugin.
 
 ## Drive a plugin with it
 
@@ -43,7 +50,7 @@ wires it to a plugin exactly like `Vst3Host::play` does — it returns the same
 use vst3_host::{playback::play_with_backend, AudioConfig};
 
 # fn run<B: vst3_host::AudioBackend>(backend: B, plugin: vst3_host::Plugin) -> vst3_host::Result<()> {
-let config = AudioConfig { sample_rate: 48000.0, block_size: 512, input_channels: 0, output_channels: 2 };
+let config = AudioConfig { input_channels: 0, output_channels: 2, ..Default::default() };
 let audio = play_with_backend(&backend, plugin, config)?;
 # let _ = audio;
 # Ok(())

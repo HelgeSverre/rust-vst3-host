@@ -6,6 +6,8 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-22
+
 ### Added
 
 - **Per-note expression (MPE)**: `Plugin::note_on` returns a `NoteId`, and
@@ -24,6 +26,16 @@ All notable changes to `vst3-host` are documented here. The format is based on
   each block. The plugin mutex (`lock()`) is now only needed for rare state ops (preset
   save/load, WAV export, processing start/stop). `play`/`play_with_backend` wire this
   automatically.
+
+### Changed
+
+- Inspector: the Processing tab now scrolls instead of clipping content on a short window,
+  secondary sections collapse, and the on-screen keyboard / VU meters are responsive to width.
+- Inspector: defaults to the bundled `test_plugins/Dexed.vst3` at startup (was a hardcoded
+  system plugin path), falling back to the last-loaded plugin if it isn't present.
+- Inspector: repaints continuously so input is always processed promptly — a click that doesn't
+  move the mouse no longer waits for the next event to register.
+- Inspector: migrated off the egui 0.34 deprecated panel / rounding / `screen_rect` APIs.
 
 ### Fixed
 
@@ -121,6 +133,7 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 - Initial release: safe VST3 hosting — discover, load, parameters, MIDI, audio playback, state
   save/restore, and process isolation.
 
+[0.3.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.3.0
 [0.2.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.2.1
 [0.2.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.2.0
 [0.1.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.1.1

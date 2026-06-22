@@ -22,8 +22,7 @@ use midi_input::MidiInputState;
 use midi_player::MidiFilePlayer;
 
 /// Scan for installed VST3 plugin paths via the `vst3-host` library (lightweight —
-/// lists `.vst3` bundles without loading them). Replaces the former hand-rolled
-/// `plugin_discovery` module so the inspector consumes the library for discovery.
+/// lists `.vst3` bundles without loading them).
 fn discover_vst3_paths(custom_paths: &[String]) -> Vec<String> {
     let mut builder = vst3_host::Vst3Host::builder().scan_default_paths();
     for p in custom_paths {
@@ -294,8 +293,8 @@ fn run_selftest(path: &str) -> i32 {
     0
 }
 
-/// Apply a Catppuccin Frappé-flavoured dark theme to egui (replaces the `catppuccin-egui`
-/// crate, which lags egui's releases).
+/// Apply a Catppuccin Frappé-flavoured dark theme to egui. Hand-rolled rather than using the
+/// `catppuccin-egui` crate, which lags egui's releases.
 fn apply_frappe_theme(ctx: &egui::Context) {
     use egui::Color32;
     let base = Color32::from_rgb(0x30, 0x34, 0x46);
@@ -600,8 +599,8 @@ enum ParameterFilter {
 }
 
 impl eframe::App for VST3Inspector {
-    // eframe 0.34 made `ui` the required trait method; this app builds its own panels on the
-    // `Context` from `update` (still called by eframe each frame), so `ui` is unused.
+    // Required by `eframe::App` but unused: this app builds its panels on the `Context` in
+    // `update` (called each frame) rather than on this `Ui`.
     fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -658,19 +657,17 @@ impl eframe::App for VST3Inspector {
         // lets a click that doesn't move the mouse sit unprocessed until the next event arrives
         // (the bare pointer-up doesn't reliably schedule a fresh frame). An unbounded
         // `request_repaint()` runs the loop at the monitor refresh rate so input is always
-        // processed promptly and the meters/MIDI monitor stay live. This was previously avoided
-        // because the per-frame work locked the audio mutex (contending with the audio thread →
-        // lag); now that all control + feedback go through lock-free side channels, a steady
-        // repaint is cheap.
+        // processed promptly and the meters/MIDI monitor stay live. The per-frame work is cheap
+        // because all control + feedback go through lock-free side channels rather than the audio
+        // mutex, so it never contends with the audio thread.
         ctx.request_repaint();
 
-        // egui 0.34 deprecated top-level `Panel::show(ctx, ..)` in favour of building a root
-        // `Ui` once and `show_inside`-ing every panel on it. Panels reserve space from the
-        // parent `Ui` (top panel advances the cursor, central fills the remainder), so showing
-        // them in sequence on this one `root_ui` reproduces the old header→side→central chain.
-        // `root_ui` must stay the *only* top-level `Ui` in `update()` for that to hold.
-        // (`show_inside` skips the `allocate_*_panel` pass-state the old path emitted for native
-        // shrink-to-content — fine here, the window is user-resizable rather than auto-fit.)
+        // Build the single root `Ui` that every panel is shown inside. Panels reserve space from
+        // their parent `Ui` (a top panel advances the cursor, the central panel fills the
+        // remainder), so showing them in sequence on this one `root_ui` yields the
+        // header→side→central layout. `root_ui` must stay the *only* top-level `Ui` in `update()`
+        // for that to hold; it does not auto-fit the window to content, which is fine since the
+        // window is user-resizable.
         let mut root_ui = egui::Ui::new(
             ctx.clone(),
             egui::Id::new("inspector_root"),
@@ -3248,30 +3245,6 @@ impl VST3Inspector {
             channel: ch,
             note: pitch as u8,
             velocity: (velocity * 127.0) as u8,
-        });
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn send_midi_cc(&mut self, channel: i16, controller: u8, value: u8) -> Result<(), String> {
-        self.log_midi_event(
-            MidiDirection::Input,
-            3, // Control Change
-            channel as u8,
-            controller,
-            value,
-        );
-
-        let ch =
-            MidiChannel::from_index(channel as u8).unwrap_or_else(|| self.current_midi_channel());
-        let audio = match &self.audio {
-            Some(a) => a,
-            None => return Err("No plugin loaded".to_string()),
-        };
-        audio.send_midi(vst3_host::midi::MidiEvent::ControlChange {
-            channel: ch,
-            controller,
-            value,
         });
         Ok(())
     }

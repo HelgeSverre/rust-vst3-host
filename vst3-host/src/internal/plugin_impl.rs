@@ -263,10 +263,10 @@ impl PluginImpl {
                     log::error!("Failed to get IComponentHandler COM pointer");
                 }
 
-                // TEMPORARILY DISABLED: Transfer component state to controller
-                // This was causing hangs with some plugins like Dexed
-                // Self::transfer_component_state(&component, ctrl)?;
-                log::debug!("State transfer temporarily disabled to prevent hangs");
+                // No explicit component→controller state transfer at load: the controller is
+                // synced from component state via `setComponentState` in `load_state`, and
+                // transferring here hangs some plugins (e.g. Dexed).
+                log::debug!("Skipping component→controller state transfer at load");
             }
 
             // Activate component (important for parameter access)
@@ -1128,8 +1128,7 @@ impl PluginInternal for PluginImpl {
                     controller,
                     value,
                 } => {
-                    // For now, convert to legacy MIDI
-                    // In the future, could use PolyPressureEvent for some CCs
+                    // Control changes are sent as legacy MIDI CC events.
                     return self.send_legacy_midi_cc(channel, controller, value, sample_offset);
                 }
                 MidiEvent::PitchBend { channel, value } => {
@@ -1853,8 +1852,9 @@ impl PluginImpl {
         }
     }
 
-    /// Transfer component state to controller
-    #[allow(dead_code)] // kept: re-enabled when state transfer is fixed
+    /// Transfer component state to the controller. Currently unused: at load the controller is
+    /// synced via `setComponentState` (in `load_state`), not by transferring here.
+    #[allow(dead_code)]
     unsafe fn transfer_component_state(
         component: &ComPtr<IComponent>,
         controller: &ComPtr<IEditController>,

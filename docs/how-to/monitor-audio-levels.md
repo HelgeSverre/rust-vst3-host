@@ -38,6 +38,30 @@ Each [`ChannelLevel`](https://docs.rs/vst3-host/latest/vst3_host/audio/struct.Ch
 Levels are computed on the audio thread per block; polling is cheap and never blocks (a
 poisoned lock is recovered, not propagated).
 
+### Lock-free polling on a playing handle
+
+On a playing [`AudioHandle`](https://docs.rs/vst3-host/latest/vst3_host/playback/struct.AudioHandle.html)
+you can read levels without taking the audio mutex via `audio.output_levels()`. This is the
+path to use from a UI thread that polls every frame:
+
+```rust
+# use std::time::Instant;
+# use vst3_host::{simple, audio::PeakMeter};
+# fn main() -> vst3_host::Result<()> {
+# let audio = simple::play(simple::load_plugin("/x.vst3")?)?;
+# let mut meter = PeakMeter::new(20.0, std::time::Duration::from_secs(2));
+let levels = audio.output_levels();   // lock-free; peaks only
+let peak = levels.channels.first().map(|c| c.peak).unwrap_or(0.0);
+meter.push(peak, Instant::now());
+# Ok(())
+# }
+```
+
+It reports **peaks only** (each channel's `rms` reads `0`), as the max since the last read,
+reset on read — so a missed poll won't drop a transient, but feed the `peak` into a
+`PeakMeter` per channel as above. When you need RMS too, fall back to
+`audio.lock().get_output_levels()`.
+
 ## Why a raw peak_hold isn't a meter
 
 `ChannelLevel::peak_hold` is **sticky**: it only ever rises, so once a loud transient hits

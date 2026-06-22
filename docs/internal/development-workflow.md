@@ -317,7 +317,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-vst3-host = { version = "0.1", features = ["audio-cpal"] }
+vst3-host = { version = "0.3", features = ["cpal-backend"] }
 anyhow = "1.0"
 
 EOF

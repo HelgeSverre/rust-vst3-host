@@ -180,7 +180,7 @@ fn scan_directory(dir: &Path, plugins: &mut Vec<PathBuf>) -> Result<()> {
                     if !is_blacklisted(&path) {
                         plugins.push(path.clone());
                     } else {
-                        eprintln!("Skipping blacklisted plugin: {}", path.display());
+                        log::debug!("Skipping blacklisted plugin: {}", path.display());
                     }
                 }
             }

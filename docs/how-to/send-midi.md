@@ -63,10 +63,51 @@ plugin.midi_panic()?;   // stop every stuck note
 # }
 ```
 
+## Per-note expression (MPE)
+
+VST3 carries per-voice expression (pitch, volume, timbre…) keyed to a note, not a channel —
+the foundation for MPE-style control. Start a note to get a [`NoteId`], send expression
+against that id, then end it:
+
+```rust
+# use vst3_host::{simple, midi::MidiChannel, NoteExpressionType};
+# fn main() -> vst3_host::Result<()> {
+# let mut plugin = simple::load_plugin("/x.vst3")?;
+let id = plugin.note_on(MidiChannel::Ch1, 60, 100)?;            // returns a NoteId
+plugin.send_note_expression(id, NoteExpressionType::Tuning, 0.6)?; // bend up (0.5 = centered)
+plugin.note_off(id)?;
+# Ok(())
+# }
+```
+
+Expression values are normalized `0.0–1.0`. `Tuning` is bipolar (`0.5` centered); `Volume`,
+`Pan`, `Vibrato`, `Expression`, `Brightness`, and `Custom(id)` round out the set. `_at`
+variants (`note_on_at`, `note_off_at`, `send_note_expression_at`) place the event at a sample
+offset within the next block.
+
+To discover which dimensions a plugin actually advertises, query `note_expressions()`:
+
+```rust
+# use vst3_host::simple;
+# fn main() -> vst3_host::Result<()> {
+# let plugin = simple::load_plugin("/x.vst3")?;
+for info in plugin.note_expressions()? {
+    println!("{:?}", info);
+}
+# Ok(())
+# }
+```
+
+Note expression is **in-process only** — these calls return an error under
+[process isolation](../explanation/process-isolation.md).
+
 ## While playing
 
 If the plugin is inside an [`AudioHandle`](https://docs.rs/vst3-host/latest/vst3_host/playback/struct.AudioHandle.html),
-send through the lock: `audio.lock().send_midi_note(...)`.
+the lock-free path is `audio.send_midi(event)` — it queues the event for the next block
+without touching the audio mutex (returns `false` if the queue is full). The full-lock
+alternative is `audio.lock().send_midi_note(...)` when you need a `Plugin` method that has
+no queued equivalent.
 
 ## Note names
 

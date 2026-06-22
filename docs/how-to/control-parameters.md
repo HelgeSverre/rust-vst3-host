@@ -57,13 +57,30 @@ without the plugin's mapping — prefer `format_parameter`.
 ## While the plugin is playing
 
 If the plugin is running inside an [`AudioHandle`](https://docs.rs/vst3-host/latest/vst3_host/playback/struct.AudioHandle.html),
-go through the lock:
+the lock-free path is `audio.set_parameter(id, value)` — it queues the (normalized) change
+for the next block without contending on the audio mutex (returns `false` if the queue is
+full):
 
 ```rust
 # use vst3_host::simple;
 # fn main() -> vst3_host::Result<()> {
 # let audio = simple::play(simple::load_plugin("/x.vst3")?)?;
-audio.lock().set_parameter(0, 0.5)?;
+audio.set_parameter(0, 0.5);          // non-blocking
+audio.lock().set_parameter(0, 0.5)?;  // full-lock alternative
+# Ok(())
+# }
+```
+
+To read changes the plugin's *own editor* makes while it plays, drain them off the playing
+path without locking with `audio.drain_parameter_changes()`:
+
+```rust
+# use vst3_host::simple;
+# fn main() -> vst3_host::Result<()> {
+# let audio = simple::play(simple::load_plugin("/x.vst3")?)?;
+for (id, value) in audio.drain_parameter_changes() {
+    println!("editor changed param {id} -> {value}");
+}
 # Ok(())
 # }
 ```
