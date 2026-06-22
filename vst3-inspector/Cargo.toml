@@ -1,6 +1,6 @@
 [package]
 name = "vst3-inspector"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 description = "A VST3 plugin inspector and testing application"
