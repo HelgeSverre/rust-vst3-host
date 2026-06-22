@@ -302,8 +302,7 @@ mod tests {
 
     #[test]
     fn add_point_with_nan_time_does_not_panic() {
-        // A NaN time used to panic via `partial_cmp(..).unwrap()` in the sort; `total_cmp`
-        // orders it deterministically instead.
+        // A NaN time is ordered deterministically by `total_cmp` in the sort, never panicking.
         let auto = ParameterAutomation::new()
             .add_point(0.0, 0.1)
             .add_point(f64::NAN, 0.5)

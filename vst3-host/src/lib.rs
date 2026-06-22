@@ -135,8 +135,7 @@ mod tests {
 
     #[test]
     fn new_scans_default_paths_like_default() {
-        // Regression: new() used to inherit the builder's scan_default_paths=false, while
-        // Vst3Host::default() set it true — a subtle inconsistency. They must agree now.
+        // new() and Vst3Host::default() must agree on scan_default_paths (both scan).
         let via_new = Vst3Host::new().unwrap();
         assert!(
             via_new.scan_default_paths,

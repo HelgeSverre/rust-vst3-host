@@ -274,9 +274,6 @@ impl Vst3Host {
             internal: Some(Box::new(plugin_impl)),
         };
 
-        // Note: We can't track plugins in a Vec since they're not cloneable
-        // This would require a different design (e.g., using handles/IDs)
-
         Ok(plugin)
     }
 
@@ -390,7 +387,7 @@ impl Default for Vst3Host {
             custom_paths: Vec::new(),
             use_process_isolation: false,
             auto_isolate_problematic: false,
-            scan_default_paths: true, // Default to true for backward compatibility
+            scan_default_paths: true,
             helper_path: None,
             response_timeout: crate::process_isolation::DEFAULT_RESPONSE_TIMEOUT,
             auto_recover_plugins: false,

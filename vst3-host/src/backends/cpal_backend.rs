@@ -70,7 +70,7 @@ fn resolve_output_buffer_size(device: &Device, config: &AudioConfig) -> BufferSi
 /// Resolve the input-stream buffer size for `device` and `config`.
 ///
 /// Mirrors [`resolve_output_buffer_size`] for the capture side: an unconditional
-/// `BufferSize::Fixed` (what this used to send) is rejected by CoreAudio on many input devices.
+/// `BufferSize::Fixed` is rejected by CoreAudio on many input devices.
 fn resolve_input_buffer_size(device: &Device, config: &AudioConfig) -> BufferSize {
     match device.supported_input_configs() {
         Ok(ranges) => resolve_buffer_size(

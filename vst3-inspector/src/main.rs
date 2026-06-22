@@ -3702,8 +3702,6 @@ impl VST3Inspector {
     }
 }
 
-// Plugin discovery is now handled by plugin_discovery module
-
 fn get_plugin_name_from_path(path: &str) -> String {
     std::path::Path::new(path)
         .file_stem()

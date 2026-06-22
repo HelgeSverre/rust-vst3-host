@@ -263,9 +263,8 @@ impl PluginImpl {
                     log::error!("Failed to get IComponentHandler COM pointer");
                 }
 
-                // No explicit component→controller state transfer at load: the controller is
-                // synced from component state via `setComponentState` in `load_state`, and
-                // transferring here hangs some plugins (e.g. Dexed).
+                // The controller is synced from component state via `setComponentState` in
+                // `load_state`; transferring it here at load hangs some plugins.
                 log::debug!("Skipping component→controller state transfer at load");
             }
 
@@ -302,13 +301,9 @@ impl PluginImpl {
                     let view_type = c"editor".as_ptr();
                     let view_ptr = ctrl.createView(view_type);
                     if !view_ptr.is_null() {
-                        // Release the probe view by adopting it into a `ComPtr` and letting it
-                        // drop. We never parented it, so the correct teardown is a plain
-                        // Release — NOT `removed()`. `removed()` is the counterpart to
-                        // `attached()`; calling it on a never-attached view violates the
-                        // `IPlugView` lifecycle and crashes plugins that only initialize their
-                        // close state on attach (e.g. Access Virus Editor segfaults in
-                        // `OnUIClose()` dereferencing uninitialized state).
+                        // Release the probe view; never call `removed()` on it — that pairs with
+                        // `attached()`, and an unmatched `removed()` crashes some plugins that
+                        // initialize their close state only on attach.
                         let _ = ComPtr::<IPlugView>::from_raw(view_ptr);
                         true
                     } else {
@@ -1248,10 +1243,9 @@ impl PluginInternal for PluginImpl {
                 let view_type = c"editor".as_ptr();
                 let view_ptr = controller.createView(view_type);
                 if !view_ptr.is_null() {
-                    // Release the probe view (drop) without `removed()`: it was never
-                    // `attached()`, so `removed()` would violate the `IPlugView` lifecycle and
-                    // crash plugins that init close-state on attach (see the load-time has_gui
-                    // probe).
+                    // Release the probe view; never call `removed()` on it — that pairs with
+                    // `attached()`, and an unmatched `removed()` crashes some plugins that
+                    // initialize their close state only on attach.
                     let _ = ComPtr::<IPlugView>::from_raw(view_ptr);
                     true
                 } else {
@@ -1362,10 +1356,8 @@ impl PluginInternal for PluginImpl {
 
                 let result = view.getSize(&mut view_rect);
 
-                // The temporary view is released when `view` drops at the end of this scope.
-                // We must NOT call `removed()` here: it was never `attached()`, and calling
-                // `removed()` on a never-attached view crashes plugins that initialize their
-                // close-state on attach (e.g. Access Virus Editor segfaults in `OnUIClose()`).
+                // Released when `view` drops; do not call `removed()` — it pairs with
+                // `attached()`, which this probe never calls.
 
                 if result == kResultOk {
                     let width = view_rect.right - view_rect.left;
@@ -1859,8 +1851,8 @@ impl PluginImpl {
         }
     }
 
-    /// Transfer component state to the controller. Currently unused: at load the controller is
-    /// synced via `setComponentState` (in `load_state`), not by transferring here.
+    /// Transfer component state to the controller. Unused: the controller is synced via
+    /// `setComponentState` (in `load_state`) instead.
     #[allow(dead_code)]
     unsafe fn transfer_component_state(
         component: &ComPtr<IComponent>,
@@ -1948,7 +1940,7 @@ mod transport_tests {
     #[allow(clippy::unnecessary_cast)] // `as u32` needed where the constants are i32 (Windows)
     fn process_context_state_advertises_playhead_validity() {
         // The advancing continous/musical playhead is only honored by conformant plugins if
-        // its validity flags are set. Guard against silently dropping them again.
+        // its validity flags are set.
         use ProcessContext_::StatesAndFlags_ as F;
         assert_ne!(PROCESS_CONTEXT_STATE & F::kPlaying as u32, 0);
         assert_ne!(PROCESS_CONTEXT_STATE & F::kTempoValid as u32, 0);
