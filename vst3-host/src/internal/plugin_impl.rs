@@ -51,6 +51,8 @@ pub struct PluginImpl {
     time_sig_denominator: i32,
     /// Real-time vs offline processing, baked into `ProcessSetup`/`process_data` at setup.
     process_mode: crate::plugin::ProcessMode,
+    /// Monotonic allocator for per-voice note ids (note_on); 0/-1 reserved for "unset".
+    next_note_id: i32,
 
     // Host data structures
     process_data: Option<Box<HostProcessData>>,
@@ -125,6 +127,14 @@ impl PluginImpl {
         self.tempo = tempo;
         self.time_sig_numerator = time_sig_numerator;
         self.time_sig_denominator = time_sig_denominator;
+    }
+
+    /// Apply the host-configured sample rate / block size before processing starts. Called at
+    /// load so `setupProcessing` (which runs at `start_processing`) uses the builder's settings
+    /// rather than the internal defaults.
+    pub fn set_audio_config(&mut self, sample_rate: f64, block_size: usize) {
+        self.sample_rate = sample_rate;
+        self.block_size = block_size;
     }
 
     /// Get parameter changes captured from the plugin GUI
@@ -315,6 +325,7 @@ impl PluginImpl {
                 time_sig_numerator: 4,
                 time_sig_denominator: 4,
                 process_mode: crate::plugin::ProcessMode::Realtime,
+                next_note_id: 1,
                 process_data: None,
                 component_handler: Some(component_handler),
                 pending_param_changes: Vec::new(),
@@ -1357,6 +1368,104 @@ impl PluginInternal for PluginImpl {
                 mapping.getMidiControllerAssignment(bus, channel, cc as CtrlNumber, &mut id);
             // kResultTrue == kResultOk: a mapping exists and `id` was written.
             (result == kResultOk).then_some(id)
+        }
+    }
+
+    fn note_on(
+        &mut self,
+        channel: MidiChannel,
+        note: u8,
+        velocity: u8,
+        sample_offset: i32,
+    ) -> Result<crate::midi::NoteId> {
+        let id = self.next_note_id;
+        self.next_note_id = self.next_note_id.wrapping_add(1).max(1);
+        unsafe {
+            let mut ev: Event = std::mem::zeroed();
+            ev.busIndex = 0;
+            ev.sampleOffset = sample_offset.max(0);
+            ev.flags = Event_::EventFlags_::kIsLive as u16;
+            ev.r#type = kNoteOnEvent as u16;
+            ev.__field0.noteOn.channel = channel.as_index() as i16;
+            ev.__field0.noteOn.pitch = note as i16;
+            ev.__field0.noteOn.velocity = velocity as f32 / 127.0;
+            ev.__field0.noteOn.noteId = id;
+            self.input_events.add_event(ev);
+        }
+        Ok(crate::midi::NoteId(id))
+    }
+
+    fn note_off(&mut self, id: crate::midi::NoteId, sample_offset: i32) -> Result<()> {
+        unsafe {
+            let mut ev: Event = std::mem::zeroed();
+            ev.busIndex = 0;
+            ev.sampleOffset = sample_offset.max(0);
+            ev.flags = Event_::EventFlags_::kIsLive as u16;
+            ev.r#type = kNoteOffEvent as u16;
+            ev.__field0.noteOff.noteId = id.0;
+            self.input_events.add_event(ev);
+        }
+        Ok(())
+    }
+
+    fn send_note_expression(
+        &mut self,
+        id: crate::midi::NoteId,
+        kind: crate::midi::NoteExpressionType,
+        value: f64,
+        sample_offset: i32,
+    ) -> Result<()> {
+        unsafe {
+            let mut ev: Event = std::mem::zeroed();
+            ev.busIndex = 0;
+            ev.sampleOffset = sample_offset.max(0);
+            ev.flags = Event_::EventFlags_::kIsLive as u16;
+            ev.r#type = kNoteExpressionValueEvent as u16;
+            ev.__field0.noteExpressionValue.typeId = kind.type_id();
+            ev.__field0.noteExpressionValue.noteId = id.0;
+            ev.__field0.noteExpressionValue.value = value.clamp(0.0, 1.0);
+            self.input_events.add_event(ev);
+        }
+        Ok(())
+    }
+
+    fn note_expressions(
+        &self,
+        bus: i32,
+        channel: i16,
+    ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
+        use crate::midi::{NoteExpressionInfo, NoteExpressionType};
+        let Some(ctrl) = self
+            .controller
+            .as_ref()
+            .and_then(|c| c.cast::<INoteExpressionController>())
+        else {
+            return Ok(Vec::new());
+        };
+        unsafe {
+            let count = ctrl.getNoteExpressionCount(bus, channel);
+            let mut out = Vec::with_capacity(count.max(0) as usize);
+            for i in 0..count {
+                let mut info: NoteExpressionTypeInfo = std::mem::zeroed();
+                if ctrl.getNoteExpressionInfo(bus, channel, i, &mut info) == kResultOk {
+                    use NoteExpressionTypeInfo_::NoteExpressionTypeFlags_ as Flags;
+                    let flags = info.flags;
+                    out.push(NoteExpressionInfo {
+                        kind: NoteExpressionType::from_type_id(info.typeId),
+                        title: crate::internal::utils::vst_string_to_string(&info.title),
+                        short_title: crate::internal::utils::vst_string_to_string(&info.shortTitle),
+                        units: crate::internal::utils::vst_string_to_string(&info.units),
+                        default_value: info.valueDesc.defaultValue,
+                        min: info.valueDesc.minimum,
+                        max: info.valueDesc.maximum,
+                        step_count: info.valueDesc.stepCount,
+                        is_bipolar: flags & Flags::kIsBipolar as i32 != 0,
+                        is_one_shot: flags & Flags::kIsOneShot as i32 != 0,
+                        is_absolute: flags & Flags::kIsAbsolute as i32 != 0,
+                    });
+                }
+            }
+            Ok(out)
         }
     }
 

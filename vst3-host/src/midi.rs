@@ -159,6 +159,96 @@ pub enum MidiEvent {
     },
 }
 
+/// An opaque per-voice handle returned by [`Plugin::note_on`](crate::Plugin::note_on), used to
+/// target note-expression events (and the note-off) at a specific sounding note — the basis for
+/// MPE-style per-note control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NoteId(pub(crate) i32);
+
+impl NoteId {
+    /// The raw VST3 note id.
+    pub fn raw(self) -> i32 {
+        self.0
+    }
+}
+
+/// A VST3 per-note expression dimension. Values are normalized `0.0..=1.0`; the bipolar
+/// dimensions (Pan, Tuning) center at `0.5`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum NoteExpressionType {
+    /// Per-note volume (`kVolumeTypeID`).
+    Volume,
+    /// Per-note pan, bipolar (`kPanTypeID`).
+    Pan,
+    /// Per-note tuning / pitch, bipolar (`kTuningTypeID`).
+    Tuning,
+    /// Per-note vibrato (`kVibratoTypeID`).
+    Vibrato,
+    /// Per-note expression (`kExpressionTypeID`).
+    Expression,
+    /// Per-note brightness / timbre (`kBrightnessTypeID`).
+    Brightness,
+    /// A plugin-defined custom expression type id (`kCustomStart..kCustomEnd`).
+    Custom(u32),
+}
+
+impl NoteExpressionType {
+    /// The VST3 `NoteExpressionTypeID` for this dimension.
+    pub(crate) fn type_id(self) -> u32 {
+        match self {
+            NoteExpressionType::Volume => 0,
+            NoteExpressionType::Pan => 1,
+            NoteExpressionType::Tuning => 2,
+            NoteExpressionType::Vibrato => 3,
+            NoteExpressionType::Expression => 4,
+            NoteExpressionType::Brightness => 5,
+            NoteExpressionType::Custom(id) => id,
+        }
+    }
+
+    /// Map a VST3 `NoteExpressionTypeID` back to a type (unknown ids become `Custom`).
+    pub(crate) fn from_type_id(id: u32) -> Self {
+        match id {
+            0 => NoteExpressionType::Volume,
+            1 => NoteExpressionType::Pan,
+            2 => NoteExpressionType::Tuning,
+            3 => NoteExpressionType::Vibrato,
+            4 => NoteExpressionType::Expression,
+            5 => NoteExpressionType::Brightness,
+            other => NoteExpressionType::Custom(other),
+        }
+    }
+}
+
+/// A note-expression dimension a plugin advertises via `INoteExpressionController`
+/// (from [`Plugin::note_expressions`](crate::Plugin::note_expressions)).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NoteExpressionInfo {
+    /// Which expression dimension this is.
+    pub kind: NoteExpressionType,
+    /// Display title (e.g. "Tuning").
+    pub title: String,
+    /// Short title.
+    pub short_title: String,
+    /// Units string (may be empty).
+    pub units: String,
+    /// Default normalized value.
+    pub default_value: f64,
+    /// Minimum normalized value.
+    pub min: f64,
+    /// Maximum normalized value.
+    pub max: f64,
+    /// Discrete step count (0 = continuous).
+    pub step_count: i32,
+    /// Whether the dimension is bipolar (centered at 0.5).
+    pub is_bipolar: bool,
+    /// Whether it's a one-shot (applied once at note start).
+    pub is_one_shot: bool,
+    /// Whether the value is absolute (vs relative to the note's base).
+    pub is_absolute: bool,
+}
+
 impl MidiEvent {
     /// Parse a single channel-voice MIDI message from raw bytes (status + data), as delivered
     /// by a MIDI input device.
@@ -397,6 +487,27 @@ pub fn name_to_note(name: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_expression_type_ids_round_trip() {
+        for kind in [
+            NoteExpressionType::Volume,
+            NoteExpressionType::Pan,
+            NoteExpressionType::Tuning,
+            NoteExpressionType::Vibrato,
+            NoteExpressionType::Expression,
+            NoteExpressionType::Brightness,
+            NoteExpressionType::Custom(100_001),
+        ] {
+            assert_eq!(NoteExpressionType::from_type_id(kind.type_id()), kind);
+        }
+        // The well-known VST3 type ids.
+        assert_eq!(NoteExpressionType::Tuning.type_id(), 2);
+        assert_eq!(
+            NoteExpressionType::from_type_id(5),
+            NoteExpressionType::Brightness
+        );
+    }
 
     #[test]
     fn from_midi_bytes_maps_channel_voice_messages() {

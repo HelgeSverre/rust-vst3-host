@@ -89,7 +89,7 @@ pub use discovery::{
 pub use embed::{EditorRect, EmbeddedEditor};
 pub use error::{Error, Result};
 pub use host::{DiscoveryProgress, ProbeResult, Vst3Host, Vst3HostBuilder};
-pub use midi::{cc, MidiChannel, MidiEvent};
+pub use midi::{cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId};
 pub use parameters::{Parameter, ParameterAutomation, ParameterChange};
 pub use playback::{
     play_realtime_with_backend, play_with_backend, play_with_input_backend, AudioHandle,
@@ -111,7 +111,7 @@ pub mod prelude {
         // any `Result<T, E>` written by consumers. Use `vst3_host::Result` explicitly.
         error::Error,
         host::{DiscoveryProgress, Vst3Host, Vst3HostBuilder},
-        midi::{cc, MidiChannel, MidiEvent},
+        midi::{cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId},
         parameters::{Parameter, ParameterAutomation},
         playback::{play_with_backend, AudioHandle},
         plugin::{Plugin, PluginInfo, ProcessMode, WindowHandle},

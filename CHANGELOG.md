@@ -4,6 +4,23 @@ All notable changes to `vst3-host` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: new features bump the minor version).
 
+## [Unreleased]
+
+### Added
+
+- **Per-note expression (MPE)**: `Plugin::note_on` returns a `NoteId`, and
+  `send_note_expression(id, NoteExpressionType, value)` targets per-voice expression
+  (tuning / volume / pan / brightness / …) via VST3 note-expression events;
+  `note_expressions()` discovers what a plugin supports (`INoteExpressionController`). Verified
+  end-to-end against a new in-repo `test-plugin/` VST3 synth (`just test-plugin`) — a Tuning
+  expression bends one voice an octave.
+
+### Fixed
+
+- The builder's `sample_rate` / `block_size` are now applied to in-process plugins at load
+  (they were ignored — plugins ran at the 44100/512 defaults while `Plugin::sample_rate()`
+  reported the configured value).
+
 ## [0.2.1] - 2026-06-22
 
 ### Added
