@@ -4,6 +4,15 @@ All notable changes to `vst3-host` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: new features bump the minor version).
 
+## [Unreleased]
+
+### Added
+
+- `MidiEvent::from_midi_bytes` — parse a raw channel-voice MIDI message (status + data) into a
+  `MidiEvent` (note on/off, CC, pitch bend, aftertouch), for forwarding hardware-controller MIDI.
+- Inspector: a "MIDI Input Device" picker that forwards a connected controller's MIDI into the
+  loaded plugin live (macOS / CoreMIDI; device → plugin only, no feedback loop).
+
 ## [0.2.0] - 2026-06-22
 
 A large, fully backward-compatible feature release: the public API only grows. Highlights are
