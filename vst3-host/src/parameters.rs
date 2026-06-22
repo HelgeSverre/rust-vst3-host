@@ -309,5 +309,29 @@ mod tests {
             .add_point(f64::NAN, 0.5)
             .add_point(1.0, 0.9);
         assert_eq!(auto.points.len(), 3);
+
+        // Sane ordering: the finite points keep ascending-time order, and the NaN is placed
+        // deterministically (`total_cmp` sorts a positive NaN after all finite values) rather
+        // than corrupting the sequence or panicking.
+        let finite: Vec<f64> = auto
+            .points
+            .iter()
+            .map(|p| p.time)
+            .filter(|t| t.is_finite())
+            .collect();
+        assert_eq!(finite, vec![0.0, 1.0]);
+        assert!(auto.points.last().unwrap().time.is_nan());
+    }
+
+    #[test]
+    fn add_point_with_nan_value_is_not_used_in_ordering() {
+        // The sort keys on time only, so a NaN *value* can never reach the comparator and
+        // can never break ordering or panic. Lock that in.
+        let auto = ParameterAutomation::new()
+            .add_point(2.0, f64::NAN)
+            .add_point(1.0, 0.5)
+            .add_point(0.0, 0.25);
+        let times: Vec<f64> = auto.points.iter().map(|p| p.time).collect();
+        assert_eq!(times, vec![0.0, 1.0, 2.0]);
     }
 }
