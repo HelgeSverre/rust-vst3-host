@@ -37,6 +37,16 @@ pub struct WindowsModule {
     get_factory_fn: Symbol<'static, GetPluginFactoryFunc>,
 }
 
+/// Best-effort: read the plugin's PE header and, if its architecture differs from the host's,
+/// return an actionable error sentence. `None` if the file can't be read/parsed (e.g. a `.vst3`
+/// bundle directory) or the arch matches — the caller then falls back to the generic message.
+fn arch_mismatch_detail(path: &Path) -> Option<String> {
+    use super::arch;
+    let data = std::fs::read(path).ok()?;
+    let name = arch::pe_machine_name(arch::detect_pe_machine(&data)?);
+    arch::mismatch_detail("DLL", name)
+}
+
 impl WindowsModule {
     /// Load a VST3 DLL using the correct Windows sequence
     fn load_internal(path: &Path) -> Result<Self> {
@@ -46,8 +56,13 @@ impl WindowsModule {
 
             // Step 1: Load the library
             log::debug!("Step 1: Loading DLL...");
-            let library = Library::new(path)
-                .map_err(|e| Error::PluginLoadFailed(format!("Failed to load DLL: {}", e)))?;
+            let library = Library::new(path).map_err(|e| {
+                // A common failure on the wrong host arch (e.g. an x86_64-only plugin on an
+                // arm64 host). Diagnose it from the PE header so the error is actionable.
+                let detail = arch_mismatch_detail(path)
+                    .unwrap_or_else(|| format!("Failed to load DLL: {}", e));
+                Error::PluginLoadFailed(detail)
+            })?;
             log::debug!("DLL loaded successfully");
 
             // Step 2: Try to get InitDll function (OPTIONAL).
