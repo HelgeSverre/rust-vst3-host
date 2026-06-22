@@ -51,6 +51,99 @@ fn load_dexed() -> Option<(Vst3Host, Plugin)> {
     Some((host, plugin))
 }
 
+/// Path to our own bundled test synth (built by `just test-plugin`), or `None` with a note.
+/// Unlike Dexed, it implements `INoteExpressionController`, so it can prove note expression.
+fn test_synth_path() -> Option<&'static str> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_plugins/TestSynth.vst3"
+    );
+    if std::path::Path::new(path).exists() {
+        Some(path)
+    } else {
+        println!("TestSynth.vst3 not found at {path} — run `just test-plugin`, skipping");
+        None
+    }
+}
+
+fn load_test_synth() -> Option<(Vst3Host, Plugin)> {
+    let path = test_synth_path()?;
+    // Large block so one process_audio call yields enough samples to measure pitch (the host
+    // clamps numSamples to the configured block size).
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(4096)
+        .build()
+        .expect("build host");
+    let plugin = host.load_plugin(path).expect("load TestSynth");
+    Some((host, plugin))
+}
+
+/// Estimate a held voice's fundamental frequency by counting zero-crossings over one block of
+/// channel-0 output. Rough but enough to prove a pitch change.
+fn measure_freq(plugin: &mut Plugin) -> f64 {
+    let frames = 4096; // == the configured block size, so the host doesn't clamp
+    let sr = 48000.0;
+    let mut buffers = AudioBuffers::new(0, 2, frames, sr);
+    plugin.process_audio(&mut buffers).expect("process_audio");
+    let ch = &buffers.outputs[0];
+    let mut crossings = 0;
+    for w in ch.windows(2) {
+        if (w[0] <= 0.0 && w[1] > 0.0) || (w[0] >= 0.0 && w[1] < 0.0) {
+            crossings += 1;
+        }
+    }
+    // Two zero-crossings per cycle.
+    (crossings as f64 / 2.0) / (frames as f64 / sr)
+}
+
+/// Note expression (MPE) end-to-end against our own TestSynth: a per-note Tuning expression
+/// audibly bends one voice's pitch. Dexed can't demonstrate this (no INoteExpressionController).
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn test_note_expression_bends_pitch() {
+    use vst3_host::{NoteExpressionType, NoteId};
+
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_test_synth() else {
+        return;
+    };
+
+    // The plugin advertises a Tuning note-expression.
+    let exprs = plugin.note_expressions().expect("note_expressions");
+    println!("TestSynth note expressions: {exprs:?}");
+    assert!(
+        exprs.iter().any(|e| e.kind == NoteExpressionType::Tuning),
+        "TestSynth should advertise a Tuning note expression"
+    );
+
+    plugin.start_processing().expect("start_processing");
+    let id: NoteId = plugin
+        .note_on(MidiChannel::Ch1, 60, 100)
+        .expect("note_on returns a NoteId");
+
+    // Unbent: note 60 ≈ 261.6 Hz.
+    let freq_unbent = measure_freq(&mut plugin);
+    // Tuning value 1.0 = max bend = +1 octave in our synth → ≈ 523 Hz.
+    plugin
+        .send_note_expression(id, NoteExpressionType::Tuning, 1.0)
+        .expect("send_note_expression");
+    let freq_bent = measure_freq(&mut plugin);
+
+    plugin.note_off(id).ok();
+    plugin.stop_processing().ok();
+
+    println!("note-expression pitch: unbent={freq_unbent:.1} Hz, bent={freq_bent:.1} Hz");
+    assert!(
+        freq_unbent > 200.0 && freq_unbent < 320.0,
+        "unbent ~261 Hz, got {freq_unbent}"
+    );
+    assert!(
+        freq_bent > freq_unbent * 1.7,
+        "Tuning expression should raise the pitch ~1 octave: {freq_unbent} -> {freq_bent}"
+    );
+}
+
 /// Pick a writable, automatable parameter (falling back to the first one).
 fn pick_writable_param(plugin: &mut Plugin) -> Parameter {
     let params = plugin.get_parameters().expect("get_parameters");

@@ -1,5 +1,5 @@
 [workspace]
-members = ["vst3-host", "vst3-inspector"]
+members = ["vst3-host", "vst3-inspector", "test-plugin"]
 resolver = "2"
 
 # Shared dependencies for the workspace

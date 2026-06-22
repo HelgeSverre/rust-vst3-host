@@ -214,6 +214,10 @@ impl Vst3Host {
         // Load the plugin implementation directly - it will handle path resolution
         let mut plugin_impl = crate::internal::plugin_impl::PluginImpl::load(path)?;
 
+        // Apply the builder's audio config (sample rate / block size) so the plugin actually
+        // processes at the requested settings, not the internal defaults.
+        plugin_impl.set_audio_config(self.config.sample_rate, self.config.block_size);
+
         // Thread the configured transport into the plugin's host ProcessContext so
         // tempo-synced DSP sees the host tempo / time signature.
         plugin_impl.set_transport(

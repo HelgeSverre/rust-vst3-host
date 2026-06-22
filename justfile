@@ -30,6 +30,12 @@ helper:
 test:
     cargo test --workspace --all-features
 
+# Build the deterministic test synth and bundle it into test_plugins/TestSynth.vst3 (macOS)
+[group('build')]
+test-plugin:
+    cargo build -p vst3-host-testplug --release
+    bash scripts/bundle-test-plugin.sh
+
 # Run the (ignored) process-isolation capstones — needs the helper + a test plugin
 [group('test')]
 test-isolation: helper

@@ -147,6 +147,46 @@ pub(crate) trait PluginInternal: Send {
     fn send_midi_event_at(&mut self, event: MidiEvent, _sample_offset: i32) -> Result<()> {
         self.send_midi_event(event)
     }
+    /// Start a note and return a per-voice [`NoteId`] for targeting note-expression. Default:
+    /// unsupported (e.g. process isolation overrides this to marshal it).
+    fn note_on(
+        &mut self,
+        _channel: MidiChannel,
+        _note: u8,
+        _velocity: u8,
+        _sample_offset: i32,
+    ) -> Result<crate::midi::NoteId> {
+        Err(Error::Other(
+            "per-note expression is not supported for this plugin".to_string(),
+        ))
+    }
+    /// Release a note started with [`Self::note_on`]. Default: unsupported.
+    fn note_off(&mut self, _id: crate::midi::NoteId, _sample_offset: i32) -> Result<()> {
+        Err(Error::Other(
+            "per-note expression is not supported for this plugin".to_string(),
+        ))
+    }
+    /// Send a per-note expression value (normalized 0..1) for a voice. Default: unsupported.
+    fn send_note_expression(
+        &mut self,
+        _id: crate::midi::NoteId,
+        _kind: crate::midi::NoteExpressionType,
+        _value: f64,
+        _sample_offset: i32,
+    ) -> Result<()> {
+        Err(Error::Other(
+            "per-note expression is not supported for this plugin".to_string(),
+        ))
+    }
+    /// Enumerate the per-note expressions the plugin advertises (`INoteExpressionController`).
+    /// Defaults to empty.
+    fn note_expressions(
+        &self,
+        _bus: i32,
+        _channel: i16,
+    ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
+        Ok(Vec::new())
+    }
     fn start_processing(&mut self) -> Result<()>;
     fn stop_processing(&mut self) -> Result<()>;
     fn has_editor(&self) -> bool;
@@ -542,6 +582,92 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .send_midi_event_at(event, sample_offset)
+    }
+
+    /// Start a note and get a per-voice [`NoteId`](crate::midi::NoteId) handle for sending
+    /// per-note (MPE-style) expression to that exact voice via
+    /// [`send_note_expression`](Self::send_note_expression).
+    ///
+    /// Unlike [`send_midi_note`](Self::send_midi_note) (which uses a shared note id and can't be
+    /// individually expressed), this allocates a unique voice id. Pair it with
+    /// [`note_off`](Self::note_off). Errors under process isolation only if the helper can't
+    /// marshal it.
+    pub fn note_on(
+        &mut self,
+        channel: MidiChannel,
+        note: u8,
+        velocity: u8,
+    ) -> Result<crate::midi::NoteId> {
+        self.note_on_at(channel, note, velocity, 0)
+    }
+
+    /// [`note_on`](Self::note_on) scheduled at a sample offset within the next block.
+    pub fn note_on_at(
+        &mut self,
+        channel: MidiChannel,
+        note: u8,
+        velocity: u8,
+        sample_offset: i32,
+    ) -> Result<crate::midi::NoteId> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .note_on(channel, note, velocity, sample_offset)
+    }
+
+    /// Release a note started with [`note_on`](Self::note_on).
+    pub fn note_off(&mut self, id: crate::midi::NoteId) -> Result<()> {
+        self.note_off_at(id, 0)
+    }
+
+    /// [`note_off`](Self::note_off) scheduled at a sample offset within the next block.
+    pub fn note_off_at(&mut self, id: crate::midi::NoteId, sample_offset: i32) -> Result<()> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .note_off(id, sample_offset)
+    }
+
+    /// Send a per-note expression value for a voice (normalized `0.0..=1.0`; bipolar dimensions
+    /// like [`Tuning`](crate::midi::NoteExpressionType::Tuning) center at `0.5`). The plugin
+    /// must implement `INoteExpressionController` and the dimension must be one it advertises
+    /// (see [`note_expressions`](Self::note_expressions)).
+    pub fn send_note_expression(
+        &mut self,
+        id: crate::midi::NoteId,
+        kind: crate::midi::NoteExpressionType,
+        value: f64,
+    ) -> Result<()> {
+        self.send_note_expression_at(id, kind, value, 0)
+    }
+
+    /// [`send_note_expression`](Self::send_note_expression) scheduled at a sample offset.
+    pub fn send_note_expression_at(
+        &mut self,
+        id: crate::midi::NoteId,
+        kind: crate::midi::NoteExpressionType,
+        value: f64,
+        sample_offset: i32,
+    ) -> Result<()> {
+        if !(0.0..=1.0).contains(&value) {
+            return Err(Error::InvalidParameter(format!(
+                "note-expression value {value} out of range [0.0, 1.0]"
+            )));
+        }
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .send_note_expression(id, kind, value, sample_offset)
+    }
+
+    /// Enumerate the per-note expression dimensions the plugin advertises for the given event
+    /// bus / channel (defaults: bus 0, channel 0), via `INoteExpressionController`. Empty if the
+    /// plugin doesn't implement it.
+    pub fn note_expressions(&self) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .note_expressions(0, 0)
     }
 
     /// Start audio processing
