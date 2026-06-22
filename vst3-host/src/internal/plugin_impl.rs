@@ -811,6 +811,11 @@ impl PluginInternal for PluginImpl {
                     .min(self.block_size);
                 data.process_data.numSamples = frames as i32;
 
+                // Clamp queued MIDI event offsets into the actual (possibly smaller) block, so a
+                // note scheduled near block_size can't land past the end of a short block.
+                self.input_events
+                    .clamp_offsets(frames.saturating_sub(1) as i32);
+
                 // Feed queued parameter changes into the processor's input queue, clamping
                 // each sample offset into this block.
                 for pc in &pending {
@@ -897,11 +902,19 @@ impl PluginInternal for PluginImpl {
                 self.is_active = false;
             }
 
+            let (old_sr, old_bs) = (self.sample_rate, self.block_size);
             self.sample_rate = sample_rate;
             self.block_size = block_size;
 
-            // Re-run setupProcessing and rebuild process data / buffers for the new size.
-            self.setup_processing()?;
+            // Re-run setupProcessing and rebuild process data / buffers for the new size. On
+            // failure restore the cached config so it stays consistent with the still-current
+            // (previous) process_data — `process_data` is only swapped in on success. The
+            // component is left inactive; `start_processing` reactivates and re-runs setup.
+            if let Err(e) = self.setup_processing() {
+                self.sample_rate = old_sr;
+                self.block_size = old_bs;
+                return Err(e);
+            }
 
             if was_active {
                 let result = self.component.setActive(1);
@@ -932,9 +945,14 @@ impl PluginInternal for PluginImpl {
             }
 
             // Store the mode first so setup_processing bakes it into BOTH ProcessSetup and
-            // the freshly rebuilt process_data.
+            // the freshly rebuilt process_data; restore it if setup fails so the cached mode
+            // always reflects the last successfully-applied configuration.
+            let old_mode = self.process_mode;
             self.process_mode = mode;
-            self.setup_processing()?;
+            if let Err(e) = self.setup_processing() {
+                self.process_mode = old_mode;
+                return Err(e);
+            }
 
             if was_active {
                 let result = self.component.setActive(1);
@@ -955,8 +973,8 @@ impl PluginInternal for PluginImpl {
     }
 
     fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
-        // Clamp to non-negative; the host clamps to the block length at process time, but the
-        // VST3 SDK treats a negative sampleOffset as undefined.
+        // Floor to non-negative (the VST3 SDK treats a negative sampleOffset as undefined);
+        // `process()` additionally clamps queued offsets to the actual block length.
         let sample_offset = sample_offset.max(0);
         unsafe {
             let mut vst_event: Event = std::mem::zeroed();

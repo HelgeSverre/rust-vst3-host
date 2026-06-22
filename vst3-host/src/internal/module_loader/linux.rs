@@ -39,11 +39,11 @@ pub struct LinuxModule {
 }
 
 /// Best-effort: read the plugin's ELF header and, if its architecture differs from the host's,
-/// return an actionable error sentence. `None` if the file can't be read/parsed (e.g. a `.vst3`
-/// bundle directory) or the arch matches — the caller falls back to the generic message.
-fn arch_mismatch_detail(path: &Path) -> Option<String> {
+/// return an actionable error sentence. `None` if the file can't be read/parsed or the arch
+/// matches — the caller falls back to the generic message.
+fn arch_mismatch_detail(binary: &Path) -> Option<String> {
     use super::arch;
-    let data = std::fs::read(path).ok()?;
+    let data = std::fs::read(binary).ok()?;
     let name = arch::elf_machine_name(arch::detect_elf_machine(&data)?);
     arch::mismatch_detail("shared object", name)
 }
@@ -55,11 +55,17 @@ impl LinuxModule {
             log::info!("=== Linux VST3 MODULE LOADING START ===");
             log::info!("Loading VST3 shared object: {}", path.display());
 
+            // A modern VST3 is a bundle DIRECTORY (Contents/x86_64-linux/foo.so); resolve to the
+            // inner .so so dlopen gets a file (and the arch diagnostic can read its header).
+            // Falls back to the given path for the legacy single-file layout.
+            let binary =
+                crate::discovery::get_vst3_binary_path(path).unwrap_or_else(|_| path.to_path_buf());
+
             // Step 1: Load the library
-            log::debug!("Step 1: Loading shared object...");
-            let library = Library::new(path).map_err(|e| {
+            log::debug!("Step 1: Loading shared object: {}", binary.display());
+            let library = Library::new(&binary).map_err(|e| {
                 // Diagnose an architecture mismatch from the ELF header when possible.
-                arch_mismatch_detail(path)
+                arch_mismatch_detail(&binary)
                     .map(Error::PluginLoadFailed)
                     .unwrap_or_else(|| {
                         Error::PluginLoadFailed(format!("Failed to load shared object: {}", e))

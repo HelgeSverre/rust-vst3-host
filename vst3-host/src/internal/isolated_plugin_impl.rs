@@ -52,6 +52,10 @@ pub struct IsolatedPluginImpl {
     auto_recover: bool,
     /// Max respawn+retry cycles per command when `auto_recover` is on.
     auto_recover_max_retries: u32,
+    /// Count of successful recoveries (manual or automatic). Lets a caller detect that the
+    /// plugin was respawned+reloaded (and thus reset to defaults) even when auto-recover
+    /// swallowed the crash and returned `Ok`.
+    recovery_count: std::sync::atomic::AtomicU64,
 }
 
 /// Cap on buffered output MIDI, matching the in-process path's MAX_OUTPUT_MIDI.
@@ -91,6 +95,7 @@ impl IsolatedPluginImpl {
             response_timeout,
             auto_recover,
             auto_recover_max_retries,
+            recovery_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -381,6 +386,11 @@ impl PluginInternal for IsolatedPluginImpl {
         self.process.lock().ok().and_then(|p| p.helper_pid())
     }
 
+    fn recovery_count(&self) -> u64 {
+        self.recovery_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn recover(&mut self) -> Result<()> {
         self.recover_locked()
     }
@@ -422,6 +432,8 @@ impl IsolatedPluginImpl {
         }
 
         *process = fresh;
+        self.recovery_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 }

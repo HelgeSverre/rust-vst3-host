@@ -768,8 +768,10 @@ impl VST3Inspector {
     /// Snapshot session state into `preferences` and save it to disk, but only when something
     /// changed — so a steady 60 fps UI doesn't rewrite the config file every frame.
     fn persist_session_if_changed(&mut self, ctx: &egui::Context) {
+        // Quantize to whole points so sub-point jitter / DPI rounding during a resize doesn't
+        // report "changed" every frame and rewrite the config file in a tight loop.
         let size = ctx.screen_rect().size();
-        let window_size = Some((size.x, size.y));
+        let window_size = Some((size.x.round(), size.y.round()));
         let last_tab = Some(self.current_tab.clone());
         let last_midi_channel = Some(self.selected_midi_channel);
         // The loaded plugin path, so it can be auto-reloaded next launch.
@@ -2532,6 +2534,15 @@ impl VST3Inspector {
             let _ = self.refresh_parameter_values();
         }
 
+        // If the resume reload failed, the live plugin is gone — say so distinctly rather than
+        // showing a misleading "exported" toast over a now-empty session.
+        if self.audio.is_none() {
+            self.set_error(
+                "Exported audio, but reloading the live plugin failed — reload it manually",
+            );
+            return;
+        }
+
         match render_result {
             Ok(()) => self.set_error(format!("Exported audio to {}", path.display())),
             Err(e) => self.set_error(format!("Failed to export audio: {e}")),
@@ -2596,6 +2607,9 @@ impl VST3Inspector {
             .lock()
             .set_parameter(param_id, normalized_value)
             .map_err(|e| format!("Failed to set parameter: {e}"))?;
+
+        // The live state now diverges from any applied A/B snapshot — drop the stale indicator.
+        self.active_slot = None;
 
         // Update our cached parameter info for display.
         if let Some(ref mut plugin_info) = self.plugin_info {
@@ -2686,6 +2700,11 @@ impl VST3Inspector {
         self.is_processing = false;
         self.last_error = None;
         self.last_error_time = None;
+        // A/B snapshots belong to the previous plugin; applying them to a different plugin would
+        // feed it a foreign state blob. Clear them on every load.
+        self.slot_a = None;
+        self.slot_b = None;
+        self.active_slot = None;
 
         // Build the inspector's detailed PluginInfo from the library's introspection.
         let detail = match vst3_host::get_detailed_plugin_info(std::path::Path::new(&plugin_path)) {

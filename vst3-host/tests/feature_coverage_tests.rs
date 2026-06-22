@@ -325,6 +325,11 @@ fn test_midi_cc_to_parameter_mapping() {
         !mappings.is_empty(),
         "expected at least one CC→param mapping from Dexed"
     );
+
+    // Out-of-range controller numbers (beyond the VST3 0..=129 range) are rejected with None,
+    // not forwarded as a meaningless controller.
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, 200), None);
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, u16::MAX), None);
 }
 
 /// Mirrors the inspector's "Export WAV" path (roadmap 4.5): snapshot a live plugin's state,
@@ -672,10 +677,10 @@ fn test_get_units_enumerates() {
             println!("    program[{i}] = '{p}'");
         }
     }
-    // Every reported unit has a name; ids are internally consistent.
-    for u in &units {
-        assert!(!u.name.is_empty(), "unit {} has an empty name", u.id);
-    }
+    // Unit ids should be internally consistent. (Names are NOT asserted non-empty: VST3 does
+    // not guarantee a unit name — the root unit in particular is often unnamed.)
+    let ids: std::collections::HashSet<i32> = units.iter().map(|u| u.id).collect();
+    assert_eq!(ids.len(), units.len(), "duplicate unit ids reported");
 }
 
 /// Offline render-to-WAV: bounce a held note from Dexed to a WAV file and verify the file

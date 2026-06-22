@@ -179,7 +179,13 @@ pub(crate) mod arch {
     }
 
     /// If `binary_arch` is known and differs from the host, an actionable sentence; else `None`.
+    ///
+    /// Returns `None` when the host arch is unknown (an exotic target we don't map) — we can't
+    /// reliably claim a mismatch or suggest a "universal/unknown" build.
     pub(crate) fn mismatch_detail(kind: &str, binary_arch: Option<&str>) -> Option<String> {
+        if HOST_ARCH == "unknown" {
+            return None;
+        }
         match binary_arch {
             Some(arch) if arch != HOST_ARCH => Some(format!(
                 "Failed to load {kind}: plugin is {arch}-only but this host is {HOST_ARCH}. \
