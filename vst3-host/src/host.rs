@@ -163,7 +163,8 @@ impl Vst3Host {
     /// call during init takes down the whole host — this introspects every plugin in a
     /// throwaway child process (`vst3-host-probe`). A plugin that crashes kills only that
     /// child; the scan completes and returns the plugins it could introspect, recording
-    /// the skipped ones (and why) in the returned [`SafeDiscoveryReport`].
+    /// the skipped ones (and why) in the returned
+    /// [`SafeDiscoveryReport`](crate::discovery::SafeDiscoveryReport).
     ///
     /// Trade-off: this spawns one probe process per plugin, so it is slower than the
     /// in-process path. Use it to safely scan an untrusted folder; keep
