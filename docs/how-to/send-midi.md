@@ -97,6 +97,30 @@ plugin processes, so it only flows while the plugin is playing. This also works 
 running under [process isolation](isolate-plugin-crashes.md) — emitted events are returned
 alongside each processed audio block.
 
+## Forward MIDI from a hardware controller
+
+To drive a plugin from a MIDI keyboard, parse the raw bytes your MIDI library delivers with
+`MidiEvent::from_midi_bytes`, then forward each event:
+
+```rust
+# use vst3_host::{simple, midi::MidiEvent};
+# fn main() -> vst3_host::Result<()> {
+# let audio = simple::play(simple::load_plugin("/x.vst3")?)?;
+# let raw: &[u8] = &[0x90, 60, 100];
+// `raw` is one MIDI message (status + data) from your device callback.
+if let Some(event) = MidiEvent::from_midi_bytes(raw) {
+    audio.lock().send_midi_event(event)?;
+}
+# Ok(())
+# }
+```
+
+It maps note on/off (velocity-0 note-on becomes note-off), control change, pitch bend, and
+aftertouch, and returns `None` for messages the library doesn't carry (program change,
+system/realtime, SysEx). Do the device I/O on its own thread and hand events to the audio
+thread through a channel — never call the plugin from the device callback. (The inspector's
+"MIDI Input Device" picker does exactly this on macOS via CoreMIDI.)
+
 ## Caveats
 
 - **Program Change is not supported.** VST3 switches programs through `IUnitInfo` program

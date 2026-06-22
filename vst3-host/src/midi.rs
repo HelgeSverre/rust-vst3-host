@@ -159,6 +159,71 @@ pub enum MidiEvent {
     },
 }
 
+impl MidiEvent {
+    /// Parse a single channel-voice MIDI message from raw bytes (status + data), as delivered
+    /// by a MIDI input device.
+    ///
+    /// Maps Note On/Off (a Note On with velocity 0 becomes a Note Off), Control Change,
+    /// Pitch Bend (14-bit), and channel/poly aftertouch. Returns `None` for empty/truncated
+    /// input, running-status messages (no leading status byte), system/realtime/SysEx
+    /// messages, and Program Change (which the library doesn't forward).
+    pub fn from_midi_bytes(bytes: &[u8]) -> Option<MidiEvent> {
+        let status = *bytes.first()?;
+        // Require a channel-voice status byte (0x80..=0xEF); reject data bytes (running status)
+        // and system/realtime messages (0xF0..=0xFF).
+        if !(0x80..0xF0).contains(&status) {
+            return None;
+        }
+        let channel = MidiChannel::from_index(status & 0x0F)?;
+        let d1 = || bytes.get(1).map(|b| b & 0x7F);
+        let d2 = || bytes.get(2).map(|b| b & 0x7F);
+        match status & 0xF0 {
+            0x90 => {
+                let note = d1()?;
+                let velocity = d2()?;
+                Some(if velocity == 0 {
+                    MidiEvent::NoteOff {
+                        channel,
+                        note,
+                        velocity: 0,
+                    }
+                } else {
+                    MidiEvent::NoteOn {
+                        channel,
+                        note,
+                        velocity,
+                    }
+                })
+            }
+            0x80 => Some(MidiEvent::NoteOff {
+                channel,
+                note: d1()?,
+                velocity: d2()?,
+            }),
+            0xB0 => Some(MidiEvent::ControlChange {
+                channel,
+                controller: d1()?,
+                value: d2()?,
+            }),
+            0xA0 => Some(MidiEvent::PolyAftertouch {
+                channel,
+                note: d1()?,
+                pressure: d2()?,
+            }),
+            0xD0 => Some(MidiEvent::ChannelAftertouch {
+                channel,
+                pressure: d1()?,
+            }),
+            0xE0 => {
+                let value = (d2()? as u16) << 7 | d1()? as u16;
+                Some(MidiEvent::PitchBend { channel, value })
+            }
+            // 0xC0 ProgramChange is intentionally not forwarded.
+            _ => None,
+        }
+    }
+}
+
 /// Common MIDI control change numbers
 pub mod cc {
     /// Bank Select MSB
@@ -332,6 +397,92 @@ pub fn name_to_note(name: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_midi_bytes_maps_channel_voice_messages() {
+        // Note on (ch 1, note 60, vel 100).
+        assert_eq!(
+            MidiEvent::from_midi_bytes(&[0x90, 60, 100]),
+            Some(MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 100
+            })
+        );
+        // Note on velocity 0 => note off.
+        assert_eq!(
+            MidiEvent::from_midi_bytes(&[0x90, 60, 0]),
+            Some(MidiEvent::NoteOff {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 0
+            })
+        );
+        // Note off on channel 10.
+        assert_eq!(
+            MidiEvent::from_midi_bytes(&[0x89, 64, 40]),
+            Some(MidiEvent::NoteOff {
+                channel: MidiChannel::Ch10,
+                note: 64,
+                velocity: 40
+            })
+        );
+        // CC.
+        assert_eq!(
+            MidiEvent::from_midi_bytes(&[0xB0, 1, 64]),
+            Some(MidiEvent::ControlChange {
+                channel: MidiChannel::Ch1,
+                controller: 1,
+                value: 64
+            })
+        );
+        // Channel + poly aftertouch.
+        assert_eq!(
+            MidiEvent::from_midi_bytes(&[0xD0, 90]),
+            Some(MidiEvent::ChannelAftertouch {
+                channel: MidiChannel::Ch1,
+                pressure: 90
+            })
+        );
+        assert_eq!(
+            MidiEvent::from_midi_bytes(&[0xA0, 60, 70]),
+            Some(MidiEvent::PolyAftertouch {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                pressure: 70
+            })
+        );
+    }
+
+    #[test]
+    fn from_midi_bytes_pitch_bend_is_14_bit() {
+        // Center: LSB 0, MSB 64 -> 8192.
+        assert_eq!(
+            MidiEvent::from_midi_bytes(&[0xE0, 0, 64]),
+            Some(MidiEvent::PitchBend {
+                channel: MidiChannel::Ch1,
+                value: 8192
+            })
+        );
+        // Max: LSB 127, MSB 127 -> 16383.
+        assert_eq!(
+            MidiEvent::from_midi_bytes(&[0xE0, 127, 127]),
+            Some(MidiEvent::PitchBend {
+                channel: MidiChannel::Ch1,
+                value: 16383
+            })
+        );
+    }
+
+    #[test]
+    fn from_midi_bytes_rejects_unsupported_and_junk() {
+        assert_eq!(MidiEvent::from_midi_bytes(&[]), None); // empty
+        assert_eq!(MidiEvent::from_midi_bytes(&[0x60]), None); // data byte, not status
+        assert_eq!(MidiEvent::from_midi_bytes(&[0xF8]), None); // realtime clock
+        assert_eq!(MidiEvent::from_midi_bytes(&[0xF0, 1, 2]), None); // sysex
+        assert_eq!(MidiEvent::from_midi_bytes(&[0xC0, 5]), None); // program change (not forwarded)
+        assert_eq!(MidiEvent::from_midi_bytes(&[0x90, 60]), None); // truncated note on
+    }
 
     #[test]
     fn test_midi_conversions() {

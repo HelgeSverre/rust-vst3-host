@@ -15,9 +15,11 @@ use vst3_host::{AudioHandle, PeakMeter, Vst3Host};
 // Import modules
 mod automation;
 mod data_structures;
+mod midi_input;
 mod midi_player;
 
 use automation::{AutomationState, Shape};
+use midi_input::MidiInputState;
 use midi_player::MidiFilePlayer;
 
 /// Scan for installed VST3 plugin paths via the `vst3-host` library (lightweight —
@@ -553,6 +555,10 @@ struct VST3Inspector {
     automation: AutomationState,
     // MIDI file (.mid) player.
     midi_player: MidiFilePlayer,
+    // Live hardware MIDI input forwarding.
+    midi_input: MidiInputState,
+    // Cached list of available MIDI input port names (refreshed on demand).
+    midi_input_ports: Vec<String>,
 }
 
 /// One of the two A/B compare slots.
@@ -625,6 +631,21 @@ impl eframe::App for VST3Inspector {
                         let _ = guard.send_midi_event(ev);
                     }
                 }
+            }
+        }
+
+        // Forward any live hardware-MIDI events (parsed on the device callback thread) to the
+        // plugin from here on the UI thread, and log them to the monitor as Input.
+        let device_events = self.midi_input.drain();
+        if !device_events.is_empty() {
+            if let Some(audio) = &self.audio {
+                let mut guard = audio.lock();
+                for &ev in &device_events {
+                    let _ = guard.send_midi_event(ev);
+                }
+            }
+            for ev in device_events {
+                self.log_incoming_midi(ev);
             }
         }
 
@@ -2213,7 +2234,93 @@ impl VST3Inspector {
 
             ui.add_space(8.0);
             self.show_midi_file_player(ui);
+
+            ui.add_space(8.0);
+            self.show_midi_input_device(ui);
         });
+    }
+
+    /// Live hardware MIDI input: pick a connected controller and forward its MIDI to the plugin.
+    fn show_midi_input_device(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("MIDI Input Device").strong());
+            ui.horizontal(|ui| {
+                let current = self
+                    .midi_input
+                    .connected_port()
+                    .unwrap_or("None")
+                    .to_string();
+                egui::ComboBox::from_id_salt("midi_input_port")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(!self.midi_input.is_connected(), "None")
+                            .clicked()
+                        {
+                            self.midi_input.disconnect();
+                        }
+                        // Clone the cached list so we don't borrow self across connect().
+                        for (i, name) in self.midi_input_ports.clone().iter().enumerate() {
+                            let selected = self.midi_input.connected_port() == Some(name.as_str());
+                            if ui.selectable_label(selected, name).clicked() {
+                                match self.midi_input.connect(i) {
+                                    Ok(()) => self.set_error(format!("Listening to MIDI: {name}")),
+                                    Err(e) => self.set_error(format!("MIDI input: {e}")),
+                                }
+                            }
+                        }
+                    });
+                if ui.button("Refresh").clicked() {
+                    self.midi_input_ports = MidiInputState::list_ports();
+                }
+                if self.midi_input_ports.is_empty() {
+                    ui.label("(no MIDI inputs found)");
+                }
+            });
+            if self.midi_input.is_connected() && self.audio.is_none() {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Load a plugin to hear incoming MIDI.",
+                );
+            }
+        });
+    }
+
+    /// Log a forwarded hardware-MIDI event into the monitor as Input.
+    fn log_incoming_midi(&self, ev: vst3_host::midi::MidiEvent) {
+        use vst3_host::midi::MidiEvent as Ev;
+        let (ty, ch, d1, d2): (u16, u8, u8, u8) = match ev {
+            Ev::NoteOn {
+                channel,
+                note,
+                velocity,
+            } => (0, channel.as_index(), note, velocity),
+            Ev::NoteOff {
+                channel,
+                note,
+                velocity,
+            } => (1, channel.as_index(), note, velocity),
+            Ev::PolyAftertouch {
+                channel,
+                note,
+                pressure,
+            } => (2, channel.as_index(), note, pressure),
+            Ev::ControlChange {
+                channel,
+                controller,
+                value,
+            } => (3, channel.as_index(), controller, value),
+            Ev::ProgramChange { channel, program } => (4, channel.as_index(), program, 0),
+            Ev::ChannelAftertouch { channel, pressure } => (5, channel.as_index(), pressure, 0),
+            Ev::PitchBend { channel, value } => (
+                6,
+                channel.as_index(),
+                (value & 0x7F) as u8,
+                ((value >> 7) & 0x7F) as u8,
+            ),
+            _ => return,
+        };
+        self.log_midi_event(MidiDirection::Input, ty, ch, d1, d2);
     }
 
     /// MIDI file (.mid) playback: load an SMF and replay it onto the live plugin.
@@ -3534,6 +3641,8 @@ impl VST3Inspector {
             active_slot: None,
             automation: AutomationState::new(),
             midi_player: MidiFilePlayer::default(),
+            midi_input: MidiInputState::default(),
+            midi_input_ports: MidiInputState::list_ports(),
         }
     }
 }
