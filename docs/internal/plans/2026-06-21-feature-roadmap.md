@@ -100,12 +100,18 @@ correctness fix —
   *Live `play_signal` output-stream seam + inspector signal picker deferred* (needs a bundled
   effect plugin to verify effect output; Dexed ignores audio input).
 
-**Still deferred (largest / not runtime-verifiable here):**
-- **1.9** MPE / note-expression (XL, narrow audience; a stereo FM synth can't demonstrate it).
+- **1.9**: per-note expression (MPE) — `Plugin::note_on`→`NoteId`, `send_note_expression`,
+  `note_expressions()` (`INoteExpressionController`). Verified end-to-end against a new in-repo
+  `test-plugin/` VST3 synth (Tuning bends a voice an octave). In-process only; isolation not
+  marshalled yet.
+
+**Still deferred:**
 - **3.4** binary IPC for audio frames (perf-only; risky transport rewrite of the opt-in
   isolation path; no functional gain — not worth the regression risk yet).
 - **3.8** Win/Linux isolated editor GUI (cannot be runtime-verified on this macOS box).
-- **4.6 live seam** + **5.6** window.rs platform tests.
+- **4.6 live seam** (offline core done) + **5.6** window.rs platform tests.
+- **MPE across process isolation** — marshal the note-expression commands to the helper
+  (in-process works; isolated path returns "not supported").
 
 **Known flake** (pre-existing, not CI-affecting): `test_isolation_output_midi_parity`
 intermittently SIGABRTs with "Pure virtual function called!" while the helper *loads* Dexed
