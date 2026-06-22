@@ -1,6 +1,7 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(dead_code)] // Output is for plugin-emitted MIDI monitoring (not yet wired)
 pub enum MidiDirection {
+    /// MIDI the host sends into the plugin.
     Input,
+    /// MIDI the plugin emits (arpeggiators, MPE, …), shown in the monitor.
     Output,
 }
