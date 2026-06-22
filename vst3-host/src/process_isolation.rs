@@ -551,8 +551,8 @@ mod wire_tests {
 
     #[test]
     fn audio_output_carries_midi_across_the_wire() {
-        // The Process response now carries emitted MIDI alongside audio; make sure the
-        // extended variant round-trips through the JSON transport host and helper share.
+        // The Process response carries emitted MIDI alongside audio; check the variant
+        // round-trips through the JSON transport host and helper share.
         let resp = HostResponse::AudioOutput {
             outputs: vec![vec![0.0, 0.5], vec![-0.5, 0.0]],
             output_midi: vec![
@@ -619,7 +619,7 @@ mod wire_tests {
     #[test]
     fn set_parameter_at_round_trips_across_the_wire() {
         // The sample-accurate automation command must survive the JSON transport intact
-        // (roadmap 3.5 — the offset is now carried across the isolation boundary).
+        // (the offset is carried across the isolation boundary).
         let cmd = HostCommand::SetParameterAt {
             id: 42,
             value: 0.75,

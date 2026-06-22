@@ -165,8 +165,8 @@ fn is_blacklisted(path: &Path) -> bool {
     if let Some(file_name) = path.file_name() {
         if let Some(name_str) = file_name.to_str() {
             let name_lower = name_str.to_lowercase();
-            // Blacklist plugins known to cause issues (removed wave blacklisting)
-            return name_lower.contains("ozone"); // Only ozone for now
+            // Blacklist plugins known to cause issues.
+            return name_lower.contains("ozone");
         }
     }
     false
