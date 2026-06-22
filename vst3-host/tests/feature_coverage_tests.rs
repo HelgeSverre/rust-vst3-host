@@ -393,6 +393,33 @@ fn test_export_render_with_state_roundtrip() {
     assert!(any_nonzero, "exported WAV is silent");
 }
 
+/// Offline render-with-input: feed a sine test signal into the plugin while rendering to WAV.
+/// (Dexed is an instrument and ignores audio input, so this verifies the input plumbing +
+/// render path, not effect output — a bundled effect would be needed for that.)
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_render_to_wav_with_input_signal() {
+    use vst3_host::SignalSource;
+
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed() else {
+        return;
+    };
+    let mut source = SignalSource::sine(440.0, 0.5);
+    let out = std::env::temp_dir().join(format!("vh_render_in_{}.wav", std::process::id()));
+    let note = MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 100,
+    };
+    vst3_host::simple::render_to_wav_with_input(&mut plugin, 0.5, &[note], &mut source, &out)
+        .expect("render_to_wav_with_input");
+    let bytes = std::fs::read(&out).expect("read wav");
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(&bytes[0..4], b"RIFF");
+    assert!(bytes.len() > 44, "rendered WAV has no audio data");
+}
+
 /// Bus arrangements: query reports Dexed's stereo output, a stereo re-request is accepted, and
 /// a request the plugin may refuse leaves the reported arrangement consistent with the channel
 /// count (a stereo instrument can prove query + graceful negotiation, not a real layout switch).

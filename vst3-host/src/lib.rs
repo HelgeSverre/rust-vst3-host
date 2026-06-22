@@ -78,8 +78,8 @@ pub mod process_isolation;
 mod internal;
 
 pub use audio::{
-    AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStream, BusArrangements,
-    ChannelLevel, PeakMeter, RmsWindow, SpeakerArrangement,
+    read_wav, AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStream, BusArrangements,
+    ChannelLevel, InputSource, PeakMeter, RmsWindow, SignalSource, SpeakerArrangement,
 };
 pub use discovery::{
     get_detailed_plugin_info, BusInfo, BusLayout, ClassInfo, DetailedPluginInfo, FactoryInfo,
@@ -104,7 +104,7 @@ pub mod prelude {
     pub use crate::{
         audio::{
             AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStream, BusArrangements,
-            ChannelLevel, PeakMeter, RmsWindow, SpeakerArrangement,
+            ChannelLevel, InputSource, PeakMeter, RmsWindow, SignalSource, SpeakerArrangement,
         },
         // NOTE: `Result` is intentionally NOT re-exported here. A single-type-param
         // `Result<T>` alias in a glob prelude shadows `std::result::Result` and breaks

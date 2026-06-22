@@ -380,6 +380,51 @@ pub fn render_to_wav<P: AsRef<Path>>(
     crate::audio::write_wav(path, &channels, sample_rate as u32)
 }
 
+/// Offline-render a plugin to a WAV while feeding its audio input from an [`InputSource`]
+/// (a generated test signal or a loaded file) — for auditioning/regression-testing effects
+/// with a known input. Like [`render_to_wav`] but with `input_channels` filled each block.
+///
+/// [`InputSource`]: crate::audio::InputSource
+pub fn render_to_wav_with_input<P: AsRef<Path>>(
+    plugin: &mut Plugin,
+    duration_secs: f64,
+    midi: &[MidiEvent],
+    source: &mut dyn crate::audio::InputSource,
+    path: P,
+) -> Result<()> {
+    if duration_secs < 0.0 {
+        return Err(Error::Other("duration must be non-negative".to_string()));
+    }
+    let sample_rate = plugin.sample_rate();
+    let block = plugin.block_size().max(1);
+    let out_channels = plugin.output_channel_count().max(1);
+    let in_channels = plugin.info().audio_inputs.max(1) as usize;
+    let total_frames = (duration_secs * sample_rate).round() as usize;
+
+    plugin.start_processing()?;
+    for &event in midi {
+        plugin.send_midi_event(event)?;
+    }
+
+    let mut channels: Vec<Vec<f32>> = vec![Vec::with_capacity(total_frames); out_channels];
+    let mut rendered = 0;
+    while rendered < total_frames {
+        let frames = block.min(total_frames - rendered);
+        let mut buffers = AudioBuffers::new(in_channels, out_channels, frames, sample_rate);
+        source.fill(&mut buffers.inputs, frames, sample_rate);
+        plugin.process_audio(&mut buffers)?;
+        for (ch, dst) in channels.iter_mut().enumerate() {
+            if let Some(src) = buffers.outputs.get(ch) {
+                dst.extend_from_slice(&src[..frames.min(src.len())]);
+            }
+        }
+        rendered += frames;
+    }
+    plugin.stop_processing()?;
+
+    crate::audio::write_wav(path, &channels, sample_rate as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
