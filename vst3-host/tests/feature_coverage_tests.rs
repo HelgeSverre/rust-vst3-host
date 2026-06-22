@@ -388,6 +388,58 @@ fn test_export_render_with_state_roundtrip() {
     assert!(any_nonzero, "exported WAV is silent");
 }
 
+/// Offline process mode: `set_process_mode(Offline)` is rejected while processing, accepted
+/// while stopped, and a held note still renders audio in offline mode.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_offline_process_mode() {
+    use vst3_host::ProcessMode;
+
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed() else {
+        return;
+    };
+
+    // Rejected while processing.
+    plugin.start_processing().expect("start_processing");
+    assert!(
+        plugin.set_process_mode(ProcessMode::Offline).is_err(),
+        "set_process_mode while processing must error"
+    );
+    plugin.stop_processing().ok();
+
+    // Accepted while stopped.
+    plugin
+        .set_process_mode(ProcessMode::Offline)
+        .expect("set Offline while stopped");
+
+    // Still renders audio in offline mode.
+    plugin.start_processing().expect("restart processing");
+    plugin
+        .send_midi_note(60, 110, MidiChannel::Ch1)
+        .expect("note on");
+    let mut peak = 0.0f32;
+    for _ in 0..40 {
+        let mut buffers = AudioBuffers::new(0, 2, 512, 48000.0);
+        plugin.process_audio(&mut buffers).expect("process_audio");
+        for ch in &buffers.outputs {
+            for &s in ch {
+                peak = peak.max(s.abs());
+            }
+        }
+    }
+    plugin.send_midi_note_off(60, MidiChannel::Ch1).ok();
+    plugin.stop_processing().ok();
+
+    // Back to realtime works too.
+    plugin
+        .set_process_mode(ProcessMode::Realtime)
+        .expect("set Realtime while stopped");
+
+    println!("offline-mode peak: {peak:.4}");
+    assert!(peak > 0.0, "offline mode produced no audio (peak {peak})");
+}
+
 /// Runtime reconfigure: after `reconfigure(44100, 256)` the plugin reports the new settings,
 /// still produces audio for a held note at the new rate, and refuses to reconfigure while
 /// processing.

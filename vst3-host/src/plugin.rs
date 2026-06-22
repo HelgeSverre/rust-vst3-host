@@ -66,6 +66,18 @@ pub struct PluginUnit {
     pub programs: Vec<String>,
 }
 
+/// How the plugin should run: real-time (live playback) or offline (faster-than-real-time
+/// bounce/render). Maps to VST3 `kRealtime` / `kOffline`; plugins may switch quality or
+/// look-ahead accordingly. Defaults to [`ProcessMode::Realtime`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ProcessMode {
+    /// Real-time / live processing (the default; `kRealtime`).
+    #[default]
+    Realtime,
+    /// Offline / non-real-time processing such as a render or bounce (`kOffline`).
+    Offline,
+}
+
 /// VST3 plugin instance
 #[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
 pub struct Plugin {
@@ -102,6 +114,13 @@ pub(crate) trait PluginInternal: Send {
     fn reconfigure(&mut self, _sample_rate: f64, _block_size: usize) -> Result<()> {
         Err(Error::Other(
             "runtime reconfigure is not supported for this plugin".to_string(),
+        ))
+    }
+    /// Switch the plugin's process mode (real-time vs offline), re-running `setupProcessing`.
+    /// Defaults to unsupported (e.g. process isolation, where it isn't marshalled).
+    fn set_process_mode(&mut self, _mode: crate::plugin::ProcessMode) -> Result<()> {
+        Err(Error::Other(
+            "process mode switching is not supported for this plugin".to_string(),
         ))
     }
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()>;
@@ -222,6 +241,26 @@ impl Plugin {
         self.sample_rate = sample_rate;
         self.block_size = block_size;
         Ok(())
+    }
+
+    /// Switch the plugin between real-time and offline processing, re-running the plugin's
+    /// `setupProcessing` so it can adjust quality / look-ahead for a faster-than-real-time
+    /// bounce.
+    ///
+    /// Like [`Self::reconfigure`], the plugin must **not** be processing: call
+    /// [`Self::stop_processing`] first. Returns an error if called while processing, or under
+    /// process isolation (not marshalled across the boundary).
+    pub fn set_process_mode(&mut self, mode: ProcessMode) -> Result<()> {
+        if self.is_processing {
+            return Err(Error::Other(
+                "cannot set process mode while processing; call stop_processing() first"
+                    .to_string(),
+            ));
+        }
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .set_process_mode(mode)
     }
 
     /// Get all parameters
