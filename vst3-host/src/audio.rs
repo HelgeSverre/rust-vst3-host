@@ -157,6 +157,47 @@ impl AudioLevels {
     }
 }
 
+/// A VST3 speaker arrangement: a bitmask where each set bit is one channel (so the channel
+/// count is the number of set bits). Wraps the SDK's `SpeakerArrangement` (a `u64` bitmask);
+/// use the named constants or [`from_raw`](Self::from_raw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpeakerArrangement(pub u64);
+
+impl SpeakerArrangement {
+    /// No channels (`kEmpty`).
+    pub const EMPTY: Self = Self(0);
+    /// Mono (`kMono` = front-center).
+    pub const MONO: Self = Self(0x0008_0000);
+    /// Stereo L/R (`kStereo`).
+    pub const STEREO: Self = Self(0x3);
+    /// Stereo surround Ls/Rs (`kStereoSurround`).
+    pub const STEREO_SURROUND: Self = Self(0x30);
+
+    /// Wrap a raw VST3 `SpeakerArrangement` bitmask.
+    pub fn from_raw(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// The raw VST3 bitmask.
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// Number of channels in this arrangement (the count of set bits).
+    pub fn channel_count(self) -> usize {
+        self.0.count_ones() as usize
+    }
+}
+
+/// The speaker arrangements of a plugin's audio input and output buses.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BusArrangements {
+    /// Arrangement of each audio input bus, in bus-index order.
+    pub inputs: Vec<SpeakerArrangement>,
+    /// Arrangement of each audio output bus, in bus-index order.
+    pub outputs: Vec<SpeakerArrangement>,
+}
+
 /// A single-channel peak meter with falling ballistics and a timed peak-hold marker —
 /// the behaviour a level meter UI wants but [`AudioLevels`]'s sticky `peak_hold` doesn't give.
 ///
@@ -508,6 +549,31 @@ mod wav_tests {
         );
         // 4 frames * 2 ch * 4 bytes = 32 bytes of data; file = 44-byte header + 32.
         assert_eq!(bytes.len(), 44 + 32);
+    }
+}
+
+#[cfg(test)]
+mod speaker_arrangement_tests {
+    use super::*;
+
+    #[test]
+    fn channel_counts_match_bitmask() {
+        assert_eq!(SpeakerArrangement::EMPTY.channel_count(), 0);
+        assert_eq!(SpeakerArrangement::MONO.channel_count(), 1);
+        assert_eq!(SpeakerArrangement::STEREO.channel_count(), 2);
+        assert_eq!(SpeakerArrangement::STEREO_SURROUND.channel_count(), 2);
+    }
+
+    #[test]
+    fn raw_round_trips() {
+        let bits = SpeakerArrangement::STEREO.raw();
+        assert_eq!(bits, 0x3);
+        assert_eq!(
+            SpeakerArrangement::from_raw(bits),
+            SpeakerArrangement::STEREO
+        );
+        // Arbitrary 5.1-ish mask: 6 set bits → 6 channels.
+        assert_eq!(SpeakerArrangement::from_raw(0b111111).channel_count(), 6);
     }
 }
 
