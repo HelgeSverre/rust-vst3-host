@@ -13,7 +13,12 @@ use vst3_host::midi::MidiChannel;
 use vst3_host::{AudioHandle, PeakMeter, Vst3Host};
 
 // Import modules
+mod automation;
 mod data_structures;
+mod midi_player;
+
+use automation::{AutomationState, Shape};
+use midi_player::MidiFilePlayer;
 
 /// Scan for installed VST3 plugin paths via the `vst3-host` library (lightweight —
 /// lists `.vst3` bundles without loading them). Replaces the former hand-rolled
@@ -544,6 +549,10 @@ struct VST3Inspector {
     slot_a: Option<Vec<u8>>,
     slot_b: Option<Vec<u8>>,
     active_slot: Option<AbSlot>,
+    // Parameter-automation demo state.
+    automation: AutomationState,
+    // MIDI file (.mid) player.
+    midi_player: MidiFilePlayer,
 }
 
 /// One of the two A/B compare slots.
@@ -597,6 +606,27 @@ impl eframe::App for VST3Inspector {
         self.update_vu_meters();
         self.poll_plugin_output_midi();
         self.poll_plugin_parameter_changes();
+
+        // Drive the parameter-automation demo at UI cadence while it's enabled.
+        if let Some(value) = self.automation.value_now(Instant::now()) {
+            if let Some(id) = self.automation.param_id {
+                let _ = self.set_parameter_value(id, value);
+                self.automation.last_value = value;
+            }
+        }
+
+        // Replay any MIDI file events that have come due, onto the live plugin.
+        if self.midi_player.is_playing() {
+            let due = self.midi_player.tick(Instant::now());
+            if !due.is_empty() {
+                if let Some(audio) = &self.audio {
+                    let mut guard = audio.lock();
+                    for ev in due {
+                        let _ = guard.send_midi_event(ev);
+                    }
+                }
+            }
+        }
 
         // Keep the UI live without busy-looping. egui is reactive by default (repaints only
         // on input), which makes a host UI feel dead between events; an *unbounded*
@@ -2177,6 +2207,136 @@ impl VST3Inspector {
                     });
                 }
             }
+
+            ui.add_space(8.0);
+            self.show_automation_demo(ui);
+
+            ui.add_space(8.0);
+            self.show_midi_file_player(ui);
+        });
+    }
+
+    /// MIDI file (.mid) playback: load an SMF and replay it onto the live plugin.
+    fn show_midi_file_player(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("MIDI File Playback").strong());
+            ui.horizontal(|ui| {
+                if ui.button("Load MIDI File…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Load MIDI File")
+                        .add_filter("MIDI", &["mid", "midi"])
+                        .pick_file()
+                    {
+                        match self.midi_player.load(&path) {
+                            Ok(()) => self.set_error(format!(
+                                "Loaded {} ({} events)",
+                                self.midi_player.loaded_name().unwrap_or("file"),
+                                self.midi_player.event_count()
+                            )),
+                            Err(e) => self.set_error(format!("Failed to load MIDI file: {e}")),
+                        }
+                    }
+                }
+
+                let has_file = self.midi_player.loaded_name().is_some();
+                ui.add_enabled_ui(has_file && self.audio.is_some(), |ui| {
+                    if self.midi_player.is_playing() {
+                        if ui.button("Stop").clicked() {
+                            self.midi_player.stop();
+                            // Kill any notes left ringing by stopping mid-file.
+                            if let Some(audio) = &self.audio {
+                                let _ = audio.lock().midi_panic();
+                            }
+                        }
+                    } else if ui.button("Play").clicked() {
+                        self.midi_player.play(Instant::now());
+                    }
+                });
+
+                if let Some(name) = self.midi_player.loaded_name() {
+                    ui.label(name);
+                }
+            });
+        });
+    }
+
+    /// Parameter-automation demo: drive one parameter from a looping curve while the plugin
+    /// plays (exercises the library's `ParameterAutomation` / `set_parameter` path).
+    fn show_automation_demo(&mut self, ui: &mut egui::Ui) {
+        // Collect (id, name) for writable parameters without holding a borrow on self.
+        let params: Vec<(u32, String)> = self
+            .plugin_info
+            .as_ref()
+            .and_then(|pi| pi.controller_info.as_ref())
+            .map(|ci| {
+                ci.parameters
+                    .iter()
+                    .map(|p| (p.id, p.title.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Parameter Automation").strong());
+            if params.is_empty() {
+                ui.label("Load a plugin to automate a parameter.");
+                return;
+            }
+
+            ui.horizontal(|ui| {
+                let mut enabled = self.automation.enabled;
+                if ui.checkbox(&mut enabled, "Enable").changed() {
+                    self.automation.enabled = enabled;
+                    if enabled {
+                        // Default to the first parameter if none chosen; reset the time origin.
+                        if self.automation.param_id.is_none() {
+                            self.automation.param_id = params.first().map(|(id, _)| *id);
+                        }
+                        self.automation.started = Instant::now();
+                    }
+                }
+
+                // Parameter picker.
+                let current_name = self
+                    .automation
+                    .param_id
+                    .and_then(|id| params.iter().find(|(pid, _)| *pid == id))
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| "(pick)".to_string());
+                egui::ComboBox::from_id_salt("automation_param")
+                    .selected_text(current_name)
+                    .show_ui(ui, |ui| {
+                        for (id, name) in &params {
+                            ui.selectable_value(&mut self.automation.param_id, Some(*id), name);
+                        }
+                    });
+
+                // Shape picker.
+                egui::ComboBox::from_id_salt("automation_shape")
+                    .selected_text(self.automation.shape.label())
+                    .show_ui(ui, |ui| {
+                        for s in Shape::ALL {
+                            ui.selectable_value(&mut self.automation.shape, s, s.label());
+                        }
+                    });
+
+                ui.add(
+                    egui::DragValue::new(&mut self.automation.period_secs)
+                        .speed(0.1)
+                        .range(0.1..=30.0)
+                        .suffix(" s"),
+                );
+            });
+
+            if self.automation.enabled {
+                ui.label(format!("Value: {:.3}", self.automation.last_value));
+                if !self.is_processing {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Start processing to hear the automation.",
+                    );
+                }
+            }
         });
     }
 
@@ -3372,6 +3532,8 @@ impl VST3Inspector {
             slot_a: None,
             slot_b: None,
             active_slot: None,
+            automation: AutomationState::new(),
+            midi_player: MidiFilePlayer::default(),
         }
     }
 }
