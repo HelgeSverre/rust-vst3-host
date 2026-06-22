@@ -33,7 +33,8 @@ fn main() -> vst3_host::Result<()> {
 - **Parameters** — list, read, set (applied to the audio processor), and format them as the
   plugin itself displays them.
 - **MIDI** — send notes, CC, pitch bend, aftertouch; capture MIDI the plugin emits
-  (`take_output_midi`).
+  (`take_output_midi`). Per-note expression / MPE via `note_on`/`send_note_expression`
+  (`NoteId`, `NoteExpressionType`), in-process only.
 - **State** — save/restore a plugin's state (`save_state`/`load_state`), in-process or isolated.
 - **Crash isolation** — optionally run a plugin in a separate process (`process-isolation`),
   with typed `Error::PluginCrashed` + `Plugin::recover()`.
@@ -220,7 +221,7 @@ fn main() -> vst3_host::Result<()> {
 
 ```toml
 [dependencies]
-vst3-host = "0.1"
+vst3-host = "0.3"
 ```
 
 ## Status & known limitations

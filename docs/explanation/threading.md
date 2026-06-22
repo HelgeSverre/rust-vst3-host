@@ -41,9 +41,14 @@ mutex. So while playing:
 
 - Sending MIDI and changing parameters from any thread is safe — the mutex serializes them
   against the audio callback, and the change lands on the next block.
-- That safety costs a lock on the audio thread. It's fine for interactive use; it is not a
-  hard-real-time guarantee. See [audio processing](audio-processing.md) for the trade-off
-  and how to bypass it with your own lock-free plumbing.
+- You don't have to take that lock for the common cases, though. `AudioHandle` ships
+  built-in **lock-free side channels** — `send_midi` / `set_parameter` / `midi_panic` in,
+  `output_levels` / `drain_output_midi` / `drain_parameter_changes` out, plus `try_lock` for
+  best-effort reads — so you no longer need to roll your own lock-free plumbing to avoid the
+  audio-thread lock. `lock()` remains for the rarer full-`Plugin` operations.
+- The mutex path is fine for interactive use; it is not a hard-real-time guarantee. See
+  [audio processing](audio-processing.md) for the trade-off and the fully lock-free
+  `play_realtime` path.
 
 ## Process isolation changes the picture
 

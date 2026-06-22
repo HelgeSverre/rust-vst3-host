@@ -85,5 +85,19 @@ for the lowest latency).
 ## Effects vs. instruments
 
 `play` works for both. An instrument produces sound when you send it MIDI notes. An effect
-processes its audio input — but `play` feeds it silence, so to hear an effect you need an
-input source, which means a [custom backend](custom-audio-backend.md) with a duplex stream.
+processes its audio input — but `play` feeds it silence, so an effect stays silent. To hear
+one, use [`play_with_input_backend`](https://docs.rs/vst3-host/latest/vst3_host/playback/fn.play_with_input_backend.html),
+which captures the default audio input, runs it through the plugin, and plays the output. It
+returns the same `AudioHandle`:
+
+```rust
+use vst3_host::{simple, playback::play_with_input_backend, backends::CpalBackend, AudioConfig};
+
+# fn main() -> vst3_host::Result<()> {
+# let plugin = simple::load_plugin("/x.vst3")?;
+let config = AudioConfig { input_channels: 2, output_channels: 2, ..Default::default() };
+let audio = play_with_input_backend(&CpalBackend::new()?, plugin, config)?;
+# let _ = audio;
+# Ok(())
+# }
+```

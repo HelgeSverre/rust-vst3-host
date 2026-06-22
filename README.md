@@ -31,7 +31,8 @@ fn main() -> vst3_host::Result<()> {
   backend. Host effects on live audio input, or render offline to a WAV file.
 - **Parameters** — list, read, set, and format parameters as the plugin itself displays them,
   with sample-accurate automation (`set_parameter_at`).
-- **MIDI** — notes, control changes, pitch bend, and aftertouch, with sample-accurate scheduling.
+- **MIDI** — notes, control changes, pitch bend, and aftertouch, with sample-accurate
+  scheduling; per-note expression / MPE (`note_on` / `send_note_expression`, in-process).
 - **State & presets** — save/restore a plugin's own state, and read/write `.vstpreset` files.
 - **Metering** — peak/RMS levels with ready-made UI ballistics (`PeakMeter`, `RmsWindow`).
 - **Crash isolation** — run a plugin in a separate process so a crash can't take down your
@@ -54,7 +55,7 @@ runtime-verified.
 
 ```toml
 [dependencies]
-vst3-host = "0.2"
+vst3-host = "0.3"
 ```
 
 No VST3 SDK or extra setup is required — the `vst3` dependency ships pre-generated bindings.
