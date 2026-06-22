@@ -1,3 +1,5 @@
+// egui 0.34 deprecated several Panel/Rounding/screen_rect APIs we still use; migrating
+// those is a separate task (they change layout semantics). The id_salt migration is done.
 #![allow(deprecated)]
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
@@ -1172,7 +1174,7 @@ impl VST3Inspector {
 
                             // Factory Information - collapsible
                             egui::CollapsingHeader::new("Factory Information")
-                                .id_source("factory_info_header")
+                                .id_salt("factory_info_header")
                                 .show(ui, |ui| {
                                     ui.add_space(4.0);
                                     egui::Grid::new("factory_info_grid")
@@ -1236,7 +1238,7 @@ impl VST3Inspector {
                             // Component Information - collapsible
                             if let Some(ref info) = plugin_info.component_info {
                                 egui::CollapsingHeader::new("Component Information")
-                                    .id_source("component_info_header")
+                                    .id_salt("component_info_header")
                                     .show(ui, |ui| {
                                         ui.strong("Bus Counts");
                                         egui::Grid::new("component_bus_counts_grid")
@@ -1290,7 +1292,7 @@ impl VST3Inspector {
 
                             // GUI Information - collapsible
                             egui::CollapsingHeader::new("GUI Information")
-                                .id_source("gui_info_header")
+                                .id_salt("gui_info_header")
                                 .show(ui, |ui| {
                                     ui.add_space(4.0);
                                     egui::Grid::new("gui_information_grid")
@@ -1673,76 +1675,76 @@ impl VST3Inspector {
                                 let is_being_edited = self.parameter_being_edited == Some(param.id);
 
                                 ui.horizontal(|ui| {
-                                    let _response = if param.step_count > 0
-                                        && param.step_count <= 10
-                                    {
-                                        // For parameters with few steps, use a combo box
-                                        let current_step =
-                                            (param.current_value * param.step_count as f64).round()
+                                    let _response =
+                                        if param.step_count > 0 && param.step_count <= 10 {
+                                            // For parameters with few steps, use a combo box
+                                            let current_step = (param.current_value
+                                                * param.step_count as f64)
+                                                .round()
                                                 as i32;
-                                        let mut selected_step = current_step;
+                                            let mut selected_step = current_step;
 
-                                        let combo_response = egui::ComboBox::from_id_source(
-                                            format!("param_{}", param.id),
-                                        )
-                                        .selected_text(format!("{}", current_step))
-                                        .width(60.0)
-                                        .show_ui(ui, |ui| {
-                                            let mut changed = false;
-                                            for step in 0..=param.step_count {
-                                                if ui
-                                                    .selectable_value(
-                                                        &mut selected_step,
-                                                        step,
-                                                        format!("{}", step),
-                                                    )
-                                                    .clicked()
+                                            let combo_response = egui::ComboBox::from_id_salt(
+                                                format!("param_{}", param.id),
+                                            )
+                                            .selected_text(format!("{}", current_step))
+                                            .width(60.0)
+                                            .show_ui(ui, |ui| {
+                                                let mut changed = false;
+                                                for step in 0..=param.step_count {
+                                                    if ui
+                                                        .selectable_value(
+                                                            &mut selected_step,
+                                                            step,
+                                                            format!("{}", step),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        changed = true;
+                                                    }
+                                                }
+                                                changed
+                                            });
+
+                                            if combo_response.inner.unwrap_or(false) {
+                                                new_value =
+                                                    selected_step as f32 / param.step_count as f32;
+                                                self.parameter_being_edited = Some(param.id);
+                                                if let Err(e) = self
+                                                    .set_parameter_value(param.id, new_value as f64)
                                                 {
-                                                    changed = true;
+                                                    self.set_error(format!(
+                                                        "Failed to set parameter: {e}"
+                                                    ));
                                                 }
                                             }
-                                            changed
-                                        });
+                                            combo_response.response
+                                        } else {
+                                            // For continuous parameters, use a compact slider
+                                            let slider_response = ui.add_sized(
+                                                [100.0, 20.0],
+                                                egui::Slider::new(&mut new_value, 0.0..=1.0)
+                                                    .step_by(step_size as f64)
+                                                    .show_value(false),
+                                            );
 
-                                        if combo_response.inner.unwrap_or(false) {
-                                            new_value =
-                                                selected_step as f32 / param.step_count as f32;
-                                            self.parameter_being_edited = Some(param.id);
-                                            if let Err(e) =
-                                                self.set_parameter_value(param.id, new_value as f64)
-                                            {
-                                                self.set_error(format!(
-                                                    "Failed to set parameter: {e}"
-                                                ));
+                                            if slider_response.changed() {
+                                                self.parameter_being_edited = Some(param.id);
+                                                if let Err(e) = self
+                                                    .set_parameter_value(param.id, new_value as f64)
+                                                {
+                                                    self.set_error(format!(
+                                                        "Failed to set parameter: {e}"
+                                                    ));
+                                                }
                                             }
-                                        }
-                                        combo_response.response
-                                    } else {
-                                        // For continuous parameters, use a compact slider
-                                        let slider_response = ui.add_sized(
-                                            [100.0, 20.0],
-                                            egui::Slider::new(&mut new_value, 0.0..=1.0)
-                                                .step_by(step_size as f64)
-                                                .show_value(false),
-                                        );
 
-                                        if slider_response.changed() {
-                                            self.parameter_being_edited = Some(param.id);
-                                            if let Err(e) =
-                                                self.set_parameter_value(param.id, new_value as f64)
-                                            {
-                                                self.set_error(format!(
-                                                    "Failed to set parameter: {e}"
-                                                ));
+                                            if slider_response.drag_stopped() {
+                                                self.parameter_being_edited = None;
                                             }
-                                        }
 
-                                        if slider_response.drag_stopped() {
-                                            self.parameter_being_edited = None;
-                                        }
-
-                                        slider_response
-                                    };
+                                            slider_response
+                                        };
 
                                     // Show numeric value with enhanced visual feedback
                                     let color = if is_being_edited {
@@ -1886,357 +1888,401 @@ impl VST3Inspector {
                 return;
             }
 
-            // Processing controls
-            ui.horizontal(|ui| {
-                ui.label("Processing State:");
-                if self.is_processing {
-                    ui.colored_label(egui::Color32::GREEN, "Active");
-                    if ui.button("Stop Processing").clicked() {
-                        self.stop_processing();
-                    }
-                } else {
-                    ui.colored_label(egui::Color32::RED, "Stopped");
-                    if ui.button("Start Processing").clicked() {
-                        if let Err(e) = self.start_processing() {
-                            self.set_error(format!("Failed to start processing: {e}"));
-                        }
-                    }
-                }
-            });
-
-            ui.separator();
-
-            // Audio Output — the library opens the default device and starts the audio
-            // stream as part of `Vst3Host::play()`, so "running" simply means a plugin
-            // is loaded and playing.
-            ui.horizontal(|ui| {
-                ui.label("Audio Output:");
-                if self.audio.is_some() {
-                    ui.colored_label(egui::Color32::GREEN, "Running");
-                } else {
-                    ui.colored_label(egui::Color32::RED, "Not running (no plugin loaded)");
-                }
-            });
-
-            // Audio settings — these reflect the host configuration chosen at startup.
-            // The library fixes sample rate / block size when the host is built, so these
-            // are shown for reference and apply to subsequently loaded plugins.
-            ui.horizontal(|ui| {
-                ui.label("Sample Rate:");
-                let sample_rates = [44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0];
-                let current_rate_text = format!("{} Hz", self.sample_rate as u32);
-                egui::ComboBox::from_id_source("sample_rate_selector")
-                    .selected_text(&current_rate_text)
-                    .show_ui(ui, |ui| {
-                        for &rate in &sample_rates {
-                            let rate_text = format!("{} Hz", rate as u32);
-                            ui.selectable_value(&mut self.sample_rate, rate, &rate_text);
-                        }
-                    });
-
-                ui.separator();
-                ui.label("Block Size:");
-                let block_sizes = [64, 128, 256, 512, 1024, 2048, 4096];
-                let current_block_text = format!("{} samples", self.block_size);
-                egui::ComboBox::from_id_source("block_size_selector")
-                    .selected_text(&current_block_text)
-                    .show_ui(ui, |ui| {
-                        for &size in &block_sizes {
-                            let size_text = format!("{} samples", size);
-                            ui.selectable_value(&mut self.block_size, size, &size_text);
-                        }
-                    });
-            });
-
-            ui.separator();
-            ui.add_space(8.0);
-
-            // VU Meter and Panic Controls
-            ui.heading("Audio Monitoring & Safety");
-            ui.add_space(8.0);
-
-            ui.horizontal(|ui| {
-                // VU Meter
-                ui.group(|ui| {
-                    ui.label("Output Levels (VU Meter):");
-
-                    let (peak_left, peak_hold_left) = {
-                        let m = self.meter_left.lock().unwrap();
-                        (m.level(), m.peak_hold())
-                    };
-                    let (peak_right, peak_hold_right) = {
-                        let m = self.meter_right.lock().unwrap();
-                        (m.level(), m.peak_hold())
-                    };
-
-                    // Convert to dB
-                    const MIN_DB: f32 = -60.0;
-                    const SILENCE_THRESHOLD: f32 = 0.00001; // -100 dB
-
-                    let db_left = if peak_left > SILENCE_THRESHOLD {
-                        (20.0 * peak_left.log10()).max(MIN_DB)
-                    } else {
-                        f32::NEG_INFINITY
-                    };
-                    let db_right = if peak_right > SILENCE_THRESHOLD {
-                        (20.0 * peak_right.log10()).max(MIN_DB)
-                    } else {
-                        f32::NEG_INFINITY
-                    };
-
-                    let db_hold_left = if peak_hold_left > SILENCE_THRESHOLD {
-                        (20.0 * peak_hold_left.log10()).max(MIN_DB)
-                    } else {
-                        f32::NEG_INFINITY
-                    };
-                    let db_hold_right = if peak_hold_right > SILENCE_THRESHOLD {
-                        (20.0 * peak_hold_right.log10()).max(MIN_DB)
-                    } else {
-                        f32::NEG_INFINITY
-                    };
-
-                    ui.vertical(|ui| {
-                        // Left channel
-                        ui.horizontal(|ui| {
-                            ui.label("L:");
-                            let color = if db_left > -3.0 {
-                                egui::Color32::RED // Clipping warning
-                            } else if db_left > -12.0 {
-                                egui::Color32::YELLOW
-                            } else {
-                                egui::Color32::GREEN
-                            };
-
-                            // VU meter bar with peak hold indicator
-                            let bar_value = if db_left.is_finite() {
-                                ((db_left - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-
-                            // Calculate peak hold position
-                            let hold_value = if db_hold_left.is_finite() {
-                                ((db_hold_left - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-
-                            // Draw the VU meter bar
-                            let bar_rect = ui
-                                .add(
-                                    egui::ProgressBar::new(bar_value)
-                                        .desired_width(200.0)
-                                        .fill(color),
-                                )
-                                .rect;
-
-                            // Draw peak hold indicator as a vertical line
-                            if hold_value > 0.0 {
-                                let hold_x = bar_rect.left() + hold_value * bar_rect.width();
-                                ui.painter().vline(
-                                    hold_x,
-                                    bar_rect.y_range(),
-                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                                );
+            // Scroll the (long) Processing content so it never clips on a short window.
+            egui::ScrollArea::vertical()
+                .id_salt("processing_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Processing controls
+                    ui.horizontal(|ui| {
+                        ui.label("Processing State:");
+                        if self.is_processing {
+                            ui.colored_label(egui::Color32::GREEN, "Active");
+                            if ui.button("Stop Processing").clicked() {
+                                self.stop_processing();
                             }
-
-                            let db_text = if db_left.is_finite() {
-                                format!("{:.1} dB", db_left)
-                            } else {
-                                "-∞ dB".to_string()
-                            };
-                            ui.colored_label(color, db_text);
-                        });
-
-                        // Right channel
-                        ui.horizontal(|ui| {
-                            ui.label("R:");
-                            let color = if db_right > -3.0 {
-                                egui::Color32::RED // Clipping warning
-                            } else if db_right > -12.0 {
-                                egui::Color32::YELLOW
-                            } else {
-                                egui::Color32::GREEN
-                            };
-
-                            // VU meter bar with peak hold indicator
-                            let bar_value = if db_right.is_finite() {
-                                ((db_right - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-
-                            // Calculate peak hold position
-                            let hold_value = if db_hold_right.is_finite() {
-                                ((db_hold_right - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-
-                            // Draw the VU meter bar
-                            let bar_rect = ui
-                                .add(
-                                    egui::ProgressBar::new(bar_value)
-                                        .desired_width(200.0)
-                                        .fill(color),
-                                )
-                                .rect;
-
-                            // Draw peak hold indicator as a vertical line
-                            if hold_value > 0.0 {
-                                let hold_x = bar_rect.left() + hold_value * bar_rect.width();
-                                ui.painter().vline(
-                                    hold_x,
-                                    bar_rect.y_range(),
-                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                                );
+                        } else {
+                            ui.colored_label(egui::Color32::RED, "Stopped");
+                            if ui.button("Start Processing").clicked() {
+                                if let Err(e) = self.start_processing() {
+                                    self.set_error(format!("Failed to start processing: {e}"));
+                                }
                             }
-
-                            let db_text = if db_right.is_finite() {
-                                format!("{:.1} dB", db_right)
-                            } else {
-                                "-∞ dB".to_string()
-                            };
-                            ui.colored_label(color, db_text);
-                        });
+                        }
                     });
-                });
 
-                ui.add_space(20.0);
+                    ui.separator();
 
-                // Panic buttons
-                ui.vertical(|ui| {
-                    ui.label("Emergency Controls:");
+                    // Audio Output — the library opens the default device and starts the audio
+                    // stream as part of `Vst3Host::play()`, so "running" simply means a plugin
+                    // is loaded and playing.
+                    ui.horizontal(|ui| {
+                        ui.label("Audio Output:");
+                        if self.audio.is_some() {
+                            ui.colored_label(egui::Color32::GREEN, "Running");
+                        } else {
+                            ui.colored_label(egui::Color32::RED, "Not running (no plugin loaded)");
+                        }
+                    });
 
-                    if ui.button("MIDI Panic").clicked() {
-                        self.send_midi_panic();
-                    }
-
-                    if ui.button("Audio Panic").clicked() {
-                        self.audio_panic();
-                    }
-                });
-            });
-
-            ui.separator();
-            ui.add_space(8.0);
-
-            // MIDI Testing
-            ui.heading("MIDI Testing");
-            ui.add_space(8.0);
-
-            // Virtual keyboard
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Virtual MIDI Keyboard:");
-
-                    // MIDI channel selector
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Create channel options
-                        let channel_names: Vec<String> =
-                            (1..=16).map(|ch| format!("Channel {}", ch)).collect();
-                        let selected_text = &channel_names[self.selected_midi_channel as usize];
-
-                        egui::ComboBox::from_label("MIDI Channel")
-                            .selected_text(selected_text)
+                    // Audio settings — these reflect the host configuration chosen at startup.
+                    // The library fixes sample rate / block size when the host is built, so these
+                    // are shown for reference and apply to subsequently loaded plugins.
+                    ui.horizontal(|ui| {
+                        ui.label("Sample Rate:");
+                        let sample_rates = [44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0];
+                        let current_rate_text = format!("{} Hz", self.sample_rate as u32);
+                        egui::ComboBox::from_id_salt("sample_rate_selector")
+                            .selected_text(&current_rate_text)
                             .show_ui(ui, |ui| {
-                                for (idx, channel_name) in channel_names.iter().enumerate() {
-                                    ui.selectable_value(
-                                        &mut self.selected_midi_channel,
-                                        idx as i16,
-                                        channel_name,
-                                    );
+                                for &rate in &sample_rates {
+                                    let rate_text = format!("{} Hz", rate as u32);
+                                    ui.selectable_value(&mut self.sample_rate, rate, &rate_text);
+                                }
+                            });
+
+                        ui.separator();
+                        ui.label("Block Size:");
+                        let block_sizes = [64, 128, 256, 512, 1024, 2048, 4096];
+                        let current_block_text = format!("{} samples", self.block_size);
+                        egui::ComboBox::from_id_salt("block_size_selector")
+                            .selected_text(&current_block_text)
+                            .show_ui(ui, |ui| {
+                                for &size in &block_sizes {
+                                    let size_text = format!("{} samples", size);
+                                    ui.selectable_value(&mut self.block_size, size, &size_text);
                                 }
                             });
                     });
-                });
 
-                ui.add_space(4.0);
-                self.draw_piano_keyboard(ui);
-            });
-
-            ui.separator();
-            ui.add_space(8.0);
-
-            // Bus information
-            if let Some(info) = &self.plugin_info {
-                if let Some(comp_info) = &info.component_info {
-                    ui.heading("Audio Buses");
-
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label("Input Buses:");
-                            for (i, bus) in comp_info.audio_inputs.iter().enumerate() {
-                                ui.label(format!(
-                                    "  {} [{}]: {} channels",
-                                    i, bus.name, bus.channel_count
-                                ));
-                            }
-                            if comp_info.audio_inputs.is_empty() {
-                                ui.label("  None");
-                            }
-                        });
-
-                        ui.separator();
-
-                        ui.vertical(|ui| {
-                            ui.label("Output Buses:");
-                            for (i, bus) in comp_info.audio_outputs.iter().enumerate() {
-                                ui.label(format!(
-                                    "  {} [{}]: {} channels",
-                                    i, bus.name, bus.channel_count
-                                ));
-                            }
-                            if comp_info.audio_outputs.is_empty() {
-                                ui.label("  None");
-                            }
-                        });
-                    });
-
+                    ui.separator();
                     ui.add_space(8.0);
 
-                    ui.heading("Event Buses");
+                    // VU Meter and Panic Controls
+                    ui.heading("Audio Monitoring & Safety");
+                    ui.add_space(8.0);
 
                     ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label("Event Input Buses:");
-                            for (i, bus) in comp_info.event_inputs.iter().enumerate() {
-                                ui.label(format!(
-                                    "  {} [{}]: {} channels",
-                                    i, bus.name, bus.channel_count
-                                ));
-                            }
-                            if comp_info.event_inputs.is_empty() {
-                                ui.label("  None");
-                            }
+                        // VU Meter
+                        ui.group(|ui| {
+                            ui.label("Output Levels (VU Meter):");
+
+                            let (peak_left, peak_hold_left) = {
+                                let m = self.meter_left.lock().unwrap();
+                                (m.level(), m.peak_hold())
+                            };
+                            let (peak_right, peak_hold_right) = {
+                                let m = self.meter_right.lock().unwrap();
+                                (m.level(), m.peak_hold())
+                            };
+
+                            // Convert to dB
+                            const MIN_DB: f32 = -60.0;
+                            const SILENCE_THRESHOLD: f32 = 0.00001; // -100 dB
+
+                            let db_left = if peak_left > SILENCE_THRESHOLD {
+                                (20.0 * peak_left.log10()).max(MIN_DB)
+                            } else {
+                                f32::NEG_INFINITY
+                            };
+                            let db_right = if peak_right > SILENCE_THRESHOLD {
+                                (20.0 * peak_right.log10()).max(MIN_DB)
+                            } else {
+                                f32::NEG_INFINITY
+                            };
+
+                            let db_hold_left = if peak_hold_left > SILENCE_THRESHOLD {
+                                (20.0 * peak_hold_left.log10()).max(MIN_DB)
+                            } else {
+                                f32::NEG_INFINITY
+                            };
+                            let db_hold_right = if peak_hold_right > SILENCE_THRESHOLD {
+                                (20.0 * peak_hold_right.log10()).max(MIN_DB)
+                            } else {
+                                f32::NEG_INFINITY
+                            };
+
+                            ui.vertical(|ui| {
+                                // Left channel
+                                ui.horizontal(|ui| {
+                                    ui.label("L:");
+                                    let color = if db_left > -3.0 {
+                                        egui::Color32::RED // Clipping warning
+                                    } else if db_left > -12.0 {
+                                        egui::Color32::YELLOW
+                                    } else {
+                                        egui::Color32::GREEN
+                                    };
+
+                                    // VU meter bar with peak hold indicator
+                                    let bar_value = if db_left.is_finite() {
+                                        ((db_left - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+
+                                    // Calculate peak hold position
+                                    let hold_value = if db_hold_left.is_finite() {
+                                        ((db_hold_left - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+
+                                    // Draw the VU meter bar (responsive width, leaving room
+                                    // for the trailing dB readout).
+                                    let bar_width =
+                                        (ui.available_width() - 80.0).clamp(120.0, 360.0);
+                                    let bar_rect = ui
+                                        .add(
+                                            egui::ProgressBar::new(bar_value)
+                                                .desired_width(bar_width)
+                                                .fill(color),
+                                        )
+                                        .rect;
+
+                                    // Draw peak hold indicator as a vertical line
+                                    if hold_value > 0.0 {
+                                        let hold_x =
+                                            bar_rect.left() + hold_value * bar_rect.width();
+                                        ui.painter().vline(
+                                            hold_x,
+                                            bar_rect.y_range(),
+                                            egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                        );
+                                    }
+
+                                    let db_text = if db_left.is_finite() {
+                                        format!("{:.1} dB", db_left)
+                                    } else {
+                                        "-∞ dB".to_string()
+                                    };
+                                    ui.colored_label(color, db_text);
+                                });
+
+                                // Right channel
+                                ui.horizontal(|ui| {
+                                    ui.label("R:");
+                                    let color = if db_right > -3.0 {
+                                        egui::Color32::RED // Clipping warning
+                                    } else if db_right > -12.0 {
+                                        egui::Color32::YELLOW
+                                    } else {
+                                        egui::Color32::GREEN
+                                    };
+
+                                    // VU meter bar with peak hold indicator
+                                    let bar_value = if db_right.is_finite() {
+                                        ((db_right - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+
+                                    // Calculate peak hold position
+                                    let hold_value = if db_hold_right.is_finite() {
+                                        ((db_hold_right - MIN_DB) / -MIN_DB).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+
+                                    // Draw the VU meter bar (responsive width, leaving room
+                                    // for the trailing dB readout).
+                                    let bar_width =
+                                        (ui.available_width() - 80.0).clamp(120.0, 360.0);
+                                    let bar_rect = ui
+                                        .add(
+                                            egui::ProgressBar::new(bar_value)
+                                                .desired_width(bar_width)
+                                                .fill(color),
+                                        )
+                                        .rect;
+
+                                    // Draw peak hold indicator as a vertical line
+                                    if hold_value > 0.0 {
+                                        let hold_x =
+                                            bar_rect.left() + hold_value * bar_rect.width();
+                                        ui.painter().vline(
+                                            hold_x,
+                                            bar_rect.y_range(),
+                                            egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                        );
+                                    }
+
+                                    let db_text = if db_right.is_finite() {
+                                        format!("{:.1} dB", db_right)
+                                    } else {
+                                        "-∞ dB".to_string()
+                                    };
+                                    ui.colored_label(color, db_text);
+                                });
+                            });
                         });
 
-                        ui.separator();
+                        ui.add_space(20.0);
 
+                        // Panic buttons
                         ui.vertical(|ui| {
-                            ui.label("Event Output Buses:");
-                            for (i, bus) in comp_info.event_outputs.iter().enumerate() {
-                                ui.label(format!(
-                                    "  {} [{}]: {} channels",
-                                    i, bus.name, bus.channel_count
-                                ));
+                            ui.label("Emergency Controls:");
+
+                            if ui.button("MIDI Panic").clicked() {
+                                self.send_midi_panic();
                             }
-                            if comp_info.event_outputs.is_empty() {
-                                ui.label("  None");
+
+                            if ui.button("Audio Panic").clicked() {
+                                self.audio_panic();
                             }
                         });
                     });
-                }
-            }
 
-            ui.add_space(8.0);
-            self.show_automation_demo(ui);
+                    ui.separator();
+                    ui.add_space(8.0);
 
-            ui.add_space(8.0);
-            self.show_midi_file_player(ui);
+                    // MIDI Testing
+                    ui.heading("MIDI Testing");
+                    ui.add_space(8.0);
 
-            ui.add_space(8.0);
-            self.show_midi_input_device(ui);
+                    // Virtual keyboard
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Virtual MIDI Keyboard:");
+
+                            // MIDI channel selector
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    // Create channel options
+                                    let channel_names: Vec<String> =
+                                        (1..=16).map(|ch| format!("Channel {}", ch)).collect();
+                                    let selected_text =
+                                        &channel_names[self.selected_midi_channel as usize];
+
+                                    egui::ComboBox::from_label("MIDI Channel")
+                                        .selected_text(selected_text)
+                                        .show_ui(ui, |ui| {
+                                            for (idx, channel_name) in
+                                                channel_names.iter().enumerate()
+                                            {
+                                                ui.selectable_value(
+                                                    &mut self.selected_midi_channel,
+                                                    idx as i16,
+                                                    channel_name,
+                                                );
+                                            }
+                                        });
+                                },
+                            );
+                        });
+
+                        ui.add_space(4.0);
+                        // The keyboard is wider than most windows; scroll it horizontally
+                        // rather than forcing the whole window wide.
+                        egui::ScrollArea::horizontal()
+                            .id_salt("piano_scroll")
+                            .show(ui, |ui| {
+                                self.draw_piano_keyboard(ui);
+                            });
+                    });
+
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    // Bus information
+                    if let Some(info) = &self.plugin_info {
+                        if let Some(comp_info) = &info.component_info {
+                            egui::CollapsingHeader::new("Audio & Event Buses")
+                                .id_salt("buses_section")
+                                .show(ui, |ui| {
+                                    ui.heading("Audio Buses");
+
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label("Input Buses:");
+                                            for (i, bus) in
+                                                comp_info.audio_inputs.iter().enumerate()
+                                            {
+                                                ui.label(format!(
+                                                    "  {} [{}]: {} channels",
+                                                    i, bus.name, bus.channel_count
+                                                ));
+                                            }
+                                            if comp_info.audio_inputs.is_empty() {
+                                                ui.label("  None");
+                                            }
+                                        });
+
+                                        ui.separator();
+
+                                        ui.vertical(|ui| {
+                                            ui.label("Output Buses:");
+                                            for (i, bus) in
+                                                comp_info.audio_outputs.iter().enumerate()
+                                            {
+                                                ui.label(format!(
+                                                    "  {} [{}]: {} channels",
+                                                    i, bus.name, bus.channel_count
+                                                ));
+                                            }
+                                            if comp_info.audio_outputs.is_empty() {
+                                                ui.label("  None");
+                                            }
+                                        });
+                                    });
+
+                                    ui.add_space(8.0);
+
+                                    ui.heading("Event Buses");
+
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label("Event Input Buses:");
+                                            for (i, bus) in
+                                                comp_info.event_inputs.iter().enumerate()
+                                            {
+                                                ui.label(format!(
+                                                    "  {} [{}]: {} channels",
+                                                    i, bus.name, bus.channel_count
+                                                ));
+                                            }
+                                            if comp_info.event_inputs.is_empty() {
+                                                ui.label("  None");
+                                            }
+                                        });
+
+                                        ui.separator();
+
+                                        ui.vertical(|ui| {
+                                            ui.label("Event Output Buses:");
+                                            for (i, bus) in
+                                                comp_info.event_outputs.iter().enumerate()
+                                            {
+                                                ui.label(format!(
+                                                    "  {} [{}]: {} channels",
+                                                    i, bus.name, bus.channel_count
+                                                ));
+                                            }
+                                            if comp_info.event_outputs.is_empty() {
+                                                ui.label("  None");
+                                            }
+                                        });
+                                    });
+                                }); // buses_section
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    // Collapse the secondary tooling so the page isn't one long scroll.
+                    egui::CollapsingHeader::new("Parameter Automation")
+                        .id_salt("automation_section")
+                        .show(ui, |ui| self.show_automation_demo(ui));
+
+                    egui::CollapsingHeader::new("MIDI File Player")
+                        .id_salt("midi_file_section")
+                        .show(ui, |ui| self.show_midi_file_player(ui));
+
+                    egui::CollapsingHeader::new("MIDI Input Device")
+                        .id_salt("midi_input_section")
+                        .default_open(true)
+                        .show(ui, |ui| self.show_midi_input_device(ui));
+                }); // processing_scroll
         });
     }
 
