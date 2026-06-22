@@ -702,9 +702,12 @@ impl Plugin {
     /// controller) since the last call, draining the internal buffer.
     ///
     /// Output MIDI is captured while the plugin processes audio, so poll this regularly
-    /// (e.g. each UI frame) while the plugin is playing. Returns an empty vector if the
-    /// plugin emits nothing, or for plugins running under process isolation (output MIDI
-    /// across the boundary is not captured yet).
+    /// (e.g. each UI frame) while the plugin is playing; an empty vector means the plugin
+    /// emitted nothing. This works for process-isolated plugins too — emitted events are
+    /// marshalled back alongside each processed block.
+    ///
+    /// The buffer is capped at 4096 events: if you never poll while a chatty plugin keeps
+    /// emitting, the oldest events are dropped (silently) to bound memory.
     pub fn take_output_midi(&self) -> Vec<MidiEvent> {
         self.internal
             .as_ref()
