@@ -160,18 +160,6 @@ pub fn scan_directories(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(plugins)
 }
 
-/// Check if a plugin should be blacklisted
-fn is_blacklisted(path: &Path) -> bool {
-    if let Some(file_name) = path.file_name() {
-        if let Some(name_str) = file_name.to_str() {
-            let name_lower = name_str.to_lowercase();
-            // Blacklist plugins known to cause issues.
-            return name_lower.contains("ozone");
-        }
-    }
-    false
-}
-
 /// Recursively scan a directory for VST3 plugins
 fn scan_directory(dir: &Path, plugins: &mut Vec<PathBuf>) -> Result<()> {
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -181,12 +169,7 @@ fn scan_directory(dir: &Path, plugins: &mut Vec<PathBuf>) -> Result<()> {
             // Check if it's a VST3 bundle/file
             if let Some(ext) = path.extension() {
                 if ext == "vst3" {
-                    // Skip blacklisted plugins
-                    if !is_blacklisted(&path) {
-                        plugins.push(path.clone());
-                    } else {
-                        log::debug!("Skipping blacklisted plugin: {}", path.display());
-                    }
+                    plugins.push(path.clone());
                 }
             }
 
