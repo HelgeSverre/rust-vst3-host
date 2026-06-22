@@ -21,3 +21,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 directories = "6.0.0"
 rfd = "0.17"
+midly = "0.5"
