@@ -8,14 +8,128 @@
 //!
 //! For the common case, prefer [`crate::simple::play`] or [`crate::Vst3Host::play`].
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use rtrb::{Consumer, Producer, RingBuffer};
+
 use crate::{
-    audio::{AudioBackend, AudioBuffers, AudioConfig, AudioStream},
+    audio::{AudioBackend, AudioBuffers, AudioConfig, AudioLevels, AudioStream, ChannelLevel},
     error::{Error, Result},
+    midi::MidiEvent,
     plugin::Plugin,
     realtime::{RealtimePluginRunner, RtControl},
 };
+
+/// Capacity of each lock-free side-channel ring between the UI/control thread and the audio
+/// callback. Sized for a worst-case control burst and several frames of output MIDI / GUI
+/// parameter changes; pushes beyond it are dropped rather than blocking.
+const SIDE_CHANNEL_CAPACITY: usize = 4096;
+
+/// A control command queued by a UI/control thread and applied on the audio thread (inside the
+/// callback, under the plugin lock it already holds) at the start of the next block.
+enum HybridCommand {
+    Midi(MidiEvent),
+    Param { id: u32, value: f64 },
+    Panic,
+}
+
+/// Peak amplitude of one channel buffer, sanitizing non-finite samples to 0.
+fn channel_peak(buf: &[f32]) -> f32 {
+    buf.iter()
+        .map(|&x| if x.is_finite() { x.abs() } else { 0.0 })
+        .fold(0.0_f32, f32::max)
+}
+
+/// The audio-thread half of the lock-free side channels. Moved into the device callback; it
+/// drains queued control before processing and publishes feedback (peaks, output MIDI, GUI
+/// parameter changes) after. The control/feedback rings and the level atomics are lock-free;
+/// the only lock the callback takes is the plugin mutex it already needs (plus, via
+/// `get_parameter_changes`, the plugin's tiny internal component-handler mutex that its editor
+/// briefly touches on `performEdit` — bounded, not the UI-thread audio mutex).
+struct AudioSideChannels {
+    control_rx: Consumer<HybridCommand>,
+    out_midi_tx: Producer<MidiEvent>,
+    param_tx: Producer<(u32, f64)>,
+    /// One `AtomicU32` per output channel holding the max per-block peak (f32 bits) since the
+    /// UI last read it. Peaks are non-negative, so `fetch_max` on the bit pattern is a valid
+    /// float max.
+    levels: Arc<[AtomicU32]>,
+}
+
+impl AudioSideChannels {
+    /// Apply all queued control commands to the plugin. The caller already holds the lock.
+    fn apply_control(&mut self, plugin: &mut Plugin) {
+        while let Ok(cmd) = self.control_rx.pop() {
+            match cmd {
+                HybridCommand::Midi(event) => {
+                    let _ = plugin.send_midi_event(event);
+                }
+                HybridCommand::Param { id, value } => {
+                    let _ = plugin.set_parameter(id, value);
+                }
+                HybridCommand::Panic => {
+                    let _ = plugin.midi_panic();
+                }
+            }
+        }
+    }
+
+    /// Publish per-channel output peaks into the atomics. Only meaningful after a successful
+    /// render, so the caller gates this on `process_audio` succeeding.
+    fn publish_levels(&mut self, outputs: &[Vec<f32>]) {
+        for (ch, atomic) in self.levels.iter().enumerate() {
+            let peak = outputs.get(ch).map(|b| channel_peak(b)).unwrap_or(0.0);
+            atomic.fetch_max(peak.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// Forward the plugin's drained output MIDI and editor parameter changes into their rings
+    /// (drop-on-full). Called every block **regardless of processing state**: the editor can
+    /// still emit parameter changes (and a plugin its output MIDI) while processing is stopped,
+    /// and the UI must stay in sync.
+    fn publish_feedback(&mut self, plugin: &Plugin) {
+        for event in plugin.take_output_midi() {
+            let _ = self.out_midi_tx.push(event);
+        }
+        for change in plugin.get_parameter_changes() {
+            let _ = self.param_tx.push(change);
+        }
+    }
+}
+
+/// The UI-thread half of the side channels, stored in [`AudioHandle`]. The rtrb endpoints need
+/// `&mut` for push/pop, so they live behind `Mutex` to expose `&self` methods; this mutex is
+/// only ever touched by the UI/control thread, never the audio callback.
+struct UiSideChannels {
+    control_tx: Mutex<Producer<HybridCommand>>,
+    out_midi_rx: Mutex<Consumer<MidiEvent>>,
+    param_rx: Mutex<Consumer<(u32, f64)>>,
+    levels: Arc<[AtomicU32]>,
+}
+
+/// Build a fresh set of side channels for `channels` output channels, returning the audio-side
+/// half (move into the callback) and the UI-side half (store in the handle).
+fn make_side_channels(channels: usize) -> (AudioSideChannels, UiSideChannels) {
+    let (control_tx, control_rx) = RingBuffer::<HybridCommand>::new(SIDE_CHANNEL_CAPACITY);
+    let (out_midi_tx, out_midi_rx) = RingBuffer::<MidiEvent>::new(SIDE_CHANNEL_CAPACITY);
+    let (param_tx, param_rx) = RingBuffer::<(u32, f64)>::new(SIDE_CHANNEL_CAPACITY);
+    let levels: Arc<[AtomicU32]> = (0..channels).map(|_| AtomicU32::new(0)).collect();
+
+    let audio = AudioSideChannels {
+        control_rx,
+        out_midi_tx,
+        param_tx,
+        levels: Arc::clone(&levels),
+    };
+    let ui = UiSideChannels {
+        control_tx: Mutex::new(control_tx),
+        out_midi_rx: Mutex::new(out_midi_rx),
+        param_rx: Mutex::new(param_rx),
+        levels,
+    };
+    (audio, ui)
+}
 
 /// A running audio stream driving a [`Plugin`].
 ///
@@ -30,6 +144,9 @@ pub struct AudioHandle {
     // Kept alive alongside `_stream`.
     _input_stream: Option<Box<dyn AudioStream>>,
     plugin: Arc<Mutex<Plugin>>,
+    // Lock-free side channels to/from the audio callback. Used for the hot path (control +
+    // per-frame feedback) so a UI thread never contends with the audio thread for the lock.
+    ui: UiSideChannels,
 }
 
 impl AudioHandle {
@@ -57,6 +174,86 @@ impl AudioHandle {
             Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
             Err(std::sync::TryLockError::WouldBlock) => None,
         }
+    }
+
+    /// Queue a MIDI event for the plugin without locking the audio thread.
+    ///
+    /// The event is pushed onto a lock-free ring and applied at the start of the next audio
+    /// block. Prefer this over `lock().send_midi_event(..)` on a UI thread — it never blocks
+    /// on the audio mutex. Returns `false` if the ring is full (the event is dropped).
+    pub fn send_midi(&self, event: MidiEvent) -> bool {
+        self.ui
+            .control_tx
+            .lock()
+            .map(|mut tx| tx.push(HybridCommand::Midi(event)).is_ok())
+            .unwrap_or(false)
+    }
+
+    /// Queue a normalized parameter change (`0.0..=1.0`) without locking the audio thread.
+    /// Applied at the start of the next block. Returns `false` if the ring is full.
+    pub fn set_parameter(&self, id: u32, value: f64) -> bool {
+        self.ui
+            .control_tx
+            .lock()
+            .map(|mut tx| tx.push(HybridCommand::Param { id, value }).is_ok())
+            .unwrap_or(false)
+    }
+
+    /// Queue an all-notes-off "panic" (CC 123/120/121 on every channel) without locking the
+    /// audio thread. Returns `false` if the ring is full.
+    pub fn midi_panic(&self) -> bool {
+        self.ui
+            .control_tx
+            .lock()
+            .map(|mut tx| tx.push(HybridCommand::Panic).is_ok())
+            .unwrap_or(false)
+    }
+
+    /// Read the latest per-channel output peak levels without locking the audio thread.
+    ///
+    /// Each channel reports the maximum peak observed since the previous call (the read resets
+    /// the accumulator), so polling at UI frame rate never misses a transient between frames.
+    /// `rms` is not tracked on this path and is reported as 0; `peak_hold` mirrors `peak`
+    /// (drive your own ballistics, e.g. [`crate::audio::PeakMeter`], from the peak).
+    pub fn output_levels(&self) -> AudioLevels {
+        let channels = self
+            .ui
+            .levels
+            .iter()
+            .map(|atomic| {
+                let peak = f32::from_bits(atomic.swap(0, Ordering::Relaxed));
+                ChannelLevel {
+                    peak,
+                    rms: 0.0,
+                    peak_hold: peak,
+                }
+            })
+            .collect();
+        AudioLevels { channels }
+    }
+
+    /// Drain MIDI the plugin emitted during processing (arpeggiators, MPE, …) without locking
+    /// the audio thread. Returns the events queued since the last call.
+    pub fn drain_output_midi(&self) -> Vec<MidiEvent> {
+        let mut out = Vec::new();
+        if let Ok(mut rx) = self.ui.out_midi_rx.lock() {
+            while let Ok(event) = rx.pop() {
+                out.push(event);
+            }
+        }
+        out
+    }
+
+    /// Drain parameter changes the plugin made through its own editor without locking the
+    /// audio thread. Returns `(id, normalized_value)` pairs queued since the last call.
+    pub fn drain_parameter_changes(&self) -> Vec<(u32, f64)> {
+        let mut out = Vec::new();
+        if let Ok(mut rx) = self.ui.param_rx.lock() {
+            while let Ok(change) = rx.pop() {
+                out.push(change);
+            }
+        }
+        out
     }
 
     /// A shared handle to the plugin, e.g. to move into another thread.
@@ -132,6 +329,8 @@ pub fn play_with_backend<B: AudioBackend>(
         .start_processing()?;
 
     let plugin_cb = Arc::clone(&plugin);
+    // Lock-free side channels: UI control in, feedback (peaks / output MIDI / param changes) out.
+    let (mut side, ui) = make_side_channels(channels);
     // Reusable scratch buffer so the steady-state callback does not allocate.
     let mut scratch = AudioBuffers::new(0, channels, config.block_size, sample_rate);
 
@@ -144,11 +343,22 @@ pub fn play_with_backend<B: AudioBackend>(
         let frames = data.len() / channels;
         prepare_scratch(&mut scratch, frames);
 
-        if let Ok(mut p) = plugin_cb.lock() {
-            if p.process_audio(&mut scratch).is_ok() {
-                interleave_outputs(&scratch.outputs, data, channels);
-            }
+        // Recover from poison so queued control keeps flowing even after an audio-thread panic
+        // (matches AudioHandle::lock): the callback re-attempts processing rather than going
+        // permanently silent.
+        let mut p = match plugin_cb.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // Apply queued control before rendering; render; then forward feedback. Levels need a
+        // successful render, but MIDI/param feedback is published even when stopped so the UI
+        // stays in sync.
+        side.apply_control(&mut p);
+        if p.process_audio(&mut scratch).is_ok() {
+            interleave_outputs(&scratch.outputs, data, channels);
+            side.publish_levels(&scratch.outputs);
         }
+        side.publish_feedback(&p);
     });
 
     let err_cb = Box::new(|e: B::Error| {
@@ -167,6 +377,7 @@ pub fn play_with_backend<B: AudioBackend>(
         _stream: Box::new(stream),
         _input_stream: None,
         plugin,
+        ui,
     })
 }
 
@@ -220,6 +431,9 @@ pub fn play_with_input_backend<B: AudioBackend>(
         .map_err(|e| Error::AudioBackendError(format!("Failed to create input stream: {}", e)))?;
 
     let plugin_cb = Arc::clone(&plugin);
+    // Lock-free side channels (same as the output-only path) so effect hosting is also
+    // controllable without locking the audio thread.
+    let (mut side, ui) = make_side_channels(out_channels);
     let mut scratch = AudioBuffers::new(in_channels, out_channels, config.block_size, sample_rate);
     let out_data_cb = Box::new(move |data: &mut [f32]| {
         data.fill(0.0);
@@ -235,11 +449,16 @@ pub fn play_with_input_backend<B: AudioBackend>(
                 ch[f] = consumer.pop().unwrap_or(0.0);
             }
         }
-        if let Ok(mut p) = plugin_cb.lock() {
-            if p.process_audio(&mut scratch).is_ok() {
-                interleave_outputs(&scratch.outputs, data, out_channels);
-            }
+        let mut p = match plugin_cb.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        side.apply_control(&mut p);
+        if p.process_audio(&mut scratch).is_ok() {
+            interleave_outputs(&scratch.outputs, data, out_channels);
+            side.publish_levels(&scratch.outputs);
         }
+        side.publish_feedback(&p);
     });
     let out_err_cb = Box::new(|e: B::Error| log::error!("output stream error: {}", e));
     let output_stream = backend
@@ -257,6 +476,7 @@ pub fn play_with_input_backend<B: AudioBackend>(
         _stream: Box::new(output_stream),
         _input_stream: Some(Box::new(input_stream)),
         plugin,
+        ui,
     })
 }
 
@@ -346,6 +566,24 @@ mod tests {
         let mut out = vec![0.0; 6]; // 3 frames * 2 channels
         interleave_outputs(&outputs, &mut out, 2);
         assert_eq!(out, vec![1.0, -1.0, 2.0, -2.0, 3.0, -3.0]);
+    }
+
+    #[test]
+    fn channel_peak_is_max_abs_and_sanitizes_non_finite() {
+        assert_eq!(channel_peak(&[0.1, -0.5, 0.3]), 0.5);
+        assert_eq!(channel_peak(&[]), 0.0);
+        // NaN / inf are treated as 0 so they never poison the meter or the atomic.
+        assert_eq!(channel_peak(&[f32::NAN, 0.2, f32::INFINITY]), 0.2);
+    }
+
+    #[test]
+    fn nonneg_f32_bits_are_monotonic_so_fetch_max_is_float_max() {
+        // The level atomics rely on this: for non-negative finite floats, a < b implies
+        // a.to_bits() < b.to_bits(), so AtomicU32::fetch_max on the bit pattern is a float max.
+        let peaks = [0.0_f32, 1e-6, 0.01, 0.25, 0.5, 0.999, 1.0];
+        for w in peaks.windows(2) {
+            assert!(w[0].to_bits() < w[1].to_bits(), "{} vs {}", w[0], w[1]);
+        }
     }
 
     #[test]
