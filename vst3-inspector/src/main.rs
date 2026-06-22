@@ -273,15 +273,23 @@ fn run_selftest(path: &str) -> i32 {
             return 1;
         }
     };
-    let _ = audio.lock().send_midi_note(60, 110, MidiChannel::Ch1);
+    audio.send_midi(vst3_host::midi::MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 110,
+    });
     let mut peak = 0.0f32;
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(25));
-        for c in &audio.lock().get_output_levels().channels {
+        for c in &audio.output_levels().channels {
             peak = peak.max(c.peak);
         }
     }
-    let _ = audio.lock().send_midi_note_off(60, MidiChannel::Ch1);
+    audio.send_midi(vst3_host::midi::MidiEvent::NoteOff {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 0,
+    });
     println!("play: max output peak {peak:.4}");
     println!("SELFTEST OK");
     0
@@ -625,9 +633,8 @@ impl eframe::App for VST3Inspector {
             let due = self.midi_player.tick(Instant::now());
             if !due.is_empty() {
                 if let Some(audio) = &self.audio {
-                    let mut guard = audio.lock();
                     for ev in due {
-                        let _ = guard.send_midi_event(ev);
+                        audio.send_midi(ev);
                     }
                 }
             }
@@ -638,9 +645,8 @@ impl eframe::App for VST3Inspector {
         let device_events = self.midi_input.drain();
         if !device_events.is_empty() {
             if let Some(audio) = &self.audio {
-                let mut guard = audio.lock();
                 for &ev in &device_events {
-                    let _ = guard.send_midi_event(ev);
+                    audio.send_midi(ev);
                 }
             }
             for ev in device_events {
@@ -763,13 +769,10 @@ impl VST3Inspector {
     /// while it is processing audio, so this is a no-op when nothing is playing.
     fn poll_plugin_output_midi(&mut self) {
         use vst3_host::midi::MidiEvent;
-        // Best-effort, non-blocking: if the audio callback holds the lock this frame, skip —
-        // the events drain next frame. Blocking here stalls the UI thread (input lag).
+        // Lock-free: the audio callback drains the plugin's output MIDI into a ring; we pop it
+        // here without ever touching the audio mutex.
         let events = match &self.audio {
-            Some(a) => match a.try_lock() {
-                Some(p) => p.take_output_midi(),
-                None => return,
-            },
+            Some(a) => a.drain_output_midi(),
             None => return,
         };
         for ev in events {
@@ -811,13 +814,10 @@ impl VST3Inspector {
     /// the plugin GUI calls back via the component handler) into the inspector's parameter
     /// list, so the displayed values stay in sync with the plugin's editor.
     fn poll_plugin_parameter_changes(&mut self) {
-        // Non-blocking: skip this frame if the audio callback holds the lock (see
-        // poll_plugin_output_midi); the changes are picked up next frame.
+        // Lock-free: the audio callback drains the plugin's editor parameter changes into a
+        // ring (see poll_plugin_output_midi); we pop them here without locking.
         let changes = match &self.audio {
-            Some(a) => match a.try_lock() {
-                Some(p) => p.get_parameter_changes(),
-                None => return,
-            },
+            Some(a) => a.drain_parameter_changes(),
             None => return,
         };
         if changes.is_empty() {
@@ -877,13 +877,10 @@ impl VST3Inspector {
     }
 
     fn update_vu_meters(&mut self) {
-        // Non-blocking: meters are cosmetic, so skip a frame rather than block the UI
-        // thread on the audio mutex (see poll_plugin_output_midi).
+        // Lock-free: the audio callback publishes per-channel peaks into atomics; we read the
+        // max-since-last-frame here without locking (see poll_plugin_output_midi).
         let levels = match &self.audio {
-            Some(a) => match a.try_lock() {
-                Some(p) => p.get_output_levels(),
-                None => return,
-            },
+            Some(a) => a.output_levels(),
             None => return,
         };
 
@@ -2427,7 +2424,7 @@ impl VST3Inspector {
                             self.midi_player.stop();
                             // Kill any notes left ringing by stopping mid-file.
                             if let Some(audio) = &self.audio {
-                                let _ = audio.lock().midi_panic();
+                                audio.midi_panic();
                             }
                         }
                     } else if ui.button("Play").clicked() {
@@ -2945,10 +2942,14 @@ impl VST3Inspector {
             None => return Err("No plugin loaded".to_string()),
         };
 
-        audio
-            .lock()
-            .set_parameter(param_id, normalized_value)
-            .map_err(|e| format!("Failed to set parameter: {e}"))?;
+        // Lock-free: queue the change onto the control ring; the audio callback applies it on
+        // the next block. Validate the range here since the ring push can't report it back.
+        if !(0.0..=1.0).contains(&normalized_value) {
+            return Err(format!(
+                "Parameter value {normalized_value} out of range 0.0..=1.0"
+            ));
+        }
+        audio.set_parameter(param_id, normalized_value);
 
         // The live state now diverges from any applied A/B snapshot — drop the stale indicator.
         self.active_slot = None;
@@ -3212,10 +3213,13 @@ impl VST3Inspector {
             Some(a) => a,
             None => return Err("No plugin loaded".to_string()),
         };
-        audio
-            .lock()
-            .send_midi_note(pitch as u8, (velocity * 127.0) as u8, ch)
-            .map_err(|e| format!("Failed to send note on: {e}"))
+        // Lock-free: queue onto the control ring (applied on the next audio block).
+        audio.send_midi(vst3_host::midi::MidiEvent::NoteOn {
+            channel: ch,
+            note: pitch as u8,
+            velocity: (velocity * 127.0) as u8,
+        });
+        Ok(())
     }
 
     /// Send a MIDI Note Off event.
@@ -3238,10 +3242,12 @@ impl VST3Inspector {
             Some(a) => a,
             None => return Err("No plugin loaded".to_string()),
         };
-        audio
-            .lock()
-            .send_midi_note_off(pitch as u8, ch)
-            .map_err(|e| format!("Failed to send note off: {e}"))
+        audio.send_midi(vst3_host::midi::MidiEvent::NoteOff {
+            channel: ch,
+            note: pitch as u8,
+            velocity: (velocity * 127.0) as u8,
+        });
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -3260,21 +3266,20 @@ impl VST3Inspector {
             Some(a) => a,
             None => return Err("No plugin loaded".to_string()),
         };
-        audio
-            .lock()
-            .send_midi_cc(controller, value, ch)
-            .map_err(|e| format!("Failed to send CC: {e}"))
+        audio.send_midi(vst3_host::midi::MidiEvent::ControlChange {
+            channel: ch,
+            controller,
+            value,
+        });
+        Ok(())
     }
 
     // MIDI Panic — uses the library's dedicated all-notes-off / all-sounds-off.
     fn send_midi_panic(&mut self) {
         println!("Sending MIDI Panic...");
         if let Some(audio) = &self.audio {
-            if let Err(e) = audio.lock().midi_panic() {
-                println!("MIDI panic failed: {e}");
-            } else {
-                println!("MIDI Panic sent");
-            }
+            audio.midi_panic();
+            println!("MIDI Panic queued");
         } else {
             println!("Cannot send MIDI Panic: no plugin loaded");
         }

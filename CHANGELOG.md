@@ -17,16 +17,24 @@ All notable changes to `vst3-host` are documented here. The format is based on
 - `AudioHandle::try_lock` — non-blocking plugin lock for UI/render threads. Returns `None`
   when the audio callback holds the lock (held for each `process_audio` block) instead of
   stalling the caller.
+- **Lock-free side channels on `AudioHandle`** so a UI/control thread never contends with the
+  audio thread on the hot path: `send_midi` / `set_parameter` / `midi_panic` queue control onto
+  a ring the callback drains before each block; `output_levels` (per-channel peak via atomics),
+  `drain_output_midi`, and `drain_parameter_changes` read feedback the callback publishes after
+  each block. The plugin mutex (`lock()`) is now only needed for rare state ops (preset
+  save/load, WAV export, processing start/stop). `play`/`play_with_backend` wire this
+  automatically.
 
 ### Fixed
 
 - The builder's `sample_rate` / `block_size` are now applied to in-process plugins at load
   (they were ignored — plugins ran at the 44100/512 defaults while `Plugin::sample_rate()`
   reported the configured value).
-- Inspector input lag / dropped clicks: the UI thread blocked on the audio mutex every frame
-  (VU meters, output-MIDI drain, parameter sync), stalling winit event processing while the
-  audio callback was mid-block. These per-frame reads now use `AudioHandle::try_lock` and skip
-  a frame under contention rather than blocking.
+- Inspector input lag / dropped clicks: the UI thread no longer touches the audio mutex during
+  interaction at all. All control (MIDI, parameter edits) and all per-frame feedback (VU
+  meters, MIDI monitor, editor parameter sync) now flow through the new lock-free
+  `AudioHandle` side channels; the mutex is reserved for rare lifecycle ops. (An interim fix
+  used `try_lock` for the per-frame reads.)
 
 ## [0.2.1] - 2026-06-22
 
