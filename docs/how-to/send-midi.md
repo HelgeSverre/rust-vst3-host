@@ -119,7 +119,7 @@ It maps note on/off (velocity-0 note-on becomes note-off), control change, pitch
 aftertouch, and returns `None` for messages the library doesn't carry (program change,
 system/realtime, SysEx). Do the device I/O on its own thread and hand events to the audio
 thread through a channel — never call the plugin from the device callback. (The inspector's
-"MIDI Input Device" picker does exactly this on macOS via CoreMIDI.)
+"MIDI Input Device" picker does exactly this, cross-platform, via the `midir` crate.)
 
 ## Caveats
 

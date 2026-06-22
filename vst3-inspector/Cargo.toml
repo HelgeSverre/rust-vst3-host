@@ -22,9 +22,6 @@ serde_json = { workspace = true }
 directories = "6.0.0"
 rfd = "0.17"
 midly = "0.5"
-
-# Live MIDI input uses the native CoreMIDI binding on macOS — it pulls no ALSA, avoiding the
-# `links = "alsa"` conflict between cpal and midir. Other platforms use a stub for now (their
-# native backends can be added later without the cpal/midir alsa-sys clash).
-[target.'cfg(target_os = "macos")'.dependencies]
-coremidi = "0.8"
+# Cross-platform live MIDI input (CoreMIDI / ALSA / WinMM). midir 0.11 accepts alsa <0.12, so
+# on Linux it shares cpal 0.18's alsa 0.11 (one alsa-sys) — no `links = "alsa"` conflict.
+midir = "0.11"
