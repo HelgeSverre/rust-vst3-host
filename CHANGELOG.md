@@ -11,7 +11,8 @@ All notable changes to `vst3-host` are documented here. The format is based on
 - `MidiEvent::from_midi_bytes` — parse a raw channel-voice MIDI message (status + data) into a
   `MidiEvent` (note on/off, CC, pitch bend, aftertouch), for forwarding hardware-controller MIDI.
 - Inspector: a "MIDI Input Device" picker that forwards a connected controller's MIDI into the
-  loaded plugin live (macOS / CoreMIDI; device → plugin only, no feedback loop).
+  loaded plugin live — cross-platform via `midir` (CoreMIDI / ALSA / WinMM); device → plugin
+  only, no feedback loop.
 
 ## [0.2.0] - 2026-06-22
 
