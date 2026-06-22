@@ -25,6 +25,10 @@ pub struct Vst3Host {
     pub(crate) helper_path: Option<PathBuf>,
     /// How long to wait for an isolated helper response before declaring a timeout.
     pub(crate) response_timeout: std::time::Duration,
+    /// Whether an isolated plugin auto-respawns + retries on a crash/hang (control plane only).
+    pub(crate) auto_recover_plugins: bool,
+    /// Max respawn+retry cycles per command when auto-recover is on.
+    pub(crate) auto_recover_max_retries: u32,
 }
 
 impl Vst3Host {
@@ -324,6 +328,8 @@ impl Vst3Host {
             output_channels,
             self.helper_path.clone(),
             self.response_timeout,
+            self.auto_recover_plugins,
+            self.auto_recover_max_retries,
         );
 
         let plugin = Plugin {
@@ -356,6 +362,8 @@ impl Default for Vst3Host {
             scan_default_paths: true, // Default to true for backward compatibility
             helper_path: None,
             response_timeout: crate::process_isolation::DEFAULT_RESPONSE_TIMEOUT,
+            auto_recover_plugins: false,
+            auto_recover_max_retries: 1,
         }
     }
 }
@@ -373,6 +381,8 @@ pub struct Vst3HostBuilder {
     scan_default_paths: bool,
     helper_path: Option<PathBuf>,
     response_timeout: Option<std::time::Duration>,
+    auto_recover_plugins: bool,
+    auto_recover_max_retries: Option<u32>,
 }
 
 impl Vst3HostBuilder {
@@ -464,6 +474,26 @@ impl Vst3HostBuilder {
         self
     }
 
+    /// Transparently respawn + reload a process-isolated plugin and retry the command when the
+    /// helper crashes or hangs, instead of surfacing `Error::PluginCrashed`/`PluginTimeout` for
+    /// the caller to handle via [`Plugin::recover`](crate::Plugin::recover).
+    ///
+    /// Only affects isolated loads and only the control plane — the audio-thread `process`
+    /// path never recovers inline (a respawn would stall the callback). **Recovery reloads the
+    /// plugin from defaults**: parameter values / state are NOT replayed, so snapshot with
+    /// `save_state`/`load_state` if you need them preserved. Off by default.
+    pub fn auto_recover_plugins(mut self, enabled: bool) -> Self {
+        self.auto_recover_plugins = enabled;
+        self
+    }
+
+    /// Max respawn+retry cycles per command when [`Self::auto_recover_plugins`] is on
+    /// (default 1). `0` disables retries even if auto-recover is enabled.
+    pub fn auto_recover_max_retries(mut self, retries: u32) -> Self {
+        self.auto_recover_max_retries = Some(retries);
+        self
+    }
+
     /// Build the configured host.
     pub fn build(self) -> Result<Vst3Host> {
         Ok(Vst3Host {
@@ -476,6 +506,8 @@ impl Vst3HostBuilder {
             response_timeout: self
                 .response_timeout
                 .unwrap_or(crate::process_isolation::DEFAULT_RESPONSE_TIMEOUT),
+            auto_recover_plugins: self.auto_recover_plugins,
+            auto_recover_max_retries: self.auto_recover_max_retries.unwrap_or(1),
         })
     }
 }

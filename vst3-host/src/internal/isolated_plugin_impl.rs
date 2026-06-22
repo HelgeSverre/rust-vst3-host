@@ -47,6 +47,11 @@ pub struct IsolatedPluginImpl {
     helper_path: Option<PathBuf>,
     /// Per-command IPC response timeout (re-used when respawning after a crash).
     response_timeout: Duration,
+    /// When true, a crashed/hung helper is transparently respawned+reloaded and the command
+    /// retried (on the control plane only — never on the audio-thread `process()` path).
+    auto_recover: bool,
+    /// Max respawn+retry cycles per command when `auto_recover` is on.
+    auto_recover_max_retries: u32,
 }
 
 /// Cap on buffered output MIDI, matching the in-process path's MAX_OUTPUT_MIDI.
@@ -66,6 +71,8 @@ impl IsolatedPluginImpl {
         output_channels: usize,
         helper_path: Option<PathBuf>,
         response_timeout: Duration,
+        auto_recover: bool,
+        auto_recover_max_retries: u32,
     ) -> Self {
         Self {
             process: Mutex::new(process),
@@ -82,17 +89,18 @@ impl IsolatedPluginImpl {
             output_midi: Mutex::new(Vec::new()),
             helper_path,
             response_timeout,
+            auto_recover,
+            auto_recover_max_retries,
         }
     }
 
-    /// Send a command and get response.
+    /// Send a command once, with NO recovery.
     ///
     /// Maps a dead/crashed/hung helper to a typed [`Error::PluginCrashed`] /
-    /// [`Error::PluginTimeout`] (the host process stays alive); the caller can then call
-    /// [`PluginInternal::recover`] to respawn. Recovery is deliberately *not* inline here:
-    /// `process()` runs on the audio thread, where a synchronous respawn+reload would stall
-    /// it for hundreds of milliseconds.
-    fn send_command(&self, command: HostCommand) -> Result<HostResponse> {
+    /// [`Error::PluginTimeout`] (the host process stays alive). This is the path used by
+    /// `process()` on the audio thread, where a synchronous respawn+reload would stall it for
+    /// hundreds of milliseconds — so it never recovers inline.
+    fn send_command_once(&self, command: HostCommand) -> Result<HostResponse> {
         let mut process = self
             .process
             .lock()
@@ -101,6 +109,38 @@ impl IsolatedPluginImpl {
         process
             .send_command(command)
             .map_err(|e| classify_ipc_error(&e))
+    }
+
+    /// Send a command, transparently respawning + reloading the helper and retrying on a
+    /// crash/timeout when `auto_recover` is enabled (control-plane commands only).
+    ///
+    /// On its own (auto-recover off) this is just [`Self::send_command_once`]; the caller can
+    /// still recover manually via [`PluginInternal::recover`].
+    fn send_command(&self, command: HostCommand) -> Result<HostResponse> {
+        if !self.auto_recover {
+            return self.send_command_once(command);
+        }
+        let mut attempt: u32 = 0;
+        loop {
+            match self.send_command_once(command.clone()) {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    let recoverable = matches!(e, Error::PluginCrashed | Error::PluginTimeout);
+                    if !recoverable || attempt >= self.auto_recover_max_retries {
+                        return Err(e);
+                    }
+                    attempt += 1;
+                    log::warn!(
+                        "isolated plugin crashed/hung ({e}); auto-recover attempt {attempt}/{}",
+                        self.auto_recover_max_retries
+                    );
+                    // Best-effort respawn+reload; on failure surface the original error.
+                    if self.recover_locked().is_err() {
+                        return Err(e);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -191,7 +231,8 @@ impl PluginInternal for IsolatedPluginImpl {
             .map(|c| c.len())
             .unwrap_or(self.block_size);
 
-        let response = self.send_command(HostCommand::Process {
+        // Audio-thread path: never auto-recover inline (a respawn would stall the callback).
+        let response = self.send_command_once(HostCommand::Process {
             inputs: buffers.inputs.clone(),
             frames: frames as u32,
         })?;
@@ -341,6 +382,15 @@ impl PluginInternal for IsolatedPluginImpl {
     }
 
     fn recover(&mut self) -> Result<()> {
+        self.recover_locked()
+    }
+}
+
+impl IsolatedPluginImpl {
+    /// Respawn the helper and reload the plugin. Takes `&self` (it locks `self.process`
+    /// internally and only reads immutable fields), so the auto-recover retry path in
+    /// `send_command` — which has only `&self` — can call it too.
+    fn recover_locked(&self) -> Result<()> {
         let mut process = self
             .process
             .lock()

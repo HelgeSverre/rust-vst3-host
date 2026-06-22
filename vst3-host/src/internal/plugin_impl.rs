@@ -49,6 +49,8 @@ pub struct PluginImpl {
     time_sig_numerator: i32,
     /// Time signature denominator advertised in the host `ProcessContext`.
     time_sig_denominator: i32,
+    /// Real-time vs offline processing, baked into `ProcessSetup`/`process_data` at setup.
+    process_mode: crate::plugin::ProcessMode,
 
     // Host data structures
     process_data: Option<Box<HostProcessData>>,
@@ -312,6 +314,7 @@ impl PluginImpl {
                 tempo: 120.0,
                 time_sig_numerator: 4,
                 time_sig_denominator: 4,
+                process_mode: crate::plugin::ProcessMode::Realtime,
                 process_data: None,
                 component_handler: Some(component_handler),
                 pending_param_changes: Vec::new(),
@@ -464,12 +467,20 @@ impl PluginImpl {
         ))
     }
 
+    /// Map the configured [`ProcessMode`](crate::plugin::ProcessMode) to the VST3 enum value.
+    fn vst_process_mode(&self) -> i32 {
+        match self.process_mode {
+            crate::plugin::ProcessMode::Offline => ProcessModes_::kOffline as i32,
+            crate::plugin::ProcessMode::Realtime => ProcessModes_::kRealtime as i32,
+        }
+    }
+
     /// Set up processing with current configuration
     fn setup_processing(&mut self) -> Result<()> {
         unsafe {
             // Set up processing
             let setup = ProcessSetup {
-                processMode: ProcessModes_::kRealtime as i32,
+                processMode: self.vst_process_mode(),
                 symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
                 maxSamplesPerBlock: self.block_size as i32,
                 sampleRate: self.sample_rate,
@@ -517,7 +528,7 @@ impl PluginImpl {
             data.process_context.state = PROCESS_CONTEXT_STATE;
 
             // Set up process data
-            data.process_data.processMode = ProcessModes_::kRealtime as i32;
+            data.process_data.processMode = self.vst_process_mode();
             data.process_data.numSamples = self.block_size as i32;
             data.process_data.symbolicSampleSize = SymbolicSampleSizes_::kSample32 as i32;
             data.process_data.processContext = &mut data.process_context;
@@ -897,6 +908,39 @@ impl PluginInternal for PluginImpl {
                 if result != kResultOk {
                     return Err(Error::Other(format!(
                         "Failed to reactivate after reconfigure: {:#x}",
+                        result
+                    )));
+                }
+                self.is_active = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn set_process_mode(&mut self, mode: crate::plugin::ProcessMode) -> Result<()> {
+        if self.is_processing {
+            return Err(Error::Other(
+                "cannot set process mode while processing".to_string(),
+            ));
+        }
+        unsafe {
+            // VST3 requires the component inactive for setupProcessing; mirror reconfigure.
+            let was_active = self.is_active;
+            if was_active {
+                self.component.setActive(0);
+                self.is_active = false;
+            }
+
+            // Store the mode first so setup_processing bakes it into BOTH ProcessSetup and
+            // the freshly rebuilt process_data.
+            self.process_mode = mode;
+            self.setup_processing()?;
+
+            if was_active {
+                let result = self.component.setActive(1);
+                if result != kResultOk {
+                    return Err(Error::Other(format!(
+                        "Failed to reactivate after set_process_mode: {:#x}",
                         result
                     )));
                 }

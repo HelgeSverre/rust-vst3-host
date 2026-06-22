@@ -18,7 +18,7 @@ pub(crate) const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// This enum is the single source of truth for the isolation IPC protocol — the
 /// helper binary imports it from here rather than redefining it, so the two halves
 /// can never drift apart.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HostCommand {
     /// Load a plugin from the specified path, configured for the given audio settings.
     LoadPlugin {

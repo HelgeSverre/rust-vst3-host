@@ -53,6 +53,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ab_slot_label_maps() {
+        assert_eq!(ab_slot_label(AbSlot::A), "A");
+        assert_eq!(ab_slot_label(AbSlot::B), "B");
+    }
+
+    #[test]
     fn test_midi_conversions() {
         // Test some known values using C3=60 convention
         assert_eq!(note_name_to_midi("C3"), Some(60)); // User's desired C3
@@ -534,6 +540,25 @@ struct VST3Inspector {
     // VU meters: the library's PeakMeter handles falling ballistics + timed peak-hold.
     meter_left: Arc<Mutex<PeakMeter>>,
     meter_right: Arc<Mutex<PeakMeter>>,
+    // A/B preset compare: two captured state snapshots + which is currently applied.
+    slot_a: Option<Vec<u8>>,
+    slot_b: Option<Vec<u8>>,
+    active_slot: Option<AbSlot>,
+}
+
+/// One of the two A/B compare slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbSlot {
+    A,
+    B,
+}
+
+/// Display label for an A/B slot.
+fn ab_slot_label(slot: AbSlot) -> &'static str {
+    match slot {
+        AbSlot::A => "A",
+        AbSlot::B => "B",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -995,6 +1020,43 @@ impl VST3Inspector {
                         {
                             self.export_wav_dialog();
                         }
+                    });
+
+                    // A/B compare: capture two state snapshots and toggle between them.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Capture A")
+                            .on_hover_text("Snapshot the current state into slot A")
+                            .clicked()
+                        {
+                            self.capture_slot(AbSlot::A);
+                        }
+                        if ui
+                            .button("Capture B")
+                            .on_hover_text("Snapshot the current state into slot B")
+                            .clicked()
+                        {
+                            self.capture_slot(AbSlot::B);
+                        }
+                        if ui
+                            .add_enabled(self.slot_a.is_some(), egui::Button::new("Apply A"))
+                            .on_hover_text("Apply slot A to the plugin")
+                            .clicked()
+                        {
+                            self.apply_slot(AbSlot::A);
+                        }
+                        if ui
+                            .add_enabled(self.slot_b.is_some(), egui::Button::new("Apply B"))
+                            .on_hover_text("Apply slot B to the plugin")
+                            .clicked()
+                        {
+                            self.apply_slot(AbSlot::B);
+                        }
+                        ui.label(match self.active_slot {
+                            Some(AbSlot::A) => "Active: A",
+                            Some(AbSlot::B) => "Active: B",
+                            None => "Active: -",
+                        });
                     });
                 });
                 ui.add_space(8.0);
@@ -2476,6 +2538,54 @@ impl VST3Inspector {
         }
     }
 
+    /// Capture the live plugin's current state into an A/B slot (for quick comparison).
+    fn capture_slot(&mut self, slot: AbSlot) {
+        let Some(audio) = self.audio.as_ref() else {
+            self.set_error("No plugin loaded");
+            return;
+        };
+        // Bind the result so the lock guard drops before we touch `self`.
+        let result = audio.lock().save_state();
+        match result {
+            Ok(data) => {
+                match slot {
+                    AbSlot::A => self.slot_a = Some(data),
+                    AbSlot::B => self.slot_b = Some(data),
+                }
+                self.set_error(format!("Captured state into slot {}", ab_slot_label(slot)));
+            }
+            Err(e) => self.set_error(format!(
+                "Failed to capture slot {}: {e}",
+                ab_slot_label(slot)
+            )),
+        }
+    }
+
+    /// Apply a previously-captured A/B slot to the live plugin and re-sync the parameter table.
+    fn apply_slot(&mut self, slot: AbSlot) {
+        let data = match slot {
+            AbSlot::A => self.slot_a.clone(),
+            AbSlot::B => self.slot_b.clone(),
+        };
+        let Some(data) = data else {
+            self.set_error(format!("Slot {} is empty", ab_slot_label(slot)));
+            return;
+        };
+        let Some(audio) = self.audio.as_ref() else {
+            self.set_error("No plugin loaded");
+            return;
+        };
+        let result = audio.lock().load_state(&data);
+        match result {
+            Ok(()) => {
+                self.active_slot = Some(slot);
+                let _ = self.refresh_parameter_values();
+                self.set_error(format!("Applied slot {}", ab_slot_label(slot)));
+            }
+            Err(e) => self.set_error(format!("Failed to apply slot {}: {e}", ab_slot_label(slot))),
+        }
+    }
+
     fn set_parameter_value(&mut self, param_id: u32, normalized_value: f64) -> Result<(), String> {
         let audio = match &self.audio {
             Some(a) => a,
@@ -3240,6 +3350,9 @@ impl VST3Inspector {
             // 20 dB/s fall, 3 s peak-hold — the classic VU-meter ballistic.
             meter_left: Arc::new(Mutex::new(PeakMeter::new(20.0, Duration::from_secs(3)))),
             meter_right: Arc::new(Mutex::new(PeakMeter::new(20.0, Duration::from_secs(3)))),
+            slot_a: None,
+            slot_b: None,
+            active_slot: None,
         }
     }
 }

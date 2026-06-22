@@ -737,6 +737,61 @@ fn test_isolation_crash_recovery() {
     );
 }
 
+/// Roadmap 3.6: with `auto_recover_plugins(true)`, a killed helper is transparently respawned
+/// and the command retried — the next control-plane call succeeds WITHOUT an explicit recover().
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the helper binary and the bundled test plugin"]
+fn test_isolation_auto_recover() {
+    let plugin_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(plugin_path).exists() {
+        println!("Test plugin not found at {plugin_path}, skipping");
+        return;
+    }
+
+    // Dexed intermittently aborts ("Pure virtual function called!") while *loading* in a fresh
+    // helper (a known C++-init flake, unrelated to auto-recover). Each respawn-reload has a
+    // small chance of hitting it, so allow several retries to make the test robust.
+    let mut host = Vst3Host::builder()
+        .with_process_isolation(true)
+        .auto_recover_plugins(true)
+        .auto_recover_max_retries(5)
+        .build()
+        .expect("build isolated host");
+    let mut plugin = host.load_plugin(plugin_path).expect("load isolated");
+    let id = plugin.get_parameters().expect("params")[0].id;
+    plugin.set_parameter(id, 0.5).expect("set");
+
+    // Kill the helper out from under us.
+    let pid = plugin.isolation_pid().expect("helper pid");
+    let killed = std::process::Command::new("kill")
+        .arg("-9")
+        .arg(pid.to_string())
+        .status()
+        .expect("kill helper");
+    assert!(killed.success(), "failed to kill helper");
+    thread::sleep(Duration::from_millis(300));
+
+    // No explicit recover(): the next call must transparently respawn + retry and succeed.
+    let params = plugin
+        .get_parameters()
+        .expect("auto-recover should make the next call succeed without manual recover()");
+    assert!(!params.is_empty(), "no parameters after auto-recovery");
+
+    // And the freshly respawned helper has a new pid.
+    let new_pid = plugin
+        .isolation_pid()
+        .expect("helper pid after auto-recover");
+    assert_ne!(
+        new_pid, pid,
+        "auto-recover should have respawned the helper"
+    );
+    println!(
+        "Auto-recover OK: helper respawned ({pid} -> {new_pid}), {} params",
+        params.len()
+    );
+}
+
 /// A dead/crashed helper must surface as an error quickly, never a hang.
 #[cfg(feature = "process-isolation")]
 #[test]

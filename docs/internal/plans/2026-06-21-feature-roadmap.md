@@ -69,12 +69,29 @@ correctness fix —
   held C3) via the library's `render_to_wav`, preserving current state (snapshot → drop live →
   fresh render → reload) to avoid the two-instance problem. Gated by a library test mirroring
   the path (state round-trip → non-silent WAV).
+- **1.10**: offline process mode — public `ProcessMode` enum + `Plugin::set_process_mode()`
+  thread `kRealtime`/`kOffline` into `ProcessSetup` and `process_data` (was hardcoded realtime),
+  re-running `setupProcessing`. Verified: Offline still renders audio (peak 0.1308); rejected
+  while processing.
+- **5.3**: module-loader arch diagnostics — pure `detect_pe_machine`/`detect_elf_machine` +
+  name/host-mismatch helpers in `module_loader::arch` (always compiled), wired into the
+  Windows (PE) and Linux (ELF) loaders for an actionable "plugin is x86_64-only but this host
+  is arm64" message. 5 unit tests over fixture headers (run on macOS CI); Win/Linux wiring
+  cross-compile-verified.
+- **3.6**: optional auto-recover — `Vst3HostBuilder::auto_recover_plugins(bool)` +
+  `auto_recover_max_retries(u32)` (default 1), threaded into `IsolatedPluginImpl`;
+  `send_command` transparently respawns+reloads+retries on a crash/timeout (control plane only —
+  `process()` opts out). Verified: a killed helper auto-recovers without an explicit
+  `recover()`, new pid confirmed.
+- **4.7**: inspector A/B preset compare — Capture A/B + Apply A/B buttons (two in-memory state
+  snapshots applied to the live plugin via `load_state`) + active indicator. `ab_slot_label`
+  unit test; builds + clippy clean.
+- **8.3 / 8.4 / 8.5**: how-to guides — open/embed a plugin editor, sample-accurate parameter
+  automation, monitor audio levels. Authored against the real API (verified) and indexed.
 
-**Next up** (deferred, still open): the rest of Tier 3/4 (1.4 bus-arrangement negotiation,
-1.9 MPE/note-expression, 1.10 offline process mode, 3.4 binary IPC, 3.6 auto-recover, 3.8
-Win/Linux isolated editor GUI, 4.4 SMF playback, 4.6 test-signal input, 4.7 A/B compare, 4.8
-automation demo, 5.3 module-loader arch diagnostics, 5.6 window.rs platform tests, 8.3–8.5
-how-to guides).
+**Next up** (deferred — the larger Tier 3/4): 1.4 bus-arrangement negotiation, 1.9
+MPE/note-expression, 3.4 binary IPC for audio frames, 3.8 Win/Linux isolated editor GUI, 4.4
+SMF playback, 4.6 test-signal input, 4.8 automation demo, 5.6 window.rs platform tests.
 
 **Known flake** (pre-existing, not CI-affecting): `test_isolation_output_midi_parity`
 intermittently SIGABRTs with "Pure virtual function called!" while the helper *loads* Dexed

@@ -38,6 +38,16 @@ pub struct LinuxModule {
     get_factory_fn: Symbol<'static, GetPluginFactoryFunc>,
 }
 
+/// Best-effort: read the plugin's ELF header and, if its architecture differs from the host's,
+/// return an actionable error sentence. `None` if the file can't be read/parsed (e.g. a `.vst3`
+/// bundle directory) or the arch matches — the caller falls back to the generic message.
+fn arch_mismatch_detail(path: &Path) -> Option<String> {
+    use super::arch;
+    let data = std::fs::read(path).ok()?;
+    let name = arch::elf_machine_name(arch::detect_elf_machine(&data)?);
+    arch::mismatch_detail("shared object", name)
+}
+
 impl LinuxModule {
     /// Load a VST3 shared object using the correct Linux sequence
     fn load_internal(path: &Path) -> Result<Self> {
@@ -48,7 +58,12 @@ impl LinuxModule {
             // Step 1: Load the library
             log::debug!("Step 1: Loading shared object...");
             let library = Library::new(path).map_err(|e| {
-                Error::PluginLoadFailed(format!("Failed to load shared object: {}", e))
+                // Diagnose an architecture mismatch from the ELF header when possible.
+                arch_mismatch_detail(path)
+                    .map(Error::PluginLoadFailed)
+                    .unwrap_or_else(|| {
+                        Error::PluginLoadFailed(format!("Failed to load shared object: {}", e))
+                    })
             })?;
             log::debug!("Shared object loaded successfully");
 
