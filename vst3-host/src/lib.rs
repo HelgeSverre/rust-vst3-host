@@ -82,8 +82,9 @@ pub use audio::{
     ChannelLevel, InputSource, PeakMeter, RmsWindow, SignalSource, SpeakerArrangement,
 };
 pub use discovery::{
-    get_detailed_plugin_info, BusInfo, BusLayout, ClassInfo, DetailedPluginInfo, FactoryInfo,
-    PluginReport,
+    discover_plugins_safe, get_detailed_plugin_info, probe_plugin_info_isolated, BusInfo,
+    BusLayout, ClassInfo, DetailedPluginInfo, FactoryInfo, PluginReport, SafeDiscoveryReport,
+    SafeDiscoverySkip, DEFAULT_PROBE_TIMEOUT,
 };
 #[cfg(feature = "egui-widgets")]
 pub use embed::{EditorRect, EmbeddedEditor};

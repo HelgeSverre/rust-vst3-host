@@ -123,6 +123,11 @@ name = "debug_loader"
 name = "vst3-host-helper"
 required-features = ["process-isolation"]
 
+# Single-shot introspection probe for crash-resistant discovery (discover_plugins_safe).
+# No special features needed — it only calls the library's introspection API.
+[[bin]]
+name = "vst3-host-probe"
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
