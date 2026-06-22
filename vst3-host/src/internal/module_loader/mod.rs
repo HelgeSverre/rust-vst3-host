@@ -20,25 +20,6 @@ pub trait ModuleLoader {
     fn load(path: &Path) -> Result<Box<dyn VstModule>>;
 }
 
-/// Detect if a plugin has Objective-C class conflicts requiring process isolation
-pub fn has_objc_conflicts(path: &Path) -> bool {
-    if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
-        let filename_lower = filename.to_lowercase();
-
-        // Known problematic plugins that have Objective-C class conflicts
-        // These plugins MUST use process isolation to prevent SIGSEGV crashes
-        if filename_lower.contains("waveshell") || filename_lower.contains("waves") {
-            log::info!(
-                "Detected plugin with Objective-C conflicts requiring process isolation: {}",
-                filename
-            );
-            return true;
-        }
-    }
-
-    false
-}
-
 /// Detect if a plugin requires private namespace loading due to C symbol conflicts.
 /// Only consulted by the macOS loader (private namespaces are a dyld feature).
 #[cfg(target_os = "macos")]
@@ -68,7 +49,7 @@ fn requires_private_namespace(path: &Path) -> bool {
 pub fn load_module(path: &Path) -> Result<Box<dyn VstModule>> {
     #[cfg(target_os = "macos")]
     {
-        if has_objc_conflicts(path) || requires_private_namespace(path) {
+        if requires_private_namespace(path) {
             // Use private namespace loading for both Objective-C and C symbol conflicts
             log::info!(
                 "Using private namespace loader for symbol isolation: {}",

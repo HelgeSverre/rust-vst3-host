@@ -3647,9 +3647,6 @@ impl VST3Inspector {
         let host = Vst3Host::builder()
             .sample_rate(sample_rate)
             .block_size(block_size as usize)
-            // Contain crash-prone plugins (e.g. Waves/WaveShell) in an isolated process so
-            // selecting one can't take down the inspector.
-            .auto_isolate_problematic(true)
             .build()
             .unwrap_or_else(|e| {
                 eprintln!("Failed to build Vst3Host: {e}");

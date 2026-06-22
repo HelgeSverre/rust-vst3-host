@@ -62,23 +62,6 @@ match host.probe_plugin("/path/to/plugin.vst3") {
 # }
 ```
 
-## Auto-isolate crash-prone plugins
-
-Some plugins (e.g. Waves/WaveShell) crash from their *own* packaging and can't be loaded
-safely in-process. Let the host route those to isolation automatically, so a crash becomes
-a returned `Err` instead of a dead host:
-
-```rust
-# use vst3_host::Vst3Host;
-# fn main() -> vst3_host::Result<()> {
-let mut host = Vst3Host::builder()
-    .auto_isolate_problematic(true)   // Waves etc. load isolated; others stay in-process
-    .build()?;
-// host.load_plugin("…WaveShell….vst3") now returns Err if it crashes — the host survives.
-# Ok(())
-# }
-```
-
 ## Recover from a crash
 
 When an isolated plugin's helper dies (a crash or a hang), calls return a typed

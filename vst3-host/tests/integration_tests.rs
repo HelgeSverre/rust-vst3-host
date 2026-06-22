@@ -896,27 +896,6 @@ fn test_probe_and_auto_isolate() {
         host.probe_plugin("/no/such/plugin.vst3"),
         ProbeResult::Failed(_)
     ));
-
-    // WaveShell (if installed) crashes the isolated helper — contained as Crashed — and an
-    // auto-isolating host returns an Err instead of segfaulting this process.
-    let waveshell = "/Library/Audio/Plug-Ins/VST3/WaveShell1-VST3 14.12.vst3";
-    if std::path::Path::new(waveshell).exists() {
-        assert_eq!(
-            host.probe_plugin(waveshell),
-            ProbeResult::Crashed,
-            "WaveShell should probe as Crashed"
-        );
-        let mut h = Vst3Host::builder()
-            .auto_isolate_problematic(true)
-            .build()
-            .unwrap();
-        assert!(
-            h.load_plugin(waveshell).is_err(),
-            "auto-isolated WaveShell should error, not crash the host"
-        );
-        // Reaching here means the host process survived WaveShell's crash.
-        println!("WaveShell contained: host survived");
-    }
 }
 
 /// M3: the RealtimePluginRunner applies control commands from its lock-free queue and

@@ -16,9 +16,6 @@ pub struct Vst3Host {
     pub(crate) custom_paths: Vec<PathBuf>,
     /// Whether to use process isolation for plugin loading
     pub(crate) use_process_isolation: bool,
-    /// Whether to automatically isolate plugins known to be crash-prone in-process
-    /// (e.g. Waves), so a crash can't take down the host.
-    pub(crate) auto_isolate_problematic: bool,
     /// Whether to scan default system paths for plugins
     pub(crate) scan_default_paths: bool,
     /// Explicit path to the isolation helper binary (overrides the heuristic search).
@@ -189,12 +186,7 @@ impl Vst3Host {
             return Err(Error::PluginNotFound(path.display().to_string()));
         }
 
-        // Use process isolation if explicitly enabled, or automatically for plugins
-        // known to be crash-prone in-process (e.g. Waves) when auto-isolation is on.
-        let isolate = self.use_process_isolation
-            || (self.auto_isolate_problematic
-                && crate::internal::module_loader::has_objc_conflicts(path));
-        if isolate {
+        if self.use_process_isolation {
             self.load_plugin_isolated(path)
         } else {
             self.load_plugin_internal(path)
@@ -386,7 +378,6 @@ impl Default for Vst3Host {
             config: AudioConfig::default(),
             custom_paths: Vec::new(),
             use_process_isolation: false,
-            auto_isolate_problematic: false,
             scan_default_paths: true,
             helper_path: None,
             response_timeout: crate::process_isolation::DEFAULT_RESPONSE_TIMEOUT,
@@ -406,7 +397,6 @@ pub struct Vst3HostBuilder {
     config: AudioConfig,
     custom_paths: Vec<PathBuf>,
     use_process_isolation: bool,
-    auto_isolate_problematic: bool,
     scan_default_paths: bool,
     helper_path: Option<PathBuf>,
     response_timeout: Option<std::time::Duration>,
@@ -465,15 +455,6 @@ impl Vst3HostBuilder {
     /// Enable or disable process isolation for plugin loading
     pub fn with_process_isolation(mut self, enabled: bool) -> Self {
         self.use_process_isolation = enabled;
-        self
-    }
-
-    /// Automatically load known crash-prone plugins (e.g. Waves/WaveShell) in an isolated
-    /// process so a crash is contained instead of taking down the host. Plugins that load
-    /// fine in-process are unaffected. Requires the `process-isolation` feature at runtime
-    /// (the helper binary must be present).
-    pub fn auto_isolate_problematic(mut self, enabled: bool) -> Self {
-        self.auto_isolate_problematic = enabled;
         self
     }
 
@@ -539,7 +520,6 @@ impl Vst3HostBuilder {
             config: self.config,
             custom_paths: self.custom_paths,
             use_process_isolation: self.use_process_isolation,
-            auto_isolate_problematic: self.auto_isolate_problematic,
             scan_default_paths: self.scan_default_paths,
             helper_path: self.helper_path,
             response_timeout: self

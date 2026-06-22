@@ -42,10 +42,10 @@ plugin that crashes can't take down the run.
 
 ## Notable findings
 
-- **WaveShell crashes on load** — its own duplicate-Obj-C-class packaging, not a host bug.
-  The host stays alive because the probe runs isolated; load such plugins with
-  `auto_isolate_problematic(true)` or process isolation. (See
-  [process isolation](../explanation/process-isolation.md).)
+- **WaveShell (Waves) loads in-process** despite the duplicate-Obj-C-class warnings it prints
+  from its own packaging. It used to crash on teardown; the host no longer calls a plugin's
+  `terminate()` (relying on COM `Release` for cleanup, which these plugins handle correctly),
+  so no isolation is needed.
 - **Vital is x86_64-only**, but this host is arm64, so CFBundle can't load it. The loader now
   reports the architecture mismatch explicitly. Run the host under Rosetta, or use a
   universal/arm64 build of the plugin. (Not a library limitation.)
