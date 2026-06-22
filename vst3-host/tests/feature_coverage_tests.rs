@@ -144,6 +144,71 @@ fn test_note_expression_bends_pitch() {
     );
 }
 
+/// Same as [`load_test_synth`], but runs the plugin out-of-process (process isolation).
+#[cfg(feature = "process-isolation")]
+fn load_test_synth_isolated() -> Option<(Vst3Host, Plugin)> {
+    let path = test_synth_path()?;
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(4096)
+        .with_process_isolation(true)
+        .build()
+        .expect("build isolated host");
+    let plugin = host.load_plugin(path).expect("load TestSynth (isolated)");
+    Some((host, plugin))
+}
+
+/// Note expression (MPE) end-to-end across the *process-isolation* boundary: the helper owns
+/// the real plugin (and allocates the NoteId), and a per-note Tuning expression marshaled over
+/// IPC still audibly bends the voice's pitch. Mirrors [`test_note_expression_bends_pitch`].
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin) and the helper binary"]
+fn test_note_expression_bends_pitch_isolated() {
+    use vst3_host::{NoteExpressionType, NoteId};
+
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_test_synth_isolated() else {
+        return;
+    };
+
+    // note_expressions() must now marshal across IPC (previously "not supported").
+    let exprs = plugin
+        .note_expressions()
+        .expect("note_expressions over IPC");
+    println!("TestSynth (isolated) note expressions: {exprs:?}");
+    assert!(
+        exprs.iter().any(|e| e.kind == NoteExpressionType::Tuning),
+        "isolated TestSynth should advertise a Tuning note expression"
+    );
+
+    plugin.start_processing().expect("start_processing");
+    // note_on over IPC: the helper allocates the NoteId and returns it across the boundary.
+    let id: NoteId = plugin
+        .note_on(MidiChannel::Ch1, 60, 100)
+        .expect("note_on over IPC returns a NoteId");
+
+    let freq_unbent = measure_freq(&mut plugin);
+    // Tuning 1.0 = +1 octave in our synth; the expression event must survive the marshal.
+    plugin
+        .send_note_expression(id, NoteExpressionType::Tuning, 1.0)
+        .expect("send_note_expression over IPC");
+    let freq_bent = measure_freq(&mut plugin);
+
+    plugin.note_off(id).ok();
+    plugin.stop_processing().ok();
+
+    println!("isolated note-expression pitch: unbent={freq_unbent:.1} Hz, bent={freq_bent:.1} Hz");
+    assert!(
+        freq_unbent > 200.0 && freq_unbent < 320.0,
+        "unbent ~261 Hz, got {freq_unbent}"
+    );
+    assert!(
+        freq_bent > freq_unbent * 1.7,
+        "Tuning expression should raise the pitch ~1 octave across IPC: {freq_unbent} -> {freq_bent}"
+    );
+}
+
 /// Pick a writable, automatable parameter (falling back to the first one).
 fn pick_writable_param(plugin: &mut Plugin) -> Parameter {
     let params = plugin.get_parameters().expect("get_parameters");

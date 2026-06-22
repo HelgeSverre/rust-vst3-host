@@ -94,6 +94,44 @@ pub enum HostCommand {
         /// The opaque state bytes.
         data: Vec<u8>,
     },
+    /// Start a note (MPE). The helper's plugin allocates the per-voice note id and returns
+    /// it in [`HostResponse::NoteStarted`] (in isolation the helper owns the real plugin).
+    NoteOn {
+        /// MIDI channel, 0-based index (`MidiChannel::as_index`).
+        channel: u8,
+        /// Note number (0-127).
+        note: u8,
+        /// Velocity (0-127).
+        velocity: u8,
+        /// Sample offset within the next processed block.
+        sample_offset: i32,
+    },
+    /// Release a note previously started with [`HostCommand::NoteOn`].
+    NoteOff {
+        /// Raw note id returned by `NoteOn`.
+        note_id: i32,
+        /// Sample offset within the next processed block.
+        sample_offset: i32,
+    },
+    /// Send a per-note expression value (normalized 0..1) for a voice. The expression
+    /// dimension crosses the boundary as the serializable `NoteExpressionType` enum.
+    SendNoteExpression {
+        /// Raw note id returned by `NoteOn`.
+        note_id: i32,
+        /// Which note-expression dimension to set.
+        kind: crate::midi::NoteExpressionType,
+        /// Normalized expression value (0..1).
+        value: f64,
+        /// Sample offset within the next processed block.
+        sample_offset: i32,
+    },
+    /// Enumerate the per-note expressions the plugin advertises (`INoteExpressionController`).
+    NoteExpressions {
+        /// Event bus index.
+        bus: i32,
+        /// Channel index.
+        channel: i16,
+    },
     /// Shutdown the helper process
     Shutdown,
 }
@@ -176,6 +214,16 @@ pub enum HostResponse {
         has_midi_input: bool,
         /// Whether the plugin has a MIDI/event output bus.
         has_midi_output: bool,
+    },
+    /// A note was started (reply to `NoteOn`); carries the helper-allocated raw note id.
+    NoteStarted {
+        /// Raw note id the host wraps back into a `NoteId`.
+        note_id: i32,
+    },
+    /// The per-note expressions the plugin advertises (reply to `NoteExpressions`).
+    NoteExpressions {
+        /// The advertised note-expression dimensions.
+        expressions: Vec<crate::midi::NoteExpressionInfo>,
     },
 }
 
@@ -585,6 +633,83 @@ mod wire_tests {
                 assert_eq!(offset, 256);
             }
             other => panic!("round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn note_expression_commands_round_trip_across_the_wire() {
+        // The MPE commands/responses must survive the JSON transport host and helper share.
+        use crate::midi::{NoteExpressionInfo, NoteExpressionType};
+
+        let on = HostCommand::NoteOn {
+            channel: 0,
+            note: 60,
+            velocity: 100,
+            sample_offset: 0,
+        };
+        let on_json = serde_json::to_string(&on).expect("serialize NoteOn");
+        match serde_json::from_str::<HostCommand>(&on_json).expect("deserialize NoteOn") {
+            HostCommand::NoteOn {
+                channel,
+                note,
+                velocity,
+                sample_offset,
+            } => {
+                assert_eq!((channel, note, velocity, sample_offset), (0, 60, 100, 0));
+            }
+            other => panic!("NoteOn round-trip changed the variant: {other:?}"),
+        }
+
+        let expr = HostCommand::SendNoteExpression {
+            note_id: 7,
+            kind: NoteExpressionType::Tuning,
+            value: 1.0,
+            sample_offset: 0,
+        };
+        let expr_json = serde_json::to_string(&expr).expect("serialize SendNoteExpression");
+        match serde_json::from_str::<HostCommand>(&expr_json).expect("deserialize") {
+            HostCommand::SendNoteExpression {
+                note_id,
+                kind,
+                value,
+                ..
+            } => {
+                assert_eq!(note_id, 7);
+                assert_eq!(kind, NoteExpressionType::Tuning);
+                assert_eq!(value, 1.0);
+            }
+            other => panic!("SendNoteExpression round-trip changed the variant: {other:?}"),
+        }
+
+        let started = HostResponse::NoteStarted { note_id: 42 };
+        let started_json = serde_json::to_string(&started).expect("serialize NoteStarted");
+        match serde_json::from_str::<HostResponse>(&started_json).expect("deserialize") {
+            HostResponse::NoteStarted { note_id } => assert_eq!(note_id, 42),
+            other => panic!("NoteStarted round-trip changed the variant: {other:?}"),
+        }
+
+        let info = NoteExpressionInfo {
+            kind: NoteExpressionType::Tuning,
+            title: "Tuning".to_string(),
+            short_title: "Tun".to_string(),
+            units: String::new(),
+            default_value: 0.5,
+            min: 0.0,
+            max: 1.0,
+            step_count: 0,
+            is_bipolar: true,
+            is_one_shot: false,
+            is_absolute: false,
+        };
+        let resp = HostResponse::NoteExpressions {
+            expressions: vec![info.clone()],
+        };
+        let resp_json = serde_json::to_string(&resp).expect("serialize NoteExpressions");
+        match serde_json::from_str::<HostResponse>(&resp_json).expect("deserialize") {
+            HostResponse::NoteExpressions { expressions } => {
+                assert_eq!(expressions, vec![info]);
+            }
+            other => panic!("NoteExpressions round-trip changed the variant: {other:?}"),
         }
     }
 

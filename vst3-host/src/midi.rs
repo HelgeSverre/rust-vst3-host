@@ -170,6 +170,15 @@ impl NoteId {
     pub fn raw(self) -> i32 {
         self.0
     }
+
+    /// Reconstruct a [`NoteId`] from a raw VST3 note id.
+    ///
+    /// A `NoteId` is normally minted by [`Plugin::note_on`](crate::Plugin::note_on); this is
+    /// the inverse of [`raw`](Self::raw), used to carry an id across the process-isolation
+    /// boundary (the helper owns the plugin and allocates the id; the host re-wraps it).
+    pub fn from_raw(raw: i32) -> Self {
+        NoteId(raw)
+    }
 }
 
 /// A VST3 per-note expression dimension. Values are normalized `0.0..=1.0`; the bipolar
