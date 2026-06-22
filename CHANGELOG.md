@@ -21,6 +21,14 @@ All notable changes to `vst3-host` are documented here. The format is based on
   supported"). Verified end-to-end: a Tuning expression bends a voice an octave across the
   subprocess boundary.
 
+### Fixed
+
+- Loading an editor-style plugin no longer crashes the host. The `has_gui` probe at load
+  created the plugin's editor view and then called `IPlugView::removed()` on it — but the view
+  was never `attached()`, violating the `IPlugView` lifecycle. Plugins that only initialize
+  their close state on attach (e.g. Access Virus Editor) segfaulted in `OnUIClose()`. The probe
+  view is now released (dropped) without the spurious `removed()` call.
+
 ## [0.3.0] - 2026-06-22
 
 ### Added
