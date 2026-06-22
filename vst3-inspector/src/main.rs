@@ -92,14 +92,13 @@ mod tests {
     }
 }
 
-// Default plugin paths — the user can load any discovered plugin. The library handles
-// VST3 bundle binary path resolution internally, so the inspector only deals with the
-// `.vst3` bundle path.
-#[cfg(target_os = "macos")]
-const PLUGIN_PATH: &str = "/Library/Audio/Plug-Ins/VST3/HY-MPS3 free.vst3";
-
-#[cfg(target_os = "windows")]
-const PLUGIN_PATH: &str = r"C:\Program Files\Common Files\VST3\HY-MPS3 free.vst3";
+// Default plugin to auto-load at startup — the bundled Dexed test plugin (a full-featured
+// FM synth, a good exercise of params/MIDI/audio). Relative to the repo root, which is the
+// working directory under `just inspector` / `cargo run`. If it isn't present, startup falls
+// back to the last-loaded plugin from the previous session, then to loading nothing. The user
+// can load any discovered plugin from the Plugins tab. The library resolves the VST3 bundle's
+// binary internally, so the inspector only deals with the `.vst3` bundle path.
+const PLUGIN_PATH: &str = "test_plugins/Dexed.vst3";
 
 #[derive(Debug, Clone)]
 struct PluginInfo {
@@ -654,13 +653,16 @@ impl eframe::App for VST3Inspector {
             }
         }
 
-        // Keep the UI live without busy-looping. egui is reactive by default (repaints only
-        // on input), which makes a host UI feel dead between events; an *unbounded*
-        // `request_repaint()` instead pegs the render loop at the monitor refresh rate and
-        // hammers the plugin mutex (contending with the audio thread → input lag). Capping at
-        // ~60 fps with `request_repaint_after` keeps meters/clicks responsive at far lower
-        // cost. (Input events still trigger an immediate repaint.)
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        // Drive a continuous render loop. egui is reactive by default (it repaints only when an
+        // event wakes the loop), which makes a host UI feel dead between events and — worse —
+        // lets a click that doesn't move the mouse sit unprocessed until the next event arrives
+        // (the bare pointer-up doesn't reliably schedule a fresh frame). An unbounded
+        // `request_repaint()` runs the loop at the monitor refresh rate so input is always
+        // processed promptly and the meters/MIDI monitor stay live. This was previously avoided
+        // because the per-frame work locked the audio mutex (contending with the audio thread →
+        // lag); now that all control + feedback go through lock-free side channels, a steady
+        // repaint is cheap.
+        ctx.request_repaint();
 
         // egui 0.34 deprecated top-level `Panel::show(ctx, ..)` in favour of building a root
         // `Ui` once and `show_inside`-ing every panel on it. Panels reserve space from the
