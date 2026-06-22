@@ -38,11 +38,11 @@ pub struct WindowsModule {
 }
 
 /// Best-effort: read the plugin's PE header and, if its architecture differs from the host's,
-/// return an actionable error sentence. `None` if the file can't be read/parsed (e.g. a `.vst3`
-/// bundle directory) or the arch matches — the caller then falls back to the generic message.
-fn arch_mismatch_detail(path: &Path) -> Option<String> {
+/// return an actionable error sentence. `None` if the file can't be read/parsed or the arch
+/// matches — the caller then falls back to the generic message.
+fn arch_mismatch_detail(binary: &Path) -> Option<String> {
     use super::arch;
-    let data = std::fs::read(path).ok()?;
+    let data = std::fs::read(binary).ok()?;
     let name = arch::pe_machine_name(arch::detect_pe_machine(&data)?);
     arch::mismatch_detail("DLL", name)
 }
@@ -54,12 +54,18 @@ impl WindowsModule {
             log::info!("=== Windows VST3 MODULE LOADING START ===");
             log::info!("Loading VST3 DLL: {}", path.display());
 
+            // A modern VST3 is a bundle DIRECTORY (Contents/x86_64-win/Foo.vst3); resolve to the
+            // inner DLL so LoadLibrary gets a file (and the arch diagnostic can read its header).
+            // Falls back to the given path for the legacy single-file layout.
+            let binary =
+                crate::discovery::get_vst3_binary_path(path).unwrap_or_else(|_| path.to_path_buf());
+
             // Step 1: Load the library
-            log::debug!("Step 1: Loading DLL...");
-            let library = Library::new(path).map_err(|e| {
+            log::debug!("Step 1: Loading DLL: {}", binary.display());
+            let library = Library::new(&binary).map_err(|e| {
                 // A common failure on the wrong host arch (e.g. an x86_64-only plugin on an
                 // arm64 host). Diagnose it from the PE header so the error is actionable.
-                let detail = arch_mismatch_detail(path)
+                let detail = arch_mismatch_detail(&binary)
                     .unwrap_or_else(|| format!("Failed to load DLL: {}", e));
                 Error::PluginLoadFailed(detail)
             })?;
