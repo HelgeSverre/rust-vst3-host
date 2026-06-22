@@ -1248,10 +1248,11 @@ impl PluginInternal for PluginImpl {
                 let view_type = c"editor".as_ptr();
                 let view_ptr = controller.createView(view_type);
                 if !view_ptr.is_null() {
-                    // Clean up the test view (ptr is non-null here).
-                    if let Some(view) = ComPtr::<IPlugView>::from_raw(view_ptr) {
-                        view.removed();
-                    }
+                    // Release the probe view (drop) without `removed()`: it was never
+                    // `attached()`, so `removed()` would violate the `IPlugView` lifecycle and
+                    // crash plugins that init close-state on attach (see the load-time has_gui
+                    // probe).
+                    let _ = ComPtr::<IPlugView>::from_raw(view_ptr);
                     true
                 } else {
                     false
@@ -1361,8 +1362,10 @@ impl PluginInternal for PluginImpl {
 
                 let result = view.getSize(&mut view_rect);
 
-                // Clean up the temporary view
-                view.removed();
+                // The temporary view is released when `view` drops at the end of this scope.
+                // We must NOT call `removed()` here: it was never `attached()`, and calling
+                // `removed()` on a never-attached view crashes plugins that initialize their
+                // close-state on attach (e.g. Access Virus Editor segfaults in `OnUIClose()`).
 
                 if result == kResultOk {
                     let width = view_rect.right - view_rect.left;

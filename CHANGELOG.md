@@ -23,11 +23,14 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ### Fixed
 
-- Loading an editor-style plugin no longer crashes the host. The `has_gui` probe at load
-  created the plugin's editor view and then called `IPlugView::removed()` on it — but the view
-  was never `attached()`, violating the `IPlugView` lifecycle. Plugins that only initialize
-  their close state on attach (e.g. Access Virus Editor) segfaulted in `OnUIClose()`. The probe
-  view is now released (dropped) without the spurious `removed()` call.
+- Loading **or opening the editor of** an editor-style plugin no longer crashes the host.
+  Three places created the plugin's editor view to probe it (the `has_gui` check at load,
+  `has_editor()`, and `get_editor_size()` — the latter run by `PluginWindow::open()` before
+  attaching) and then called `IPlugView::removed()` on the view. But those views were never
+  `attached()`, which violates the `IPlugView` lifecycle. Plugins that only initialize their
+  close state on attach (e.g. Access Virus Editor) segfaulted in `OnUIClose()`. The probe views
+  are now released (dropped) without the spurious `removed()` call; only the real
+  attach/detach path (`open_editor`/`close_editor`) calls `removed()`.
 
 ## [0.3.0] - 2026-06-22
 
