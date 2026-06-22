@@ -35,6 +35,12 @@ All notable changes to `vst3-host` are documented here. The format is based on
   meters, MIDI monitor, editor parameter sync) now flow through the new lock-free
   `AudioHandle` side channels; the mutex is reserved for rare lifecycle ops. (An interim fix
   used `try_lock` for the per-frame reads.)
+- Parameter edits made in a plugin's **own editor GUI** now affect the audio. The plugin
+  reports these via `IComponentHandler::performEdit`; the host captured them for display but
+  never routed them to the audio processor, so plugins that don't internally relay
+  editor→processor changes (e.g. some dual-component synths) ignored GUI knob turns while
+  presets still worked. `process()` now feeds those edits into the processor's input
+  parameter queue.
 
 ## [0.2.1] - 2026-06-22
 

@@ -63,6 +63,13 @@ pub struct PluginImpl {
     // with process() by the caller's &mut access, so a plain Vec (no lock) is sufficient.
     pending_param_changes: Vec<ParameterChange>,
 
+    // Parameter edits the plugin's *own editor* reported via `IComponentHandler::performEdit`,
+    // after `process()` has routed them into the processor's input queue. Drained by the host
+    // via `get_parameter_changes()` to update its UI. Separate from the raw performEdit sink
+    // (`component_handler.parameter_changes`) so feeding the DSP and updating the display are
+    // not two consumers racing to drain the same buffer.
+    gui_param_changes_for_host: Arc<Mutex<Vec<(u32, f64)>>>,
+
     // Event handling
     input_events: ComWrapper<HostEventList>,
     output_events: ComWrapper<HostEventList>,
@@ -137,19 +144,27 @@ impl PluginImpl {
         self.block_size = block_size;
     }
 
-    /// Get parameter changes captured from the plugin GUI
+    /// Get parameter changes the plugin's editor made (for the host to update its UI).
+    ///
+    /// Returns edits that `process()` has already routed into the processor's input queue, so
+    /// the DSP and the host display stay in sync. (Before processing has started, falls back to
+    /// the raw performEdit sink so edits aren't lost.)
     pub fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
-        if let Some(ref handler) = self.component_handler {
-            if let Ok(mut changes) = handler.parameter_changes.lock() {
-                let result = changes.clone();
-                changes.clear(); // Clear after reading
-                result
-            } else {
-                Vec::new()
+        if let Ok(mut stash) = self.gui_param_changes_for_host.lock() {
+            if !stash.is_empty() {
+                return std::mem::take(&mut *stash);
             }
-        } else {
-            Vec::new()
         }
+        // Not processing yet (process() hasn't run to move edits into the stash): drain the raw
+        // performEdit sink directly so the host UI still reflects editor changes.
+        if !self.is_processing {
+            if let Some(ref handler) = self.component_handler {
+                if let Ok(mut changes) = handler.parameter_changes.lock() {
+                    return std::mem::take(&mut *changes);
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// Load a VST3 plugin from the given path
@@ -329,6 +344,7 @@ impl PluginImpl {
                 process_data: None,
                 component_handler: Some(component_handler),
                 pending_param_changes: Vec::new(),
+                gui_param_changes_for_host: Arc::new(Mutex::new(Vec::new())),
                 input_events,
                 output_events,
                 output_midi: Arc::new(Mutex::new(Vec::new())),
@@ -832,6 +848,28 @@ impl PluginInternal for PluginImpl {
                 for pc in &pending {
                     let off = pc.sample_offset.clamp(0, frames.saturating_sub(1) as i32);
                     data.input_param_changes.enqueue(pc.id, off, pc.value);
+                }
+
+                // Route parameter edits the plugin's *own editor* reported via performEdit into
+                // the processor too, so turning a knob in the plugin GUI affects the audio — not
+                // just the host's display. (Some plugins relay editor→processor internally over
+                // the component/controller connection; others rely on the host to do this. We do
+                // it unconditionally; a plugin that also self-relays just gets the same value
+                // twice in the same block, which is idempotent.) Drained here at offset 0 and
+                // stashed for the host's display poll (get_parameter_changes).
+                if let Some(ref handler) = self.component_handler {
+                    if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
+                        if !gui_changes.is_empty() {
+                            for &(id, value) in gui_changes.iter() {
+                                data.input_param_changes.enqueue(id, 0, value);
+                            }
+                            if let Ok(mut stash) = self.gui_param_changes_for_host.lock() {
+                                stash.append(&mut gui_changes);
+                            } else {
+                                gui_changes.clear();
+                            }
+                        }
+                    }
                 }
 
                 // Copy input audio to plugin buffers (length-clamped — never assume the
