@@ -212,3 +212,187 @@ fn test_detailed_plugin_info_dexed() {
         "Dexed (a synth) should have an audio output bus"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Crash-resistant ("safe") discovery via the vst3-host-probe subprocess.
+// ---------------------------------------------------------------------------
+
+/// Locate the `vst3-host-probe` binary that the safe-discovery path needs. `cargo test`
+/// builds workspace bins, so it sits in the same profile dir as the test binary.
+fn ensure_probe_on_path() -> std::path::PathBuf {
+    // `cargo test` builds workspace bins, so the probe is next to the test deps dir.
+    // current_exe() => target/<profile>/deps/<test-bin>; the probe is two levels up.
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut dir = exe.parent().expect("deps dir"); // .../deps
+    if dir.file_name() == Some(std::ffi::OsStr::new("deps")) {
+        dir = dir.parent().expect("profile dir"); // .../<profile>
+    }
+    dir.join("vst3-host-probe")
+}
+
+#[test]
+fn safe_discovery_skips_garbage_and_does_not_panic() {
+    // A folder containing a bogus ".vst3" entry must NOT take down the scan: the probe
+    // fails to introspect it, and the safe path skips it and returns normally.
+    let probe = ensure_probe_on_path();
+    if !probe.exists() {
+        eprintln!("vst3-host-probe not built at {probe:?}; skipping");
+        return;
+    }
+    std::env::set_var("VST3_HOST_PROBE_PATH", &probe);
+
+    let tmp = std::env::temp_dir().join(format!("vst3-safe-disc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("mk tmp");
+    // A fake bundle: a directory named *.vst3 that is not a real plugin.
+    let garbage = tmp.join("garbage.vst3");
+    std::fs::create_dir_all(garbage.join("Contents").join("MacOS")).expect("mk garbage");
+    std::fs::write(
+        garbage.join("Contents").join("MacOS").join("garbage"),
+        b"not a real plugin binary",
+    )
+    .expect("write garbage");
+
+    let report = vst3_host::discover_plugins_safe(
+        std::slice::from_ref(&tmp),
+        std::time::Duration::from_secs(10),
+    );
+
+    // The bad plugin must be omitted from the successful results...
+    assert!(
+        !report
+            .plugins
+            .iter()
+            .any(|p| p.info.path.ends_with("garbage.vst3")),
+        "garbage plugin should not appear in successful results"
+    );
+    // ...and recorded as skipped (crashed/failed/timed out), not silently dropped.
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.path().ends_with("garbage.vst3")),
+        "garbage plugin should be recorded as skipped, got: {:?}",
+        report.skipped
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::env::remove_var("VST3_HOST_PROBE_PATH");
+}
+
+#[test]
+fn probe_plugin_info_isolated_returns_err_for_garbage_not_panic() {
+    // The single-plugin entry point returns a descriptive Err (never panics / aborts) for
+    // a path that cannot be introspected.
+    let probe = ensure_probe_on_path();
+    if !probe.exists() {
+        eprintln!("vst3-host-probe not built at {probe:?}; skipping");
+        return;
+    }
+    std::env::set_var("VST3_HOST_PROBE_PATH", &probe);
+
+    let bogus = std::path::Path::new("/nonexistent/does-not-exist.vst3");
+    let result = vst3_host::probe_plugin_info_isolated(bogus, std::time::Duration::from_secs(10));
+    assert!(
+        result.is_err(),
+        "probing a nonexistent plugin should be an Err, got: {result:?}"
+    );
+
+    std::env::remove_var("VST3_HOST_PROBE_PATH");
+}
+
+#[cfg(unix)]
+#[test]
+fn safe_discovery_survives_a_probe_that_aborts() {
+    // The whole point of out-of-process introspection: a probe that dies by SIGABRT (what a
+    // licensed plugin calling abort() during init looks like) must be *survived* by the
+    // parent and classified as a crash-skip, not take the scanner down. We stand in a fake
+    // probe that aborts itself, so this exercises the parent's child-death handling without
+    // needing a real crashing plugin.
+    let dir = std::env::temp_dir().join(format!("vst3-abort-probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mk dir");
+
+    // A "probe" that kills itself with SIGABRT (signal 6) the moment it runs.
+    let fake_probe = dir.join("vst3-host-probe");
+    std::fs::write(&fake_probe, "#!/bin/sh\nkill -ABRT $$\n").expect("write fake probe");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake_probe, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake probe");
+
+    // A candidate plugin for the scan to feed to the (aborting) probe.
+    let scan = dir.join("scan");
+    std::fs::create_dir_all(scan.join("bad.vst3").join("Contents").join("MacOS"))
+        .expect("mk fake bundle");
+    std::fs::write(
+        scan.join("bad.vst3")
+            .join("Contents")
+            .join("MacOS")
+            .join("bad"),
+        b"x",
+    )
+    .expect("write fake bin");
+
+    std::env::set_var("VST3_HOST_PROBE_PATH", &fake_probe);
+    let report = vst3_host::discover_plugins_safe(
+        std::slice::from_ref(&scan),
+        std::time::Duration::from_secs(5),
+    );
+    std::env::remove_var("VST3_HOST_PROBE_PATH");
+
+    // We are still alive (the abort killed the child, not us), no plugin was returned, and
+    // the casualty is recorded as a crash skip.
+    assert!(
+        report.plugins.is_empty(),
+        "no plugin should have introspected"
+    );
+    assert!(
+        report.skipped.iter().any(|s| matches!(
+            s,
+            vst3_host::SafeDiscoverySkip::Crashed { path, .. } if path.ends_with("bad.vst3")
+        )),
+        "the aborting probe should be recorded as a Crashed skip, got: {:?}",
+        report.skipped
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "requires the bundled Dexed test plugin"]
+fn safe_discovery_finds_dexed_out_of_process() {
+    let probe = ensure_probe_on_path();
+    if !probe.exists() {
+        eprintln!("vst3-host-probe not built at {probe:?}; skipping");
+        return;
+    }
+    std::env::set_var("VST3_HOST_PROBE_PATH", &probe);
+
+    let test_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins");
+    if !std::path::Path::new(test_dir).join("Dexed.vst3").exists() {
+        println!("Dexed not present, skipping");
+        std::env::remove_var("VST3_HOST_PROBE_PATH");
+        return;
+    }
+
+    let report = vst3_host::discover_plugins_safe(
+        &[std::path::PathBuf::from(test_dir)],
+        std::time::Duration::from_secs(20),
+    );
+
+    assert!(
+        report
+            .plugins
+            .iter()
+            .any(|p| p.info.path.ends_with("Dexed.vst3")),
+        "Dexed should be introspected out-of-process, got plugins: {:?}, skipped: {:?}",
+        report
+            .plugins
+            .iter()
+            .map(|p| &p.info.name)
+            .collect::<Vec<_>>(),
+        report.skipped,
+    );
+
+    std::env::remove_var("VST3_HOST_PROBE_PATH");
+}

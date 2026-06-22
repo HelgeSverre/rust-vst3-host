@@ -1002,6 +1002,28 @@ mod parameter_changes_tests {
         pc.clear_all();
         assert_eq!(unsafe { pc.getParameterCount() }, 0);
     }
+
+    #[test]
+    fn enqueue_with_nan_value_orders_by_offset_without_panicking() {
+        // The queue is ordered by `sample_offset` (an i32 — total order), never by the f64
+        // value, so a NaN value can never reach a comparator and can never panic or corrupt
+        // ordering. This pins that property: the points sort by offset and the NaN survives
+        // verbatim in its offset slot.
+        let pc = ParameterChanges::default();
+        pc.enqueue(1, 128, f64::NAN);
+        pc.enqueue(1, 0, 0.25);
+        pc.enqueue(1, 64, f64::NAN);
+
+        let queues = pc.queues.lock().unwrap();
+        let q = queues.iter().find(|q| q.param_id == 1).unwrap();
+        let points = q.points.lock().unwrap();
+        let offsets: Vec<i32> = points.iter().map(|(off, _)| *off).collect();
+        assert_eq!(offsets, vec![0, 64, 128]);
+        // The finite point is intact and the two NaN-valued points are still NaN.
+        assert_eq!(points[0].1, 0.25);
+        assert!(points[1].1.is_nan());
+        assert!(points[2].1.is_nan());
+    }
 }
 
 #[cfg(test)]

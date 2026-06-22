@@ -29,6 +29,8 @@ pub struct Vst3Host {
     pub(crate) auto_recover_plugins: bool,
     /// Max respawn+retry cycles per command when auto-recover is on.
     pub(crate) auto_recover_max_retries: u32,
+    /// Per-plugin timeout for the crash-resistant discovery probe ([`Self::discover_plugins_safe`]).
+    pub(crate) probe_timeout: std::time::Duration,
 }
 
 impl Vst3Host {
@@ -152,6 +154,30 @@ impl Vst3Host {
         });
 
         Ok(plugins)
+    }
+
+    /// Crash-resistantly discover plugins in the configured scan paths.
+    ///
+    /// Unlike [`Self::discover_plugins`] — which instantiates each plugin **in-process**
+    /// to read its metadata, so a single plugin that `abort()`s or makes a pure-virtual
+    /// call during init takes down the whole host — this introspects every plugin in a
+    /// throwaway child process (`vst3-host-probe`). A plugin that crashes kills only that
+    /// child; the scan completes and returns the plugins it could introspect, recording
+    /// the skipped ones (and why) in the returned [`SafeDiscoveryReport`].
+    ///
+    /// Trade-off: this spawns one probe process per plugin, so it is slower than the
+    /// in-process path. Use it to safely scan an untrusted folder; keep
+    /// [`Self::discover_plugins`] for speed when you trust the plugins.
+    ///
+    /// The probe timeout per plugin defaults to
+    /// [`DEFAULT_PROBE_TIMEOUT`](crate::discovery::DEFAULT_PROBE_TIMEOUT); override it with
+    /// [`Vst3HostBuilder::probe_timeout`].
+    pub fn discover_plugins_safe(&self) -> crate::discovery::SafeDiscoveryReport {
+        let mut all_paths = self.custom_paths.clone();
+        if self.scan_default_paths {
+            all_paths.extend(crate::discovery::scan_standard_paths());
+        }
+        crate::discovery::discover_plugins_safe(&all_paths, self.probe_timeout)
     }
 
     /// Load a VST3 plugin
@@ -368,6 +394,7 @@ impl Default for Vst3Host {
             response_timeout: crate::process_isolation::DEFAULT_RESPONSE_TIMEOUT,
             auto_recover_plugins: false,
             auto_recover_max_retries: 1,
+            probe_timeout: crate::discovery::DEFAULT_PROBE_TIMEOUT,
         }
     }
 }
@@ -387,6 +414,7 @@ pub struct Vst3HostBuilder {
     response_timeout: Option<std::time::Duration>,
     auto_recover_plugins: bool,
     auto_recover_max_retries: Option<u32>,
+    probe_timeout: Option<std::time::Duration>,
 }
 
 impl Vst3HostBuilder {
@@ -498,6 +526,15 @@ impl Vst3HostBuilder {
         self
     }
 
+    /// Per-plugin timeout for the crash-resistant discovery probe used by
+    /// [`Vst3Host::discover_plugins_safe`] (default
+    /// [`DEFAULT_PROBE_TIMEOUT`](crate::discovery::DEFAULT_PROBE_TIMEOUT)). A plugin whose
+    /// probe exceeds this is killed and skipped.
+    pub fn probe_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.probe_timeout = Some(timeout);
+        self
+    }
+
     /// Build the configured host.
     pub fn build(self) -> Result<Vst3Host> {
         Ok(Vst3Host {
@@ -512,6 +549,9 @@ impl Vst3HostBuilder {
                 .unwrap_or(crate::process_isolation::DEFAULT_RESPONSE_TIMEOUT),
             auto_recover_plugins: self.auto_recover_plugins,
             auto_recover_max_retries: self.auto_recover_max_retries.unwrap_or(1),
+            probe_timeout: self
+                .probe_timeout
+                .unwrap_or(crate::discovery::DEFAULT_PROBE_TIMEOUT),
         })
     }
 }

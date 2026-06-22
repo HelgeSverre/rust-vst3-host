@@ -283,6 +283,70 @@ impl PluginInternal for IsolatedPluginImpl {
         self.expect_success(HostCommand::SendMidi { event }, "SendMidi")
     }
 
+    fn note_on(
+        &mut self,
+        channel: crate::midi::MidiChannel,
+        note: u8,
+        velocity: u8,
+        sample_offset: i32,
+    ) -> Result<crate::midi::NoteId> {
+        // The helper owns the real plugin, so it allocates the NoteId; we wrap the raw id back.
+        match self.send_command(HostCommand::NoteOn {
+            channel: channel.as_index(),
+            note,
+            velocity,
+            sample_offset,
+        })? {
+            HostResponse::NoteStarted { note_id } => Ok(crate::midi::NoteId(note_id)),
+            HostResponse::Error { message } => Err(Error::Other(format!("NoteOn: {message}"))),
+            _ => Err(Error::Other("NoteOn: unexpected response".to_string())),
+        }
+    }
+
+    fn note_off(&mut self, id: crate::midi::NoteId, sample_offset: i32) -> Result<()> {
+        self.expect_success(
+            HostCommand::NoteOff {
+                note_id: id.raw(),
+                sample_offset,
+            },
+            "NoteOff",
+        )
+    }
+
+    fn send_note_expression(
+        &mut self,
+        id: crate::midi::NoteId,
+        kind: crate::midi::NoteExpressionType,
+        value: f64,
+        sample_offset: i32,
+    ) -> Result<()> {
+        self.expect_success(
+            HostCommand::SendNoteExpression {
+                note_id: id.raw(),
+                kind,
+                value,
+                sample_offset,
+            },
+            "SendNoteExpression",
+        )
+    }
+
+    fn note_expressions(
+        &self,
+        bus: i32,
+        channel: i16,
+    ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
+        match self.send_command(HostCommand::NoteExpressions { bus, channel })? {
+            HostResponse::NoteExpressions { expressions } => Ok(expressions),
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("NoteExpressions: {message}")))
+            }
+            _ => Err(Error::Other(
+                "NoteExpressions: unexpected response".to_string(),
+            )),
+        }
+    }
+
     fn start_processing(&mut self) -> Result<()> {
         self.expect_success(HostCommand::StartProcessing, "StartProcessing")?;
         self.is_processing = true;

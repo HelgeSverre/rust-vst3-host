@@ -258,6 +258,60 @@ fn handle(
             },
             Err(e) => err("LoadState", e),
         }),
+        HostCommand::NoteOn {
+            channel,
+            note,
+            velocity,
+            sample_offset,
+        } => with(plugin, |p| {
+            let Some(ch) = vst3_host::MidiChannel::from_index(channel) else {
+                return HostResponse::Error {
+                    message: format!("NoteOn: invalid channel index {channel}"),
+                };
+            };
+            // The in-process plugin allocates the per-voice NoteId; return its raw id.
+            match p.note_on_at(ch, note, velocity, sample_offset) {
+                Ok(id) => HostResponse::NoteStarted { note_id: id.raw() },
+                Err(e) => err("NoteOn", e),
+            }
+        }),
+        HostCommand::NoteOff {
+            note_id,
+            sample_offset,
+        } => with(plugin, |p| {
+            match p.note_off_at(vst3_host::NoteId::from_raw(note_id), sample_offset) {
+                Ok(()) => HostResponse::Success {
+                    message: "note off".to_string(),
+                },
+                Err(e) => err("NoteOff", e),
+            }
+        }),
+        HostCommand::SendNoteExpression {
+            note_id,
+            kind,
+            value,
+            sample_offset,
+        } => with(plugin, |p| {
+            match p.send_note_expression_at(
+                vst3_host::NoteId::from_raw(note_id),
+                kind,
+                value,
+                sample_offset,
+            ) {
+                Ok(()) => HostResponse::Success {
+                    message: "note expression sent".to_string(),
+                },
+                Err(e) => err("SendNoteExpression", e),
+            }
+        }),
+        // Note: the public API enumerates bus 0 / channel 0 (the conventional MPE bus); the
+        // bus/channel carried by the command is currently always (0, 0) from the client.
+        HostCommand::NoteExpressions { bus: _, channel: _ } => {
+            with(plugin, |p| match p.note_expressions() {
+                Ok(expressions) => HostResponse::NoteExpressions { expressions },
+                Err(e) => err("NoteExpressions", e),
+            })
+        }
         HostCommand::CreateGui => gui_request(gui, true),
         HostCommand::CloseGui => gui_request(gui, false),
         HostCommand::Shutdown => HostResponse::Success {

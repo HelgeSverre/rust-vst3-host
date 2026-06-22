@@ -4,6 +4,11 @@ use crate::{error::Result, plugin::PluginInfo};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::time::Duration;
+
+/// Default time to wait for the discovery probe to introspect a single plugin before
+/// treating it as hung and killing the child process.
+pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Factory-level metadata (the plugin vendor's identity).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -454,6 +459,290 @@ pub fn get_detailed_plugin_info(path: &Path) -> Result<DetailedPluginInfo> {
             buses,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Crash-resistant ("safe") discovery via a probe subprocess.
+//
+// `get_plugin_info` / `get_detailed_plugin_info` INSTANTIATE each plugin in-process to
+// introspect it. Some installed plugins (licensed plugins that fail their auth check,
+// etc.) call `abort()` or trigger a pure-virtual call during instantiation — which kills
+// the whole host process. A Rust `catch_unwind` cannot help: an `abort()` terminates the
+// process, it does not unwind. The only robust isolation is to do the risky introspection
+// in a child process so the crash kills the child, not us.
+//
+// This path is independent of the run-time isolation IPC (`process_isolation` /
+// `vst3-host-helper`): it spawns a dedicated, minimal `vst3-host-probe` binary once per
+// plugin, reads one JSON line of `DetailedPluginInfo` from its stdout, and skips any
+// plugin whose probe crashed / timed out / exited non-zero. Correctness over speed: a
+// process spawn per plugin is slower than the in-process scan, which is the accepted
+// trade-off for a crash-proof scan.
+// ---------------------------------------------------------------------------
+
+/// Why a single plugin was skipped during a safe scan. Surfaced via
+/// [`SafeDiscoveryReport`] so callers can log or display *why* a plugin was omitted.
+#[derive(Debug, Clone)]
+pub enum SafeDiscoverySkip {
+    /// The probe process crashed (e.g. the plugin called `abort()` or made a
+    /// pure-virtual call) — exactly the case in-process scanning cannot survive.
+    Crashed {
+        /// The plugin path that was skipped.
+        path: PathBuf,
+        /// Human-readable detail (exit status / signal).
+        detail: String,
+    },
+    /// The probe did not finish within the timeout and was killed.
+    TimedOut {
+        /// The plugin path that was skipped.
+        path: PathBuf,
+    },
+    /// The probe ran but reported a (non-crash) failure introspecting the plugin.
+    Failed {
+        /// The plugin path that was skipped.
+        path: PathBuf,
+        /// Error detail from the probe (or this process).
+        detail: String,
+    },
+}
+
+impl SafeDiscoverySkip {
+    /// The plugin path that was skipped.
+    pub fn path(&self) -> &Path {
+        match self {
+            SafeDiscoverySkip::Crashed { path, .. }
+            | SafeDiscoverySkip::TimedOut { path }
+            | SafeDiscoverySkip::Failed { path, .. } => path,
+        }
+    }
+}
+
+/// Result of a crash-resistant scan: the plugins that introspected cleanly, plus a record
+/// of every plugin that was skipped and why.
+#[derive(Debug, Default)]
+pub struct SafeDiscoveryReport {
+    /// Plugins that introspected successfully.
+    pub plugins: Vec<DetailedPluginInfo>,
+    /// Plugins that were skipped (crashed / timed out / failed), with the reason.
+    pub skipped: Vec<SafeDiscoverySkip>,
+}
+
+/// Locate the `vst3-host-probe` binary that does the risky introspection out-of-process.
+///
+/// Mirrors the heuristic the isolation layer uses to find `vst3-host-helper` (same exe
+/// directory → examples parent → cargo `target/{debug,release}`), and honours an explicit
+/// override via the `VST3_HOST_PROBE_PATH` environment variable. Kept self-contained here
+/// rather than reusing the isolation module's resolver so the two stay decoupled.
+fn find_probe_binary() -> std::result::Result<PathBuf, String> {
+    const PROBE_NAME: &str = "vst3-host-probe";
+
+    if let Some(p) = std::env::var_os("VST3_HOST_PROBE_PATH").map(PathBuf::from) {
+        if p.exists() {
+            return Ok(p);
+        }
+        return Err(format!(
+            "VST3_HOST_PROBE_PATH does not exist: {}",
+            p.display()
+        ));
+    }
+
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("Failed to get current exe: {}", e))?;
+    let exe_dir = exe_path.parent().ok_or("Failed to get exe directory")?;
+
+    // Same directory as the current executable.
+    let direct = exe_dir.join(PROBE_NAME);
+    if direct.exists() {
+        return Ok(direct);
+    }
+
+    // If we're in an examples/ directory, try the parent (where bins land).
+    if exe_dir.file_name() == Some(std::ffi::OsStr::new("examples")) {
+        if let Some(parent) = exe_dir.parent() {
+            let p = parent.join(PROBE_NAME);
+            if p.exists() {
+                return Ok(p);
+            }
+        }
+    }
+
+    // Walk up looking for a cargo target/{debug,release} that holds the probe.
+    let mut current = exe_dir;
+    while let Some(parent) = current.parent() {
+        for profile in ["debug", "release"] {
+            let candidate = parent.join("target").join(profile).join(PROBE_NAME);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+        if parent.join("Cargo.toml").exists() {
+            break;
+        }
+        current = parent;
+    }
+
+    Err(format!(
+        "Probe executable '{PROBE_NAME}' not found near {} or in target/{{debug,release}}. \
+         Build it with `cargo build --bin vst3-host-probe`, or set VST3_HOST_PROBE_PATH.",
+        exe_dir.display()
+    ))
+}
+
+/// Outcome of probing a single plugin out-of-process.
+enum ProbeOutcome {
+    /// Introspection succeeded.
+    Ok(Box<DetailedPluginInfo>),
+    /// The probe process crashed (killed by a signal / non-graceful exit).
+    Crashed(String),
+    /// The probe exceeded the timeout and was killed.
+    TimedOut,
+    /// The probe ran but reported a (non-crash) failure.
+    Failed(String),
+}
+
+/// Run the probe binary against one plugin path with a timeout, returning the parsed
+/// outcome. The crash of a misbehaving plugin kills *the probe child*, surfacing here as
+/// [`ProbeOutcome::Crashed`] rather than taking down this process.
+fn run_probe(probe: &Path, plugin: &Path, timeout: Duration) -> ProbeOutcome {
+    use std::process::{Command, Stdio};
+
+    let mut child = match Command::new(probe)
+        .arg(plugin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return ProbeOutcome::Failed(format!("failed to spawn probe: {e}")),
+    };
+
+    // Read stdout on a thread so we can enforce a wall-clock timeout on the child.
+    let stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => return ProbeOutcome::Failed("probe produced no stdout pipe".to_string()),
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let mut stdout = stdout;
+        let _ = stdout.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Child exited; collect whatever it printed.
+                let output = rx.recv().unwrap_or_default();
+                let _ = reader.join();
+                if status.success() {
+                    let line = output.trim();
+                    return match serde_json::from_str::<DetailedPluginInfo>(line) {
+                        Ok(info) => ProbeOutcome::Ok(Box::new(info)),
+                        Err(e) => ProbeOutcome::Failed(format!(
+                            "probe succeeded but its output did not parse: {e}"
+                        )),
+                    };
+                }
+                // Non-success exit. A signal-kill (segfault/abort) has no exit code on
+                // Unix; treat both signal deaths and explicit non-zero exits as a crash —
+                // the point of the safe path is that *neither* is fatal to us.
+                return ProbeOutcome::Crashed(format!("probe exited with {status}"));
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    return ProbeOutcome::TimedOut;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = reader.join();
+                return ProbeOutcome::Failed(format!("failed to wait on probe: {e}"));
+            }
+        }
+    }
+}
+
+/// Crash-resistantly introspect a single plugin out-of-process.
+///
+/// Spawns the `vst3-host-probe` binary to do the risky instantiation in a child process,
+/// so a plugin that `abort()`s or makes a pure-virtual call during init kills the child
+/// instead of this process. Returns `Ok(info)` on success; `Err` (with a descriptive
+/// message) if the probe crashed, timed out, failed, or could not be located — callers
+/// that want a "skip the bad one and keep going" scan should use
+/// [`discover_plugins_safe`] instead, which never returns an error for a single bad plugin.
+pub fn probe_plugin_info_isolated(path: &Path, timeout: Duration) -> Result<DetailedPluginInfo> {
+    let probe = find_probe_binary().map_err(crate::Error::Other)?;
+    match run_probe(&probe, path, timeout) {
+        ProbeOutcome::Ok(info) => Ok(*info),
+        ProbeOutcome::Crashed(detail) => Err(crate::Error::PluginLoadFailed(format!(
+            "probe crashed introspecting {}: {detail}",
+            path.display()
+        ))),
+        ProbeOutcome::TimedOut => Err(crate::Error::PluginTimeout),
+        ProbeOutcome::Failed(detail) => Err(crate::Error::PluginLoadFailed(detail)),
+    }
+}
+
+/// Crash-resistantly discover plugins in `paths`: introspect every `.vst3` bundle in a
+/// child process and **skip** any plugin whose probe crashes, hangs, or fails — the scan
+/// always completes and returns the plugins it could introspect.
+///
+/// This is the robust answer to "one bad plugin in the folder takes down the scan": an
+/// `abort()`/pure-virtual-call during instantiation kills the probe child, not the host.
+/// Each skipped plugin is logged (`log::warn!`) and recorded in
+/// [`SafeDiscoveryReport::skipped`].
+///
+/// Trade-off: this spawns one `vst3-host-probe` process per plugin, so it is slower than
+/// the in-process [`crate::Vst3Host::discover_plugins`]. Use it for a robust "safe scan"
+/// of an untrusted folder; keep the in-process path for speed when you trust the plugins.
+pub fn discover_plugins_safe(paths: &[PathBuf], timeout: Duration) -> SafeDiscoveryReport {
+    let probe = match find_probe_binary() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Safe discovery unavailable: {e}");
+            return SafeDiscoveryReport::default();
+        }
+    };
+
+    let plugin_paths = scan_directories(paths).unwrap_or_default();
+    let mut report = SafeDiscoveryReport::default();
+
+    for path in plugin_paths {
+        match run_probe(&probe, &path, timeout) {
+            ProbeOutcome::Ok(info) => report.plugins.push(*info),
+            ProbeOutcome::Crashed(detail) => {
+                log::warn!(
+                    "Skipping plugin that crashed the probe: {} ({detail})",
+                    path.display()
+                );
+                report
+                    .skipped
+                    .push(SafeDiscoverySkip::Crashed { path, detail });
+            }
+            ProbeOutcome::TimedOut => {
+                log::warn!("Skipping plugin whose probe timed out: {}", path.display());
+                report.skipped.push(SafeDiscoverySkip::TimedOut { path });
+            }
+            ProbeOutcome::Failed(detail) => {
+                log::warn!(
+                    "Skipping plugin the probe could not introspect: {} ({detail})",
+                    path.display()
+                );
+                report
+                    .skipped
+                    .push(SafeDiscoverySkip::Failed { path, detail });
+            }
+        }
+    }
+
+    report
 }
 
 /// Platform-specific VST3 binary path resolution

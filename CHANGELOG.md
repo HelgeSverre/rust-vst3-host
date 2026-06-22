@@ -6,6 +6,21 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Crash-resistant plugin discovery**: `Vst3Host::discover_plugins_safe()` (and
+  `discovery::discover_plugins_safe` / `probe_plugin_info_isolated`) introspect each plugin in
+  a throwaway `vst3-host-probe` subprocess, so a plugin that `abort()`s or makes a
+  pure-virtual call during instantiation is skipped (reported in `SafeDiscoveryReport.skipped`)
+  instead of taking down the host. `Vst3HostBuilder::probe_timeout` bounds each probe. The fast
+  in-process `discover_plugins` is unchanged. (Trades scan speed for safety — one process per
+  plugin.)
+- **Per-note expression (MPE) across process isolation**: `note_on` / `note_off` /
+  `send_note_expression` / `note_expressions` now marshal to the isolation helper, so MPE works
+  the same in-process and out-of-process (previously the isolated path returned "not
+  supported"). Verified end-to-end: a Tuning expression bends a voice an octave across the
+  subprocess boundary.
+
 ## [0.3.0] - 2026-06-22
 
 ### Added
