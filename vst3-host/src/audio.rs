@@ -157,6 +157,47 @@ impl AudioLevels {
     }
 }
 
+/// A VST3 speaker arrangement: a bitmask where each set bit is one channel (so the channel
+/// count is the number of set bits). Wraps the SDK's `SpeakerArrangement` (a `u64` bitmask);
+/// use the named constants or [`from_raw`](Self::from_raw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpeakerArrangement(pub u64);
+
+impl SpeakerArrangement {
+    /// No channels (`kEmpty`).
+    pub const EMPTY: Self = Self(0);
+    /// Mono (`kMono` = front-center).
+    pub const MONO: Self = Self(0x0008_0000);
+    /// Stereo L/R (`kStereo`).
+    pub const STEREO: Self = Self(0x3);
+    /// Stereo surround Ls/Rs (`kStereoSurround`).
+    pub const STEREO_SURROUND: Self = Self(0x30);
+
+    /// Wrap a raw VST3 `SpeakerArrangement` bitmask.
+    pub fn from_raw(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// The raw VST3 bitmask.
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// Number of channels in this arrangement (the count of set bits).
+    pub fn channel_count(self) -> usize {
+        self.0.count_ones() as usize
+    }
+}
+
+/// The speaker arrangements of a plugin's audio input and output buses.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BusArrangements {
+    /// Arrangement of each audio input bus, in bus-index order.
+    pub inputs: Vec<SpeakerArrangement>,
+    /// Arrangement of each audio output bus, in bus-index order.
+    pub outputs: Vec<SpeakerArrangement>,
+}
+
 /// A single-channel peak meter with falling ballistics and a timed peak-hold marker —
 /// the behaviour a level meter UI wants but [`AudioLevels`]'s sticky `peak_hold` doesn't give.
 ///
@@ -486,6 +527,214 @@ pub fn write_wav<P: AsRef<std::path::Path>>(
     Ok(())
 }
 
+/// Read a WAV file written as 32-bit float (`WAVE_FORMAT_IEEE_FLOAT`) or 16-bit PCM, returning
+/// deinterleaved channels (`channels[ch][frame]`) and the sample rate. The inverse of
+/// [`write_wav`]; used to feed a recorded signal into a plugin's input.
+pub fn read_wav<P: AsRef<std::path::Path>>(path: P) -> crate::error::Result<(Vec<Vec<f32>>, u32)> {
+    use crate::error::Error;
+    let data = std::fs::read(path).map_err(|e| Error::Other(format!("read wav: {e}")))?;
+    let err = |m: &str| Error::Other(format!("invalid wav: {m}"));
+    if data.len() < 44 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return Err(err("not a RIFF/WAVE file"));
+    }
+    // Walk chunks to find fmt and data (handles extra chunks before data).
+    let (mut fmt_tag, mut channels, mut sample_rate, mut bits) = (0u16, 0u16, 0u32, 0u16);
+    let mut data_range: Option<(usize, usize)> = None;
+    let mut pos = 12;
+    while pos + 8 <= data.len() {
+        let id = &data[pos..pos + 4];
+        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+            as usize;
+        let body = pos + 8;
+        if id == b"fmt " && body + 16 <= data.len() {
+            fmt_tag = u16::from_le_bytes([data[body], data[body + 1]]);
+            channels = u16::from_le_bytes([data[body + 2], data[body + 3]]);
+            sample_rate = u32::from_le_bytes([
+                data[body + 4],
+                data[body + 5],
+                data[body + 6],
+                data[body + 7],
+            ]);
+            bits = u16::from_le_bytes([data[body + 14], data[body + 15]]);
+        } else if id == b"data" {
+            data_range = Some((body, (body + size).min(data.len())));
+        }
+        pos = body + size + (size & 1); // chunks are word-aligned
+    }
+    let (ds, de) = data_range.ok_or_else(|| err("no data chunk"))?;
+    if channels == 0 {
+        return Err(err("zero channels"));
+    }
+    let nch = channels as usize;
+    let mut out: Vec<Vec<f32>> = vec![Vec::new(); nch];
+    let bytes = &data[ds..de];
+    match (fmt_tag, bits) {
+        (3, 32) => {
+            for (i, frame) in bytes.chunks_exact(4 * nch).enumerate() {
+                let _ = i;
+                for (ch, s) in frame.chunks_exact(4).enumerate() {
+                    out[ch].push(f32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+                }
+            }
+        }
+        (1, 16) => {
+            for frame in bytes.chunks_exact(2 * nch) {
+                for (ch, s) in frame.chunks_exact(2).enumerate() {
+                    let v = i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0;
+                    out[ch].push(v);
+                }
+            }
+        }
+        _ => return Err(err("unsupported format (need 32-bit float or 16-bit PCM)")),
+    }
+    Ok((out, sample_rate))
+}
+
+/// A source that fills a plugin's input buffers each block — a generated test signal or a
+/// preloaded audio file — so effects can be auditioned/rendered with a known input.
+pub trait InputSource: Send {
+    /// Fill `inputs[ch][..frames]` with the next block of audio at `sample_rate`.
+    fn fill(&mut self, inputs: &mut [Vec<f32>], frames: usize, sample_rate: f64);
+}
+
+/// A host-synthesized input signal (no capture device needed). Carries its own cursor so blocks
+/// are continuous across calls.
+#[derive(Debug, Clone)]
+pub enum SignalSource {
+    /// Silence (all zeros).
+    Silence,
+    /// A sine tone at `freq` Hz and linear `amplitude` (0..1).
+    Sine {
+        /// Frequency in Hz.
+        freq: f32,
+        /// Linear amplitude (0..1).
+        amplitude: f32,
+        /// Running phase in radians (cursor; start at 0.0).
+        phase: f64,
+    },
+    /// White noise with linear `amplitude` (0..1).
+    WhiteNoise {
+        /// Linear amplitude (0..1).
+        amplitude: f32,
+        /// xorshift RNG state (cursor; seed non-zero).
+        rng: u64,
+    },
+    /// A preloaded multi-channel sample (e.g. from [`read_wav`]), played from `pos`.
+    Wav {
+        /// Channel samples (`samples[ch][frame]`).
+        samples: std::sync::Arc<Vec<Vec<f32>>>,
+        /// Playback cursor (frame index).
+        pos: usize,
+        /// Loop back to the start at the end instead of going silent.
+        looping: bool,
+    },
+}
+
+impl SignalSource {
+    /// A sine tone.
+    pub fn sine(freq: f32, amplitude: f32) -> Self {
+        SignalSource::Sine {
+            freq,
+            amplitude,
+            phase: 0.0,
+        }
+    }
+    /// White noise (deterministic from a fixed seed).
+    pub fn white_noise(amplitude: f32) -> Self {
+        SignalSource::WhiteNoise {
+            amplitude,
+            rng: 0x9E37_79B9_7F4A_7C15,
+        }
+    }
+    /// A preloaded WAV/sample buffer.
+    pub fn wav(samples: Vec<Vec<f32>>, looping: bool) -> Self {
+        SignalSource::Wav {
+            samples: std::sync::Arc::new(samples),
+            pos: 0,
+            looping,
+        }
+    }
+}
+
+impl InputSource for SignalSource {
+    fn fill(&mut self, inputs: &mut [Vec<f32>], frames: usize, sample_rate: f64) {
+        for ch in inputs.iter_mut() {
+            if ch.len() < frames {
+                ch.resize(frames, 0.0);
+            }
+        }
+        match self {
+            SignalSource::Silence => {
+                for ch in inputs.iter_mut() {
+                    for s in &mut ch[..frames] {
+                        *s = 0.0;
+                    }
+                }
+            }
+            SignalSource::Sine {
+                freq,
+                amplitude,
+                phase,
+            } => {
+                let step = std::f64::consts::TAU * *freq as f64 / sample_rate.max(1.0);
+                for f in 0..frames {
+                    let v = (phase.sin() as f32) * *amplitude;
+                    for ch in inputs.iter_mut() {
+                        ch[f] = v;
+                    }
+                    *phase = (*phase + step) % std::f64::consts::TAU;
+                }
+            }
+            SignalSource::WhiteNoise { amplitude, rng } => {
+                for f in 0..frames {
+                    // xorshift64
+                    let mut x = *rng;
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    *rng = x;
+                    // Map to [-1, 1) then scale.
+                    let unit = ((x >> 11) as f64 / (1u64 << 53) as f64) as f32 * 2.0 - 1.0;
+                    let v = unit * *amplitude;
+                    for ch in inputs.iter_mut() {
+                        ch[f] = v;
+                    }
+                }
+            }
+            SignalSource::Wav {
+                samples,
+                pos,
+                looping,
+            } => {
+                let total = samples.iter().map(|c| c.len()).max().unwrap_or(0);
+                for f in 0..frames {
+                    let p = *pos + f;
+                    let src_idx = if total == 0 {
+                        None
+                    } else if p < total {
+                        Some(p)
+                    } else if *looping {
+                        Some(p % total)
+                    } else {
+                        None
+                    };
+                    for (ci, ch) in inputs.iter_mut().enumerate() {
+                        ch[f] = match src_idx {
+                            Some(i) => samples
+                                .get(ci % samples.len().max(1))
+                                .and_then(|c| c.get(i))
+                                .copied()
+                                .unwrap_or(0.0),
+                            None => 0.0,
+                        };
+                    }
+                }
+                *pos += frames;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod wav_tests {
     use super::*;
@@ -508,6 +757,96 @@ mod wav_tests {
         );
         // 4 frames * 2 ch * 4 bytes = 32 bytes of data; file = 44-byte header + 32.
         assert_eq!(bytes.len(), 44 + 32);
+    }
+
+    #[test]
+    fn write_then_read_wav_round_trips() {
+        let ch = vec![vec![0.0f32, 0.5, -0.5, 1.0], vec![0.1, 0.2, 0.3, 0.4]];
+        let path = std::env::temp_dir().join(format!("vh_rw_{}.wav", std::process::id()));
+        write_wav(&path, &ch, 44_100).unwrap();
+        let (back, sr) = read_wav(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(sr, 44_100);
+        assert_eq!(back.len(), 2);
+        for (a, b) in ch.iter().zip(back.iter()) {
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert!((x - y).abs() < 1e-6, "{x} vs {y}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+
+    #[test]
+    fn sine_starts_at_zero_and_stays_in_amplitude() {
+        let mut src = SignalSource::sine(1000.0, 0.5);
+        let mut inputs = vec![vec![0.0f32; 256], vec![0.0f32; 256]];
+        src.fill(&mut inputs, 256, 48_000.0);
+        assert!(inputs[0][0].abs() < 1e-6, "sine should start at phase 0");
+        for ch in &inputs {
+            assert!(
+                ch.iter().all(|s| s.abs() <= 0.5 + 1e-6),
+                "exceeds amplitude"
+            );
+        }
+        // Both channels get the same (mono) signal.
+        assert_eq!(inputs[0], inputs[1]);
+        // Non-trivial signal (not all zero).
+        assert!(inputs[0].iter().any(|s| s.abs() > 0.1));
+    }
+
+    #[test]
+    fn noise_is_bounded_and_varied() {
+        let mut src = SignalSource::white_noise(0.25);
+        let mut inputs = vec![vec![0.0f32; 512]];
+        src.fill(&mut inputs, 512, 48_000.0);
+        assert!(inputs[0].iter().all(|s| s.abs() <= 0.25 + 1e-6));
+        let first = inputs[0][0];
+        assert!(inputs[0].iter().any(|&s| s != first), "noise should vary");
+    }
+
+    #[test]
+    fn wav_source_advances_and_zero_pads() {
+        let mut src = SignalSource::wav(vec![vec![1.0, 2.0, 3.0]], false);
+        let mut inputs = vec![vec![0.0f32; 5]];
+        src.fill(&mut inputs, 5, 48_000.0);
+        assert_eq!(inputs[0], vec![1.0, 2.0, 3.0, 0.0, 0.0]); // zero-pads past the end
+    }
+
+    #[test]
+    fn wav_source_loops() {
+        let mut src = SignalSource::wav(vec![vec![1.0, 2.0]], true);
+        let mut inputs = vec![vec![0.0f32; 5]];
+        src.fill(&mut inputs, 5, 48_000.0);
+        assert_eq!(inputs[0], vec![1.0, 2.0, 1.0, 2.0, 1.0]); // wraps
+    }
+}
+
+#[cfg(test)]
+mod speaker_arrangement_tests {
+    use super::*;
+
+    #[test]
+    fn channel_counts_match_bitmask() {
+        assert_eq!(SpeakerArrangement::EMPTY.channel_count(), 0);
+        assert_eq!(SpeakerArrangement::MONO.channel_count(), 1);
+        assert_eq!(SpeakerArrangement::STEREO.channel_count(), 2);
+        assert_eq!(SpeakerArrangement::STEREO_SURROUND.channel_count(), 2);
+    }
+
+    #[test]
+    fn raw_round_trips() {
+        let bits = SpeakerArrangement::STEREO.raw();
+        assert_eq!(bits, 0x3);
+        assert_eq!(
+            SpeakerArrangement::from_raw(bits),
+            SpeakerArrangement::STEREO
+        );
+        // Arbitrary 5.1-ish mask: 6 set bits → 6 channels.
+        assert_eq!(SpeakerArrangement::from_raw(0b111111).channel_count(), 6);
     }
 }
 

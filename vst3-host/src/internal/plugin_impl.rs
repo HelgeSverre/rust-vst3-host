@@ -968,6 +968,71 @@ impl PluginInternal for PluginImpl {
         Ok(())
     }
 
+    fn bus_arrangements(&self) -> Result<crate::audio::BusArrangements> {
+        use crate::audio::SpeakerArrangement;
+        unsafe {
+            let read = |dir: i32| -> Vec<SpeakerArrangement> {
+                let count = self.component.getBusCount(kAudio as i32, dir);
+                (0..count)
+                    .map(|idx| {
+                        let mut arr: u64 = 0;
+                        self.processor.getBusArrangement(dir, idx, &mut arr);
+                        SpeakerArrangement::from_raw(arr)
+                    })
+                    .collect()
+            };
+            Ok(crate::audio::BusArrangements {
+                inputs: read(kInput as i32),
+                outputs: read(kOutput as i32),
+            })
+        }
+    }
+
+    fn set_bus_arrangements(
+        &mut self,
+        inputs: &[crate::audio::SpeakerArrangement],
+        outputs: &[crate::audio::SpeakerArrangement],
+    ) -> Result<()> {
+        if self.is_processing {
+            return Err(Error::Other(
+                "cannot set bus arrangements while processing".to_string(),
+            ));
+        }
+        let mut in_raw: Vec<u64> = inputs.iter().map(|a| a.raw()).collect();
+        let mut out_raw: Vec<u64> = outputs.iter().map(|a| a.raw()).collect();
+        unsafe {
+            // VST3 requires the component inactive for setBusArrangements + setupProcessing.
+            let was_active = self.is_active;
+            if was_active {
+                self.component.setActive(0);
+                self.is_active = false;
+            }
+
+            // A plugin MAY return kResultFalse to mean "kept my own layout" — not an error.
+            // Either way, re-running setup rebuilds buffers from the arrangement it actually has.
+            self.processor.setBusArrangements(
+                in_raw.as_mut_ptr(),
+                in_raw.len() as i32,
+                out_raw.as_mut_ptr(),
+                out_raw.len() as i32,
+            );
+
+            self.setup_processing()?;
+
+            if was_active {
+                let result = self.component.setActive(1);
+                if result != kResultOk {
+                    return Err(Error::Other(format!(
+                        "Failed to reactivate after set_bus_arrangements: {:#x}",
+                        result
+                    )));
+                }
+                self.is_active = true;
+            }
+        }
+        Ok(())
+    }
+
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()> {
         self.send_midi_event_at(event, 0)
     }

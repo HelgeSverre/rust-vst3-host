@@ -123,6 +123,23 @@ pub(crate) trait PluginInternal: Send {
             "process mode switching is not supported for this plugin".to_string(),
         ))
     }
+    /// Query each audio bus's current speaker arrangement. Defaults to unsupported.
+    fn bus_arrangements(&self) -> Result<crate::audio::BusArrangements> {
+        Err(Error::Other(
+            "bus arrangement query is not supported for this plugin".to_string(),
+        ))
+    }
+    /// Request specific speaker arrangements for the audio buses (re-runs `setupProcessing`).
+    /// Defaults to unsupported (e.g. process isolation, where it isn't marshalled).
+    fn set_bus_arrangements(
+        &mut self,
+        _inputs: &[crate::audio::SpeakerArrangement],
+        _outputs: &[crate::audio::SpeakerArrangement],
+    ) -> Result<()> {
+        Err(Error::Other(
+            "bus arrangement negotiation is not supported for this plugin".to_string(),
+        ))
+    }
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()>;
     /// Schedule a MIDI event at a sample offset within the next process block.
     /// Defaults to a block-start event (ignores the offset) for implementations that don't
@@ -266,6 +283,39 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .set_process_mode(mode)
+    }
+
+    /// Query the current speaker arrangement of each audio input/output bus.
+    pub fn bus_arrangements(&self) -> Result<crate::audio::BusArrangements> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .bus_arrangements()
+    }
+
+    /// Request specific speaker arrangements for the audio buses (e.g. force stereo, or a
+    /// surround layout). The slices give one [`SpeakerArrangement`](crate::audio::SpeakerArrangement)
+    /// per input bus and per output bus, in bus-index order.
+    ///
+    /// Re-runs the plugin's `setupProcessing`, so the plugin must **not** be processing (call
+    /// [`Self::stop_processing`] first). A plugin may decline a requested layout and keep its
+    /// own; re-query with [`Self::bus_arrangements`] to see what was actually applied. Errors
+    /// while processing or under process isolation (not marshalled).
+    pub fn set_bus_arrangements(
+        &mut self,
+        inputs: &[crate::audio::SpeakerArrangement],
+        outputs: &[crate::audio::SpeakerArrangement],
+    ) -> Result<()> {
+        if self.is_processing {
+            return Err(Error::Other(
+                "cannot set bus arrangements while processing; call stop_processing() first"
+                    .to_string(),
+            ));
+        }
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .set_bus_arrangements(inputs, outputs)
     }
 
     /// Get all parameters

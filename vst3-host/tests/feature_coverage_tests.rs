@@ -393,6 +393,81 @@ fn test_export_render_with_state_roundtrip() {
     assert!(any_nonzero, "exported WAV is silent");
 }
 
+/// Offline render-with-input: feed a sine test signal into the plugin while rendering to WAV.
+/// (Dexed is an instrument and ignores audio input, so this verifies the input plumbing +
+/// render path, not effect output — a bundled effect would be needed for that.)
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_render_to_wav_with_input_signal() {
+    use vst3_host::SignalSource;
+
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed() else {
+        return;
+    };
+    let mut source = SignalSource::sine(440.0, 0.5);
+    let out = std::env::temp_dir().join(format!("vh_render_in_{}.wav", std::process::id()));
+    let note = MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 100,
+    };
+    vst3_host::simple::render_to_wav_with_input(&mut plugin, 0.5, &[note], &mut source, &out)
+        .expect("render_to_wav_with_input");
+    let bytes = std::fs::read(&out).expect("read wav");
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(&bytes[0..4], b"RIFF");
+    assert!(bytes.len() > 44, "rendered WAV has no audio data");
+}
+
+/// Bus arrangements: query reports Dexed's stereo output, a stereo re-request is accepted, and
+/// a request the plugin may refuse leaves the reported arrangement consistent with the channel
+/// count (a stereo instrument can prove query + graceful negotiation, not a real layout switch).
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_bus_arrangements() {
+    use vst3_host::SpeakerArrangement;
+
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed() else {
+        return;
+    };
+
+    // Dexed is an instrument: no audio inputs, one stereo output bus.
+    let arr = plugin.bus_arrangements().expect("bus_arrangements");
+    println!(
+        "Dexed buses: inputs={:?} outputs={:?}",
+        arr.inputs, arr.outputs
+    );
+    assert!(
+        arr.inputs.is_empty(),
+        "instrument should have no audio inputs"
+    );
+    assert_eq!(arr.outputs.len(), 1, "expected one output bus");
+    assert_eq!(arr.outputs[0], SpeakerArrangement::STEREO);
+
+    // Re-requesting the current (stereo) layout must succeed and stay stereo.
+    plugin
+        .set_bus_arrangements(&[], &[SpeakerArrangement::STEREO])
+        .expect("set stereo");
+    assert_eq!(
+        plugin.bus_arrangements().expect("re-query").outputs[0],
+        SpeakerArrangement::STEREO
+    );
+
+    // Requesting mono: the plugin may accept or refuse, but must not error the host, and the
+    // reported arrangement must stay consistent with the host's channel count.
+    plugin
+        .set_bus_arrangements(&[], &[SpeakerArrangement::MONO])
+        .expect("mono request should not error the host");
+    let after = plugin.bus_arrangements().expect("re-query after mono");
+    assert_eq!(
+        after.outputs[0].channel_count(),
+        plugin.output_channel_count(),
+        "reported arrangement and channel count must stay consistent"
+    );
+}
+
 /// Offline process mode: `set_process_mode(Offline)` is rejected while processing, accepted
 /// while stopped, and a held note still renders audio in offline mode.
 #[test]
