@@ -124,9 +124,13 @@ impl AudioLevels {
             // Calculate peak
             let peak = buffer.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
 
-            // Calculate RMS
+            // Calculate RMS (guard against a zero-length channel buffer → 0/0 = NaN).
             let sum_squares: f32 = buffer.iter().map(|&x| x * x).sum();
-            let rms = (sum_squares / buffer.len() as f32).sqrt();
+            let rms = if buffer.is_empty() {
+                0.0
+            } else {
+                (sum_squares / buffer.len() as f32).sqrt()
+            };
 
             // Update channel levels
             let channel = &mut self.channels[i];
@@ -213,7 +217,13 @@ impl PeakMeter {
     /// level rises instantly to a louder peak and decays toward quieter input; the hold marker
     /// latches the loudest value and only starts falling once `hold` has elapsed since it was set.
     pub fn push(&mut self, block_peak: f32, now: std::time::Instant) {
-        let block_peak = block_peak.max(0.0);
+        // Treat non-finite input (NaN/±inf from a misbehaving plugin) as silence so it can't
+        // permanently poison the meter — `inf * decay` stays inf and would never fall.
+        let block_peak = if block_peak.is_finite() {
+            block_peak.max(0.0)
+        } else {
+            0.0
+        };
         let decay = match self.last {
             Some(prev) => self.decay(now.saturating_duration_since(prev)),
             None => 1.0,
@@ -278,7 +288,9 @@ impl PeakMeter {
 pub struct RmsWindow {
     capacity: usize,
     squares: std::collections::VecDeque<f32>,
-    sum: f32,
+    // f64 accumulator so a meter running for the lifetime of a stream (millions of
+    // add/subtract cycles) doesn't drift from f32 rounding error.
+    sum: f64,
 }
 
 impl RmsWindow {
@@ -302,11 +314,11 @@ impl RmsWindow {
         let sq = sample * sample;
         if self.squares.len() == self.capacity {
             if let Some(old) = self.squares.pop_front() {
-                self.sum -= old;
+                self.sum -= old as f64;
             }
         }
         self.squares.push_back(sq);
-        self.sum += sq;
+        self.sum += sq as f64;
     }
 
     /// Add a whole block of samples.
@@ -322,7 +334,7 @@ impl RmsWindow {
             return 0.0;
         }
         // Guard against tiny negative drift from float subtraction.
-        (self.sum.max(0.0) / self.squares.len() as f32).sqrt()
+        (self.sum.max(0.0) / self.squares.len() as f64).sqrt() as f32
     }
 
     /// Number of samples currently in the window.

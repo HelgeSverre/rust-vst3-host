@@ -575,6 +575,17 @@ impl HostEventList {
         }
     }
 
+    /// Clamp every queued event's `sampleOffset` into `[0, max_offset]`, so an event scheduled
+    /// beyond a (possibly smaller-than-nominal) processed block lands at the block edge rather
+    /// than past it. Called at the start of `process()` once the real frame count is known.
+    pub fn clamp_offsets(&self, max_offset: i32) {
+        if let Ok(mut events) = self.events.lock() {
+            for e in events.iter_mut() {
+                e.sampleOffset = e.sampleOffset.clamp(0, max_offset);
+            }
+        }
+    }
+
     /// Take all events out of the list, leaving it empty. Used to read the events a
     /// plugin emitted into its output event list during `process()`.
     pub fn drain(&self) -> Vec<Event> {

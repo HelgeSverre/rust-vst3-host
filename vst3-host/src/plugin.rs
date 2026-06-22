@@ -176,6 +176,11 @@ pub(crate) trait PluginInternal: Send {
     fn helper_pid(&self) -> Option<u32> {
         None
     }
+    /// Number of times this plugin has been recovered (respawned + reloaded). Defaults to 0
+    /// for non-isolated plugins.
+    fn recovery_count(&self) -> u64 {
+        0
+    }
     /// Recover from a crashed isolated helper by respawning and reloading. Only meaningful
     /// for process-isolated plugins.
     fn recover(&mut self) -> Result<()> {
@@ -359,6 +364,11 @@ impl Plugin {
     /// `None` if the plugin doesn't implement `IMidiMapping`, the controller is unmapped, or
     /// the plugin is process-isolated (not bridged).
     pub fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
+        // VST3 controller numbers are 0..130 (0–127 MIDI CCs + the specials up to pitch-bend).
+        // Reject out-of-range values rather than forwarding a meaningless controller number.
+        if cc > 129 {
+            return None;
+        }
         self.internal
             .as_ref()?
             .midi_cc_to_parameter(bus, channel, cc)
@@ -756,6 +766,22 @@ impl Plugin {
     /// in-process. Useful for monitoring an isolated plugin's resource use.
     pub fn isolation_pid(&self) -> Option<u32> {
         self.internal.as_ref().and_then(|i| i.helper_pid())
+    }
+
+    /// How many times this plugin has been recovered (helper respawned + reloaded), via either
+    /// [`Self::recover`] or automatic recovery ([`Vst3HostBuilder::auto_recover_plugins`]).
+    ///
+    /// A recovery reloads the plugin from defaults — parameter values and loaded state are NOT
+    /// replayed. With auto-recover on, a crash is otherwise invisible (the call returns `Ok`),
+    /// so poll this count to detect that a reset happened and re-apply a saved
+    /// [`save_state`](Self::save_state) snapshot.
+    ///
+    /// [`Vst3HostBuilder::auto_recover_plugins`]: crate::Vst3HostBuilder::auto_recover_plugins
+    pub fn recovery_count(&self) -> u64 {
+        self.internal
+            .as_ref()
+            .map(|i| i.recovery_count())
+            .unwrap_or(0)
     }
 
     /// Total number of output audio channels across the plugin's output buses.

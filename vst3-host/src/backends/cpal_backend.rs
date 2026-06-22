@@ -34,16 +34,23 @@ fn resolve_buffer_size(
     want_ch: u16,
     block_size: u32,
 ) -> BufferSize {
+    // Prefer a range matching both the channel count and sample rate. Many devices (notably
+    // pro multichannel interfaces) advertise their config ranges only at their native channel
+    // count, so a stereo request would never find an exact match and silently lose the
+    // configured block size. The buffer-size range is a device-level property independent of
+    // the stream's channel count, so fall back to any range that covers the sample rate.
+    let mut sr_only_fallback: Option<BufferSize> = None;
     for range in ranges {
-        if range.channels() != want_ch {
-            continue;
-        }
         if want_sr < range.min_sample_rate() || want_sr > range.max_sample_rate() {
             continue;
         }
-        return clamp_block_to_buffer_size(range.buffer_size(), block_size);
+        let resolved = clamp_block_to_buffer_size(range.buffer_size(), block_size);
+        if range.channels() == want_ch {
+            return resolved; // exact channel + sample-rate match wins
+        }
+        sr_only_fallback.get_or_insert(resolved);
     }
-    BufferSize::Default
+    sr_only_fallback.unwrap_or(BufferSize::Default)
 }
 
 /// Resolve the output-stream buffer size for `device` and `config`.
@@ -262,6 +269,78 @@ impl Default for CpalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cpal::{SampleFormat, SupportedStreamConfigRange};
+
+    /// Build a config range with the given channels, sample-rate bounds, and fixed buffer range.
+    fn range(
+        channels: u16,
+        min_sr: u32,
+        max_sr: u32,
+        buf_min: u32,
+        buf_max: u32,
+    ) -> SupportedStreamConfigRange {
+        SupportedStreamConfigRange::new(
+            channels,
+            min_sr,
+            max_sr,
+            SupportedBufferSize::Range {
+                min: buf_min,
+                max: buf_max,
+            },
+            SampleFormat::F32,
+        )
+    }
+
+    #[test]
+    fn resolve_exact_channel_and_sr_match_clamps() {
+        let ranges = vec![range(2, 44_100, 48_000, 64, 2048)];
+        assert_eq!(
+            resolve_buffer_size(ranges.into_iter(), 48_000, 2, 512),
+            BufferSize::Fixed(512)
+        );
+    }
+
+    #[test]
+    fn resolve_channel_mismatch_falls_back_to_sample_rate_match() {
+        // Device advertises only an 8-channel range (e.g. a pro interface); a stereo request
+        // must still honor the device's buffer-size range rather than dropping to Default.
+        let ranges = vec![range(8, 44_100, 96_000, 128, 1024)];
+        assert_eq!(
+            resolve_buffer_size(ranges.into_iter(), 48_000, 2, 4096),
+            BufferSize::Fixed(1024) // clamped into the device range
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_exact_channel_over_sr_only() {
+        // sr-only candidate first, exact match second — exact must win.
+        let ranges = vec![
+            range(8, 44_100, 96_000, 128, 1024),
+            range(2, 44_100, 96_000, 64, 2048),
+        ];
+        assert_eq!(
+            resolve_buffer_size(ranges.into_iter(), 48_000, 2, 512),
+            BufferSize::Fixed(512)
+        );
+    }
+
+    #[test]
+    fn resolve_sample_rate_out_of_range_is_default() {
+        let ranges = vec![range(2, 44_100, 48_000, 64, 2048)];
+        assert_eq!(
+            resolve_buffer_size(ranges.into_iter(), 96_000, 2, 512),
+            BufferSize::Default
+        );
+    }
+
+    #[test]
+    fn resolve_no_ranges_is_default() {
+        let ranges: Vec<SupportedStreamConfigRange> = vec![];
+        assert_eq!(
+            resolve_buffer_size(ranges.into_iter(), 48_000, 2, 512),
+            BufferSize::Default
+        );
+    }
 
     #[test]
     fn clamp_within_range_keeps_requested_size() {
