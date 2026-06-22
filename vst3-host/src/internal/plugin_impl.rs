@@ -1891,15 +1891,38 @@ impl PluginImpl {
 
 impl Drop for PluginImpl {
     fn drop(&mut self) {
-        // Ensure clean shutdown
+        // Teardown: stop processing, deactivate, and disconnect the component/controller
+        // connection points. The COM references then drop, and the plugin frees itself in its
+        // destructor (`Release` -> refcount 0).
+        //
+        // `IPluginBase::terminate()` is deliberately NOT called. Some plugins crash inside
+        // their own `terminate()` (notably shell plugins like Waves' WaveShell, which
+        // null-derefs in `WCWaveShell_VST_Processor::terminate()`), and a hard crash there
+        // can't be caught from the host. Real-world hosts mitigate the same way — they keep
+        // plugin modules resident rather than fully terminating them. `Release` still runs the
+        // plugin's destructor for cleanup, so skipping `terminate()` leaks nothing the plugin
+        // wouldn't otherwise free; it only omits the pre-release notification.
         let _ = self.stop_processing();
 
         unsafe {
-            // Terminate component
-            if let Some(ref controller) = self.controller {
-                controller.terminate();
+            if self.is_active {
+                self.component.setActive(0);
+                self.is_active = false;
             }
-            self.component.terminate();
+
+            // Disconnect the component/controller connection points (dual-component plugins
+            // only; a single-component plugin is one object with no pair).
+            if let Some(ref controller) = self.controller {
+                if !self.single_component {
+                    if let (Some(comp_cp), Some(ctrl_cp)) = (
+                        self.component.cast::<IConnectionPoint>(),
+                        controller.cast::<IConnectionPoint>(),
+                    ) {
+                        comp_cp.disconnect(ctrl_cp.as_ptr());
+                        ctrl_cp.disconnect(comp_cp.as_ptr());
+                    }
+                }
+            }
         }
     }
 }

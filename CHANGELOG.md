@@ -21,8 +21,24 @@ All notable changes to `vst3-host` are documented here. The format is based on
   supported"). Verified end-to-end: a Tuning expression bends a voice an octave across the
   subprocess boundary.
 
+### Removed
+
+- `Vst3HostBuilder::auto_isolate_problematic` and the internal name-based "Objective-C
+  conflict" detection. They auto-isolated plugins like Waves/WaveShell out-of-process by
+  matching their filename — a band-aid for a crash that is now fixed properly (see below), so
+  those plugins load in-process like any other. Explicit `with_process_isolation(true)` is
+  unchanged for callers who still want isolation. The hardcoded Ozone discovery blacklist was
+  also removed (Ozone loads fine).
+
 ### Fixed
 
+- Plugins that crash in their own `terminate()` no longer take down the host. Some plugins —
+  notably shell plugins like Waves' WaveShell — null-deref inside `terminate()` on teardown
+  (an uncatchable native crash). `Plugin` teardown now stops processing, deactivates, and
+  disconnects the component/controller, then drops the COM references (the plugin frees itself
+  in its destructor via `Release`) — it no longer calls `terminate()`. Real hosts mitigate the
+  same way. WaveShell, Ozone Imager, and Access Virus Editor now load and tear down cleanly
+  in-process.
 - Loading **or opening the editor of** an editor-style plugin no longer crashes the host.
   Three places created the plugin's editor view to probe it (the `has_gui` check at load,
   `has_editor()`, and `get_editor_size()` — the latter run by `PluginWindow::open()` before
