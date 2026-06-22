@@ -17,8 +17,11 @@ Focused recipes. They assume you've done the getting-started tutorial.
 - [Play a plugin through an audio device](how-to/play-a-plugin.md)
 - [Play without locking the audio thread](how-to/realtime-playback.md)
 - [Control parameters](how-to/control-parameters.md)
+- [Schedule sample-accurate parameter automation](how-to/sample-accurate-automation.md)
 - [Save and restore plugin state](how-to/save-and-restore-state.md)
 - [Send MIDI](how-to/send-midi.md)
+- [Open or embed a plugin editor](how-to/open-plugin-editor.md)
+- [Monitor audio levels](how-to/monitor-audio-levels.md)
 - [Isolate plugin crashes](how-to/isolate-plugin-crashes.md)
 - [Use a custom audio backend](how-to/custom-audio-backend.md)
 
