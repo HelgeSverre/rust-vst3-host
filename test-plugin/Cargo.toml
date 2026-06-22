@@ -2,6 +2,7 @@
 name = "vst3-host-testplug"
 version = "0.0.0"
 edition = "2021"
+license = "MIT"
 publish = false
 description = "A tiny deterministic VST3 test synth (note expression + effect passthrough) for verifying vst3-host"
 
