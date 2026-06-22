@@ -20,6 +20,8 @@ allow = [
     "MPL-2.0",
     "BSL-1.0",
     "CC0-1.0",
+    # coremidi's -sys crate (live MIDI input on macOS) is public-domain Unlicense.
+    "Unlicense",
     # egui bundles default fonts under these font licenses.
     "OFL-1.1",
     "Ubuntu-font-1.0",
