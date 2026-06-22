@@ -302,10 +302,14 @@ impl PluginImpl {
                     let view_type = c"editor".as_ptr();
                     let view_ptr = ctrl.createView(view_type);
                     if !view_ptr.is_null() {
-                        // Clean up the test view immediately (ptr is non-null here).
-                        if let Some(view) = ComPtr::<IPlugView>::from_raw(view_ptr) {
-                            view.removed();
-                        }
+                        // Release the probe view by adopting it into a `ComPtr` and letting it
+                        // drop. We never parented it, so the correct teardown is a plain
+                        // Release — NOT `removed()`. `removed()` is the counterpart to
+                        // `attached()`; calling it on a never-attached view violates the
+                        // `IPlugView` lifecycle and crashes plugins that only initialize their
+                        // close state on attach (e.g. Access Virus Editor segfaults in
+                        // `OnUIClose()` dereferencing uninitialized state).
+                        let _ = ComPtr::<IPlugView>::from_raw(view_ptr);
                         true
                     } else {
                         false
