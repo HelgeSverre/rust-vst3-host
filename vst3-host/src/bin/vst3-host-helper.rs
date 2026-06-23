@@ -209,6 +209,29 @@ fn handle(
                 Err(e) => err("SetParameterAt", e),
             })
         }
+        HostCommand::SetTempo { bpm } => with(plugin, |p| match p.set_tempo(bpm) {
+            Ok(()) => HostResponse::Success {
+                message: "tempo set".to_string(),
+            },
+            Err(e) => err("SetTempo", e),
+        }),
+        HostCommand::SetTimeSignature {
+            numerator,
+            denominator,
+        } => with(plugin, |p| {
+            match p.set_time_signature(numerator, denominator) {
+                Ok(()) => HostResponse::Success {
+                    message: "time signature set".to_string(),
+                },
+                Err(e) => err("SetTimeSignature", e),
+            }
+        }),
+        HostCommand::SetPlaying { playing } => with(plugin, |p| match p.set_playing(playing) {
+            Ok(()) => HostResponse::Success {
+                message: "playing state set".to_string(),
+            },
+            Err(e) => err("SetPlaying", e),
+        }),
         HostCommand::GetParameter { id } => with(plugin, |p| match p.get_parameter(id) {
             Ok(value) => HostResponse::ParameterValue { value },
             Err(e) => err("GetParameter", e),
