@@ -6,6 +6,18 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-23
+
+### Fixed
+
+- Restore the `IPluginBase::terminate()` teardown that 0.4.0 dropped. 0.4.0 skipped `terminate()`
+  to work around a crash in Waves/WaveShell's own `terminate()`, but that regressed plugins
+  which **require** it to break their controller↔component link before release — e.g. Jup-8000
+  and Analog Lab V crashed on unload. `terminate()` is the spec-compliant teardown and is needed
+  by most (especially dual-component) plugins, so it is called again. WaveShell loads and runs
+  but can crash intermittently on unload (a Waves packaging bug); use process isolation if a
+  clean unload matters for such plugins.
+
 ## [0.4.0] - 2026-06-23
 
 ### Added
@@ -177,6 +189,7 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 - Initial release: safe VST3 hosting — discover, load, parameters, MIDI, audio playback, state
   save/restore, and process isolation.
 
+[0.4.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.4.1
 [0.4.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.4.0
 [0.3.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.3.0
 [0.2.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.2.1
