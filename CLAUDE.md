@@ -77,7 +77,10 @@ same `Plugin` type either way. See `docs/explanation/architecture.md`.
   `Error::PluginCrashed` and `Plugin::recover()` respawns+reloads; GUI-across-boundary is
   still not implemented. Parameters/audio/state/output-MIDI all marshal across the boundary.
   See `docs/explanation/process-isolation.md`.
-- **`MidiEvent::ProgramChange` is unsupported** (VST3 uses `IUnitInfo` program lists).
+- **Program selection** uses `IUnitInfo` program lists: `Plugin::select_program(unit_id,
+  program_index)` sets the unit's `kIsProgramChange` parameter. `MidiEvent::ProgramChange` is
+  routed to the **root unit (id 0)** — the MIDI channel does not map to a VST3 unit. Both
+  paths marshal across process isolation.
 - Features: `cpal-backend` (default), `process-isolation` (default), `egui-widgets`
   (`EmbeddedEditor` — embed a plugin editor in an egui window, macOS).
 - The `prelude` does NOT export `Result` (it would shadow `std::result::Result`); use
