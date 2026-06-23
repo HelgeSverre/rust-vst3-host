@@ -98,7 +98,10 @@ pub use playback::{
     play_realtime_with_backend, play_with_backend, play_with_input_backend, AudioHandle,
     RtAudioHandle,
 };
-pub use plugin::{Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode, WindowHandle};
+pub use plugin::{
+    ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode,
+    WindowHandle,
+};
 pub use realtime::{RealtimePluginRunner, RtControl};
 pub use window::PluginWindow;
 
@@ -117,7 +120,7 @@ pub mod prelude {
         midi::{cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId},
         parameters::{AutomationCurve, AutomationPoint, Parameter, ParameterAutomation},
         playback::{play_with_backend, AudioHandle},
-        plugin::{Plugin, PluginInfo, ProcessMode, WindowHandle},
+        plugin::{ParameterEdit, ParameterEditKind, Plugin, PluginInfo, ProcessMode, WindowHandle},
         window::PluginWindow,
     };
 

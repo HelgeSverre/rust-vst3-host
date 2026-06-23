@@ -66,6 +66,40 @@ pub struct PluginUnit {
     pub programs: Vec<String>,
 }
 
+/// What kind of parameter-edit gesture event a plugin's editor reported.
+///
+/// VST3 editors bracket a user gesture with `beginEdit`/`endEdit` (e.g. mouse-down /
+/// mouse-up on a knob) and report the values in between with `performEdit`. Capturing the
+/// brackets — not just the value changes — lets a host distinguish a deliberate, completed
+/// edit from intermediate drag values, coalesce automation into one undo step, or know when a
+/// gesture is in progress.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ParameterEditKind {
+    /// The user started editing this parameter (`IComponentHandler::beginEdit`).
+    BeginGesture,
+    /// The parameter's value changed (`IComponentHandler::performEdit`); carries the new
+    /// normalized value in [`ParameterEdit::value`].
+    ValueChange,
+    /// The user finished editing this parameter (`IComponentHandler::endEdit`).
+    EndGesture,
+}
+
+/// A single parameter-edit gesture event reported by a plugin's own editor.
+///
+/// Drained in order via [`Plugin::take_parameter_edits`]. This is the richer superset of
+/// [`Plugin::get_parameter_changes`]: where that drains only the value changes, this preserves
+/// the begin/change/end ordering so a host can reconstruct each gesture.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParameterEdit {
+    /// Parameter id the gesture targets.
+    pub id: u32,
+    /// Which gesture phase this event is.
+    pub kind: ParameterEditKind,
+    /// The new normalized value (`0.0..=1.0`), present only for
+    /// [`ParameterEditKind::ValueChange`]; `None` for begin/end brackets.
+    pub value: Option<f64>,
+}
+
 /// How the plugin should run: real-time (live playback) or offline (faster-than-real-time
 /// bounce/render). Maps to VST3 `kRealtime` / `kOffline`; plugins may switch quality or
 /// look-ahead accordingly. Defaults to [`ProcessMode::Realtime`].
@@ -194,6 +228,12 @@ pub(crate) trait PluginInternal: Send {
     fn close_editor(&mut self) -> Result<()>;
     fn get_editor_size(&self) -> Result<(i32, i32)>;
     fn get_parameter_changes(&self) -> Vec<(u32, f64)>;
+    /// Drain the ordered parameter-edit gesture log (begin/change/end) the plugin's editor
+    /// reported since the last call. Defaults to empty for implementations that don't capture
+    /// gestures.
+    fn take_parameter_edits(&mut self) -> Vec<ParameterEdit> {
+        Vec::new()
+    }
     /// Take the MIDI events the plugin has emitted since the last call. Defaults to empty
     /// for implementations that don't capture output MIDI (e.g. process isolation).
     fn take_output_events(&self) -> Vec<MidiEvent> {
@@ -821,6 +861,24 @@ impl Plugin {
         self.internal
             .as_ref()
             .map(|i| i.get_parameter_changes())
+            .unwrap_or_default()
+    }
+
+    /// Drain the ordered log of parameter-edit gestures the plugin's editor has reported since
+    /// the last call.
+    ///
+    /// This is the richer superset of [`Self::get_parameter_changes`]: rather than just the
+    /// value changes, it preserves the begin/change/end ordering of each gesture, so the host
+    /// can tell a deliberate, completed edit (`BeginGesture` … `ValueChange`* … `EndGesture`)
+    /// from a stream of intermediate drag values. Poll it regularly (e.g. each UI frame) while
+    /// the editor is open; an empty vector means nothing was reported. Works across process
+    /// isolation — gestures are marshalled back from the helper.
+    ///
+    /// See [`ParameterEdit`] / [`ParameterEditKind`].
+    pub fn take_parameter_edits(&mut self) -> Vec<ParameterEdit> {
+        self.internal
+            .as_mut()
+            .map(|i| i.take_parameter_edits())
             .unwrap_or_default()
     }
 
