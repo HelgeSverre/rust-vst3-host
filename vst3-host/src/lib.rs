@@ -75,6 +75,9 @@ pub mod backends;
 
 pub mod process_isolation;
 
+#[cfg(feature = "midi-input")]
+pub mod midi_input;
+
 mod internal;
 
 pub use audio::{
@@ -91,11 +94,15 @@ pub use embed::{EditorRect, EmbeddedEditor};
 pub use error::{Error, Result};
 pub use host::{DiscoveryProgress, ProbeResult, Vst3Host, Vst3HostBuilder};
 pub use midi::{cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId};
+#[cfg(feature = "midi-input")]
+pub use midi_input::{
+    bind_to_handle, connect, list_midi_input_ports, MidiInputConnection, MidiInputPort,
+};
 pub use parameters::{
     AutomationCurve, AutomationPoint, Parameter, ParameterAutomation, ParameterChange,
 };
 pub use playback::{
-    play_realtime_with_backend, play_with_backend, play_with_input_backend, AudioHandle,
+    play_realtime_with_backend, play_with_backend, play_with_input_backend, AudioHandle, MidiSink,
     RtAudioHandle,
 };
 pub use plugin::{Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode, WindowHandle};
@@ -123,6 +130,9 @@ pub mod prelude {
 
     #[cfg(feature = "cpal-backend")]
     pub use crate::backends::CpalBackend;
+
+    #[cfg(feature = "midi-input")]
+    pub use crate::midi_input::{MidiInputConnection, MidiInputPort};
 }
 
 #[cfg(test)]
