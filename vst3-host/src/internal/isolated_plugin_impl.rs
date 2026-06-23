@@ -193,6 +193,24 @@ impl PluginInternal for IsolatedPluginImpl {
         )
     }
 
+    fn set_tempo(&mut self, bpm: f64) -> Result<()> {
+        self.expect_success(HostCommand::SetTempo { bpm }, "SetTempo")
+    }
+
+    fn set_time_signature(&mut self, numerator: i32, denominator: i32) -> Result<()> {
+        self.expect_success(
+            HostCommand::SetTimeSignature {
+                numerator,
+                denominator,
+            },
+            "SetTimeSignature",
+        )
+    }
+
+    fn set_playing(&mut self, playing: bool) -> Result<()> {
+        self.expect_success(HostCommand::SetPlaying { playing }, "SetPlaying")
+    }
+
     fn get_parameter(&self, id: u32) -> Result<f64> {
         match self.send_command(HostCommand::GetParameter { id })? {
             HostResponse::ParameterValue { value } => Ok(value),

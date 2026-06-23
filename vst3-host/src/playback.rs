@@ -18,7 +18,7 @@ use crate::{
     error::{Error, Result},
     midi::MidiEvent,
     plugin::Plugin,
-    realtime::{RealtimePluginRunner, RtControl},
+    realtime::{RealtimePluginRunner, RtControl, TransportCommand},
 };
 
 /// Capacity of each lock-free side-channel ring between the UI/control thread and the audio
@@ -31,6 +31,7 @@ const SIDE_CHANNEL_CAPACITY: usize = 4096;
 enum HybridCommand {
     Midi(MidiEvent),
     Param { id: u32, value: f64 },
+    Transport(TransportCommand),
     Panic,
 }
 
@@ -67,6 +68,9 @@ impl AudioSideChannels {
                 }
                 HybridCommand::Param { id, value } => {
                     let _ = plugin.set_parameter(id, value);
+                }
+                HybridCommand::Transport(change) => {
+                    change.apply(plugin);
                 }
                 HybridCommand::Panic => {
                     let _ = plugin.midi_panic();
@@ -196,6 +200,57 @@ impl AudioHandle {
             .control_tx
             .lock()
             .map(|mut tx| tx.push(HybridCommand::Param { id, value }).is_ok())
+            .unwrap_or(false)
+    }
+
+    /// Queue a transport tempo change (BPM) without locking the audio thread; applied at the
+    /// start of the next block. `bpm` must be finite and greater than `0` (an invalid value is
+    /// rejected, returning `false`). Returns `false` if the ring is full.
+    pub fn set_tempo(&self, bpm: f64) -> bool {
+        if !(bpm.is_finite() && bpm > 0.0) {
+            return false;
+        }
+        self.ui
+            .control_tx
+            .lock()
+            .map(|mut tx| {
+                tx.push(HybridCommand::Transport(TransportCommand::Tempo(bpm)))
+                    .is_ok()
+            })
+            .unwrap_or(false)
+    }
+
+    /// Queue a transport time-signature change without locking the audio thread; applied at the
+    /// start of the next block. `denominator` must be one of `1, 2, 4, 8, 16` and `numerator`
+    /// must be positive (an invalid value is rejected, returning `false`). Returns `false` if
+    /// the ring is full.
+    pub fn set_time_signature(&self, numerator: i32, denominator: i32) -> bool {
+        if numerator <= 0 || !matches!(denominator, 1 | 2 | 4 | 8 | 16) {
+            return false;
+        }
+        self.ui
+            .control_tx
+            .lock()
+            .map(|mut tx| {
+                tx.push(HybridCommand::Transport(TransportCommand::TimeSignature(
+                    numerator,
+                    denominator,
+                )))
+                .is_ok()
+            })
+            .unwrap_or(false)
+    }
+
+    /// Queue a transport playing-state toggle without locking the audio thread; applied at the
+    /// start of the next block. Returns `false` if the ring is full.
+    pub fn set_playing(&self, playing: bool) -> bool {
+        self.ui
+            .control_tx
+            .lock()
+            .map(|mut tx| {
+                tx.push(HybridCommand::Transport(TransportCommand::Playing(playing)))
+                    .is_ok()
+            })
             .unwrap_or(false)
     }
 

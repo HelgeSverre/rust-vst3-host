@@ -61,6 +61,26 @@ pub enum HostCommand {
         /// Sample offset within the next processed block.
         offset: i32,
     },
+    /// Set the transport tempo (BPM) advertised in the plugin's host `ProcessContext`, taking
+    /// effect on the next processed block.
+    SetTempo {
+        /// Transport tempo in beats per minute (validated `> 0` on the host side).
+        bpm: f64,
+    },
+    /// Set the transport time signature advertised in the plugin's host `ProcessContext`,
+    /// taking effect on the next processed block.
+    SetTimeSignature {
+        /// Time signature numerator (validated `> 0` on the host side).
+        numerator: i32,
+        /// Time signature denominator (validated `1|2|4|8|16` on the host side).
+        denominator: i32,
+    },
+    /// Toggle the transport playing state (`kPlaying`) in the plugin's host `ProcessContext`,
+    /// taking effect on the next processed block.
+    SetPlaying {
+        /// Whether the transport is playing.
+        playing: bool,
+    },
     /// Read a parameter's current normalized value.
     GetParameter {
         /// Parameter id.
@@ -679,6 +699,38 @@ mod wire_tests {
                 assert_eq!(unit_id, 0);
                 assert_eq!(program_index, 17);
             }
+            other => panic!("round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transport_commands_round_trip_across_the_wire() {
+        // The runtime transport mutations must survive the JSON transport intact so the helper
+        // applies the same change the host requested.
+        let tempo = HostCommand::SetTempo { bpm: 137.5 };
+        let json = serde_json::to_string(&tempo).expect("serialize SetTempo");
+        match serde_json::from_str::<HostCommand>(&json).expect("deserialize SetTempo") {
+            HostCommand::SetTempo { bpm } => assert_eq!(bpm, 137.5),
+            other => panic!("round-trip changed the variant: {other:?}"),
+        }
+
+        let ts = HostCommand::SetTimeSignature {
+            numerator: 7,
+            denominator: 8,
+        };
+        let json = serde_json::to_string(&ts).expect("serialize SetTimeSignature");
+        match serde_json::from_str::<HostCommand>(&json).expect("deserialize SetTimeSignature") {
+            HostCommand::SetTimeSignature {
+                numerator,
+                denominator,
+            } => assert_eq!((numerator, denominator), (7, 8)),
+            other => panic!("round-trip changed the variant: {other:?}"),
+        }
+
+        let playing = HostCommand::SetPlaying { playing: false };
+        let json = serde_json::to_string(&playing).expect("serialize SetPlaying");
+        match serde_json::from_str::<HostCommand>(&json).expect("deserialize SetPlaying") {
+            HostCommand::SetPlaying { playing } => assert!(!playing),
             other => panic!("round-trip changed the variant: {other:?}"),
         }
     }
