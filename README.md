@@ -55,7 +55,7 @@ runtime-verified.
 
 ```toml
 [dependencies]
-vst3-host = "0.3"
+vst3-host = "0.4"
 ```
 
 No VST3 SDK or extra setup is required — the `vst3` dependency ships pre-generated bindings.
