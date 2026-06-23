@@ -107,8 +107,8 @@ pub use playback::{
     RtAudioHandle,
 };
 pub use plugin::{
-    ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode,
-    WindowHandle,
+    OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset,
+    PluginUnit, ProcessMode, WindowHandle,
 };
 pub use realtime::{RealtimePluginRunner, RtControl};
 pub use window::PluginWindow;

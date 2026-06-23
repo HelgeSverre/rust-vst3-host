@@ -6,7 +6,20 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- `Plugin::output_midi_handle()` returns an [`OutputMidiConsumer`] — a `Send` + `Sync` handle
+  for draining the MIDI a plugin emits (arpeggiators, MPE, thru) from any thread without locking
+  the audio thread. Pairs with `RealtimePluginRunner`: the lock-free runner previously had no way
+  to surface output MIDI; now you take the handle, move the plugin into the runner, and poll from
+  your UI thread while the audio thread pushes. In-process only (`None` under process isolation,
+  where output MIDI crosses the boundary in IPC responses).
+
 ### Changed
+
+- Output MIDI is now buffered in a lock-free bounded queue (`crossbeam-queue`) instead of an
+  `Arc<Mutex<Vec>>`, so capturing emitted events takes no lock on the audio thread (oldest event
+  dropped when full, as before).
 
 - `RealtimePluginRunner::process` is now allocation-free and `Drop`-free in steady state — no
   per-block heap allocation, reallocation, or free once warmed up, even while parameter changes

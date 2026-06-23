@@ -7,6 +7,7 @@ use crate::{
     parameters::{Parameter, ParameterChange},
     plugin::{PluginInfo, PluginInternal},
 };
+use crossbeam_queue::ArrayQueue;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use vst3::Steinberg::Vst::BusDirections_::*;
@@ -80,9 +81,10 @@ pub struct PluginImpl {
     input_events: ComWrapper<HostEventList>,
     output_events: ComWrapper<HostEventList>,
     // MIDI the plugin has emitted (captured from output_events after each process block,
-    // converted to MidiEvent), buffered for the host to poll. Capped to avoid unbounded
-    // growth if the host never reads it.
-    output_midi: Arc<Mutex<Vec<MidiEvent>>>,
+    // converted to MidiEvent), buffered for the host to poll. A lock-free bounded queue so the
+    // audio thread can push without locking and a UI thread can drain concurrently; when full
+    // the oldest event is dropped (bounded memory if the host never polls).
+    output_midi: Arc<ArrayQueue<MidiEvent>>,
 
     // Plugin view
     plugin_view: Option<ComPtr<IPlugView>>,
@@ -383,7 +385,7 @@ impl PluginImpl {
                 gui_param_changes_for_host: Arc::new(Mutex::new(Vec::new())),
                 input_events,
                 output_events,
-                output_midi: Arc::new(Mutex::new(Vec::with_capacity(MAX_OUTPUT_MIDI))),
+                output_midi: Arc::new(ArrayQueue::new(MAX_OUTPUT_MIDI)),
                 plugin_view: None,
                 plug_frame,
                 editor_resize,
@@ -961,23 +963,16 @@ impl PluginInternal for PluginImpl {
                 data.input_param_changes.clear_all();
 
                 // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
-                // Only touch the poll buffer if the plugin actually emitted something, and drain
-                // the event list in place (no `mem::take`) into the pre-reserved poll buffer, so
-                // the steady-state audio path allocates nothing even while output MIDI flows.
+                // Drain the event list in place (no `mem::take`) and push each converted event
+                // into the lock-free output queue with `force_push`, which drops the oldest event
+                // when full. No lock and no allocation on the audio thread even while MIDI flows.
                 if !self.output_events.is_empty() {
-                    if let Ok(mut out) = self.output_midi.lock() {
-                        self.output_events.for_each_then_clear(|e| {
-                            if let Some(m) = event_to_midi(e) {
-                                out.push(m);
-                            }
-                        });
-                        // Cap the buffer so a host that never polls can't grow it forever (drain
-                        // shifts in place; MidiEvent is plain data so dropped entries don't free).
-                        if out.len() > MAX_OUTPUT_MIDI {
-                            let drop = out.len() - MAX_OUTPUT_MIDI;
-                            out.drain(0..drop);
+                    let out = &self.output_midi;
+                    self.output_events.for_each_then_clear(|e| {
+                        if let Some(m) = event_to_midi(e) {
+                            out.force_push(m);
                         }
-                    }
+                    });
                 }
 
                 // Copy output to provided buffers (length-clamped to the actual frames).
@@ -1508,10 +1503,17 @@ impl PluginInternal for PluginImpl {
     }
 
     fn take_output_events(&self) -> Vec<MidiEvent> {
-        self.output_midi
-            .lock()
-            .map(|mut o| std::mem::take(&mut *o))
-            .unwrap_or_default()
+        let mut out = Vec::new();
+        while let Some(event) = self.output_midi.pop() {
+            out.push(event);
+        }
+        out
+    }
+
+    fn output_midi_handle(&self) -> Option<crate::plugin::OutputMidiConsumer> {
+        Some(crate::plugin::OutputMidiConsumer::from_queue(
+            self.output_midi.clone(),
+        ))
     }
 
     fn take_editor_resize_request(&self) -> Option<(i32, i32)> {

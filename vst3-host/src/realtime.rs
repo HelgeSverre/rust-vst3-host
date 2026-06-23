@@ -92,10 +92,13 @@ enum RtCommand {
 /// guarantee the *plugin's* own `process()` is allocation-free — that is the plugin's
 /// responsibility; the guarantee is about the host code around it.
 ///
-/// It is **not yet lock-free**: `process` still takes a few short, uncontended mutexes per
-/// block (the parameter-change and event queues, and the level meter). They are uncontended
+/// It is **not yet fully lock-free**: `process` still takes a few short, uncontended mutexes
+/// per block (the parameter-change and event queues, and the level meter). They are uncontended
 /// while the runner owns the plugin, but a hard-real-time deployment should treat lock removal
-/// as pending work.
+/// as pending work. Output MIDI is already lock-free, though: take a
+/// [`OutputMidiConsumer`](crate::OutputMidiConsumer) via
+/// [`Plugin::output_midi_handle`](crate::Plugin::output_midi_handle) before moving the plugin
+/// into the runner, then drain emitted events from your UI thread while the audio thread pushes.
 pub struct RealtimePluginRunner {
     plugin: Plugin,
     rx: Consumer<RtCommand>,
