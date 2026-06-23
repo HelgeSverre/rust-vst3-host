@@ -73,9 +73,10 @@ machine. So the runtime default stays in-process, and isolation is something you
 The `process-isolation` feature is on by default so the helper *builds* without extra
 flags — but loading is in-process unless you call `with_process_isolation(true)`.
 
-Parameters, audio, plugin state (`save_state`/`load_state`), and **MIDI the plugin emits**
-(`take_output_midi`) all marshal across the boundary, so an isolated `Plugin` behaves like an
-in-process one for those.
+Parameters, audio, plugin state (`save_state`/`load_state`), **MIDI the plugin emits**
+(`take_output_midi`), and **per-note expression / MPE** (`note_on` / `send_note_expression`)
+all marshal across the boundary, so an isolated `Plugin` behaves like an in-process one for
+those.
 
 ## Recovery
 

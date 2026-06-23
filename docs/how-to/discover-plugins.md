@@ -41,6 +41,77 @@ for info in host.discover_plugins()? {
 > is slower than `scan_plugin_paths()` and can be affected by a misbehaving plugin. For a
 > startup picker, prefer `scan_plugin_paths()` and load on demand.
 
+## Crash-resistant discovery
+
+`discover_plugins()` instantiates every plugin **in-process**, so one that `abort()`s or
+makes a pure-virtual call during init takes the whole scan down with it.
+`discover_plugins_safe()` introspects each plugin in a throwaway child process
+(`vst3-host-probe`): a crashing plugin kills only its probe, and the scan completes anyway.
+It returns a [`SafeDiscoveryReport`](https://docs.rs/vst3-host/latest/vst3_host/struct.SafeDiscoveryReport.html)
+with the plugins that introspected cleanly (`plugins`) and a record of every one that was
+skipped and why (`skipped`).
+
+```rust
+use vst3_host::{Vst3Host, SafeDiscoverySkip};
+
+# fn main() -> vst3_host::Result<()> {
+let host = Vst3Host::builder().scan_default_paths().build()?;
+let report = host.discover_plugins_safe();
+
+for detailed in &report.plugins {
+    println!("{} by {}", detailed.info.name, detailed.factory.vendor);
+}
+for skip in &report.skipped {
+    let reason = match skip {
+        SafeDiscoverySkip::Crashed { detail, .. } => format!("crashed: {detail}"),
+        SafeDiscoverySkip::TimedOut { .. } => "timed out".to_string(),
+        SafeDiscoverySkip::Failed { detail, .. } => format!("failed: {detail}"),
+    };
+    eprintln!("skipped {}: {reason}", skip.path().display());
+}
+# Ok(())
+# }
+```
+
+The trade-off is speed: one process spawn per plugin, so this is slower than the in-process
+path. Use it to scan an untrusted folder; keep `discover_plugins()` when you trust the
+plugins.
+
+Each probe has a timeout (default
+[`DEFAULT_PROBE_TIMEOUT`](https://docs.rs/vst3-host/latest/vst3_host/constant.DEFAULT_PROBE_TIMEOUT.html),
+10s). Override it with `Vst3HostBuilder::probe_timeout`:
+
+```rust
+use std::time::Duration;
+use vst3_host::Vst3Host;
+
+# fn main() -> vst3_host::Result<()> {
+let host = Vst3Host::builder()
+    .scan_default_paths()
+    .probe_timeout(Duration::from_secs(3))
+    .build()?;
+let report = host.discover_plugins_safe();
+# let _ = report;
+# Ok(())
+# }
+```
+
+To probe a single known path out-of-process, use
+[`discovery::probe_plugin_info_isolated`](https://docs.rs/vst3-host/latest/vst3_host/discovery/fn.probe_plugin_info_isolated.html):
+
+```rust
+use std::time::Duration;
+
+# fn main() -> vst3_host::Result<()> {
+let detailed = vst3_host::discovery::probe_plugin_info_isolated(
+    std::path::Path::new("/path/plugin.vst3"),
+    Duration::from_secs(10),
+)?;
+# let _ = detailed;
+# Ok(())
+# }
+```
+
 ## Add custom scan locations
 
 ```rust
