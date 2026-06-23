@@ -37,6 +37,9 @@ rtrb = "0.3"
 cpal = { version = "0.18", optional = true }
 egui = { version = "0.34", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
+# MIDI input device binding (live hardware/virtual MIDI ports). 0.11 matches the inspector and
+# accepts alsa <0.12, so on Linux it shares cpal 0.18's alsa (one alsa-sys, no `links` conflict).
+midir = { version = "0.11", optional = true }
 
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -75,6 +78,8 @@ default = ["cpal-backend", "process-isolation"]
 cpal-backend = ["cpal"]
 process-isolation = []
 egui-widgets = ["egui", "raw-window-handle"]
+# Bind a live MIDI input device (hardware/virtual port) and forward parsed events.
+midi-input = ["dep:midir"]
 
 [dev-dependencies]
 env_logger = "0.11"
