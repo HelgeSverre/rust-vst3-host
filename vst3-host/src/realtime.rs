@@ -73,8 +73,29 @@ enum RtCommand {
 }
 
 /// Owns a [`Plugin`] on the audio thread and applies queued control commands before each
-/// process block, with no locking on the audio path. Pair with an [`RtControl`] (returned
-/// from [`Self::new`]) to drive it from other threads.
+/// process block. Pair with an [`RtControl`] (returned from [`Self::new`]) to drive it from
+/// other threads.
+///
+/// # Real-time safety
+///
+/// In steady state [`process`](Self::process) is **allocation-free and `Drop`-free**: once
+/// warmed up it performs no heap allocation, reallocation, or free per block, even while
+/// parameter changes and MIDI (in and out) are flowing. This holds under two conditions:
+///
+/// - **Fixed buffer size** — pass an [`AudioBuffers`] sized to the configured block size and
+///   don't resize it between calls (a smaller block is fine; growth reallocates).
+/// - **In-process** — the runner hosts the plugin in-process; the process-isolation path
+///   marshals audio over IPC and is not allocation-free.
+///
+/// This is verified by `tests/alloc_tests.rs` (a counting global allocator asserts zero
+/// alloc/realloc/free over a steady-state run driving parameters and MIDI). The host cannot
+/// guarantee the *plugin's* own `process()` is allocation-free — that is the plugin's
+/// responsibility; the guarantee is about the host code around it.
+///
+/// It is **not yet lock-free**: `process` still takes a few short, uncontended mutexes per
+/// block (the parameter-change and event queues, and the level meter). They are uncontended
+/// while the runner owns the plugin, but a hard-real-time deployment should treat lock removal
+/// as pending work.
 pub struct RealtimePluginRunner {
     plugin: Plugin,
     rx: Consumer<RtCommand>,

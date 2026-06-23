@@ -6,6 +6,17 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- `RealtimePluginRunner::process` is now allocation-free and `Drop`-free in steady state — no
+  per-block heap allocation, reallocation, or free once warmed up, even while parameter changes
+  and MIDI (in and out) flow — given a fixed-size buffer and an in-process plugin. Fixed the
+  three steady-state churns: `pending_param_changes` (drained in place instead of `mem::take`),
+  the per-block `ParameterValueQueue` recreation (now a reuse pool), and output-MIDI capture
+  (drained in place into a pre-reserved buffer). Guarded by `tests/alloc_tests.rs`. Not yet
+  lock-free (a few short, uncontended mutexes remain per block); see the `RealtimePluginRunner`
+  docs.
+
 ## [0.5.0] - 2026-06-23
 
 ### Added

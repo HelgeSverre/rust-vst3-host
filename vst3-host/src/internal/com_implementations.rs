@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::ptr;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use vst3::{Class, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 
@@ -626,15 +627,24 @@ impl HostEventList {
         }
     }
 
-    /// Take all events out of the list, leaving it empty. Used to read the events a
-    /// plugin emitted into its output event list during `process()`.
-    pub fn drain(&self) -> Vec<Event> {
-        match self.events.lock() {
-            Ok(mut events) => std::mem::take(&mut *events),
-            Err(_) => {
-                log::error!("HostEventList: Failed to lock events for drain");
-                Vec::new()
+    /// True if the list currently holds no events.
+    pub fn is_empty(&self) -> bool {
+        self.events
+            .lock()
+            .map(|events| events.is_empty())
+            .unwrap_or(true)
+    }
+
+    /// Visit each event in order, then clear the list in place (retaining its capacity).
+    /// The allocation-free equivalent of [`drain`](Self::drain) — `drain` returns an owned
+    /// `Vec` via `mem::take`, leaving a zero-capacity buffer the plugin then reallocates; this
+    /// keeps the buffer, so reading the plugin's per-block output events allocates nothing.
+    pub fn for_each_then_clear(&self, mut f: impl FnMut(&Event)) {
+        if let Ok(mut events) = self.events.lock() {
+            for e in events.iter() {
+                f(e);
             }
+            events.clear();
         }
     }
 
@@ -736,13 +746,21 @@ pub fn create_event_list() -> ComWrapper<HostEventList> {
 
 // Parameter Changes implementation
 pub struct ParameterChanges {
+    /// A pool of queue objects. Entries `[0, used)` are active this block; entries `[used, len)`
+    /// are recycled — kept allocated and reused across blocks rather than dropped, so the
+    /// steady-state audio path never allocates a `ComWrapper`. The pool only ever grows, bounded
+    /// by the number of distinct parameters changed within a single block.
     pub queues: Mutex<Vec<ComWrapper<ParameterValueQueue>>>,
+    /// Number of active queues this block (`<= queues.len()`). Mutated only under the `queues`
+    /// lock, so the pair stays consistent.
+    used: AtomicUsize,
 }
 
 impl Default for ParameterChanges {
     fn default() -> Self {
         Self {
             queues: Mutex::new(Vec::new()),
+            used: AtomicUsize::new(0),
         }
     }
 }
@@ -750,24 +768,35 @@ impl Default for ParameterChanges {
 impl ParameterChanges {
     /// Host-side: queue a parameter change point for the next process block. The processor
     /// reads these from `inputParameterChanges` during `process()`. Points for the same id
-    /// share one queue and are kept ordered by sample offset.
+    /// share one queue and are kept ordered by sample offset. Reuses a pooled queue object
+    /// rather than allocating, so this is allocation-free in steady state once the pool has
+    /// grown to the per-block working set.
     pub fn enqueue(&self, id: u32, sample_offset: i32, value: f64) {
         if let Ok(mut queues) = self.queues.lock() {
-            if let Some(idx) = queues.iter().position(|q| q.param_id == id) {
-                queues[idx].insert_point(sample_offset, value);
+            let used = self.used.load(Ordering::Relaxed);
+            // Merge into an already-active queue for this id (e.g. several offsets in one block).
+            if let Some(q) = queues[..used].iter().find(|q| q.param_id() == id) {
+                q.insert_point(sample_offset, value);
+                return;
+            }
+            // Otherwise activate a slot: recycle a pooled queue if one exists, else grow once.
+            if used < queues.len() {
+                queues[used].reset(id);
+                queues[used].insert_point(sample_offset, value);
             } else {
                 let q = ComWrapper::new(ParameterValueQueue::new(id));
                 q.insert_point(sample_offset, value);
                 queues.push(q);
             }
+            self.used.store(used + 1, Ordering::Relaxed);
         }
     }
 
-    /// Drop all queued changes. Call after each `process()` block so values don't re-stick.
+    /// Forget all queued changes. Call after each `process()` block so values don't re-stick.
+    /// Only resets the active count — the queue objects are retained for reuse (their points are
+    /// cleared when a slot is recycled), so this allocates and drops nothing.
     pub fn clear_all(&self) {
-        if let Ok(mut queues) = self.queues.lock() {
-            queues.clear();
-        }
+        self.used.store(0, Ordering::Relaxed);
     }
 }
 
@@ -778,8 +807,9 @@ impl Class for ParameterChanges {
 impl IParameterChangesTrait for ParameterChanges {
     unsafe fn getParameterCount(&self) -> i32 {
         match self.queues.lock() {
-            Ok(queues) => {
-                let count = queues.len() as i32;
+            Ok(_queues) => {
+                // Only the active slots, not the recycled pool capacity.
+                let count = self.used.load(Ordering::Relaxed) as i32;
                 log::trace!(
                     "Internal ParameterChanges: getParameterCount returning {}",
                     count
@@ -806,7 +836,9 @@ impl IParameterChangesTrait for ParameterChanges {
 
         match self.queues.lock() {
             Ok(queues) => {
-                if let Some(queue) = queues.get(index as usize) {
+                let used = self.used.load(Ordering::Relaxed);
+                if (index as usize) < used {
+                    let queue = &queues[index as usize];
                     match queue.to_com_ptr::<IParamValueQueue>() {
                         Some(ptr) => {
                             log::trace!("Internal ParameterChanges: getParameterData returning queue for index {}", index);
@@ -818,7 +850,7 @@ impl IParameterChangesTrait for ParameterChanges {
                         }
                     }
                 } else {
-                    log::warn!("Internal ParameterChanges: getParameterData index {} out of bounds (count: {})", index, queues.len());
+                    log::warn!("Internal ParameterChanges: getParameterData index {} out of bounds (count: {})", index, used);
                     ptr::null_mut()
                 }
             }
@@ -841,9 +873,10 @@ impl IParameterChangesTrait for ParameterChanges {
 
         match self.queues.lock() {
             Ok(mut queues) => {
-                // Check if queue for this parameter already exists
-                for (i, queue) in queues.iter().enumerate() {
-                    if queue.param_id == param_id {
+                let used = self.used.load(Ordering::Relaxed);
+                // Reuse an already-active queue for this parameter if present.
+                for (i, queue) in queues[..used].iter().enumerate() {
+                    if queue.param_id() == param_id {
                         if !index.is_null() {
                             *index = i as i32;
                         }
@@ -861,9 +894,13 @@ impl IParameterChangesTrait for ParameterChanges {
                     }
                 }
 
-                // Create new queue
-                let new_queue = ComWrapper::new(ParameterValueQueue::new(param_id));
-                let queue_ptr = new_queue
+                // Activate a slot: recycle a pooled queue if one exists, else grow once.
+                if used == queues.len() {
+                    queues.push(ComWrapper::new(ParameterValueQueue::new(param_id)));
+                } else {
+                    queues[used].reset(param_id);
+                }
+                let queue_ptr = queues[used]
                     .to_com_ptr::<IParamValueQueue>()
                     .map(|ptr| ptr.into_raw())
                     .unwrap_or_else(|| {
@@ -874,12 +911,15 @@ impl IParameterChangesTrait for ParameterChanges {
                     });
 
                 if !index.is_null() {
-                    *index = queues.len() as i32;
+                    *index = used as i32;
                 }
 
-                queues.push(new_queue);
-                let new_count = queues.len();
-                log::trace!("Internal ParameterChanges: Created new queue for parameter {}, total count: {}", param_id, new_count);
+                self.used.store(used + 1, Ordering::Relaxed);
+                log::trace!(
+                    "Internal ParameterChanges: Activated queue for parameter {}, active count: {}",
+                    param_id,
+                    used + 1
+                );
                 queue_ptr
             }
             Err(_) => {
@@ -894,15 +934,32 @@ impl IParameterChangesTrait for ParameterChanges {
 
 // Parameter Value Queue implementation
 pub struct ParameterValueQueue {
-    pub param_id: u32,
+    // Atomic so a pooled queue can be re-targeted to a different parameter (see `reset`) without
+    // dropping and reallocating the ComWrapper each block.
+    pub param_id: AtomicU32,
     pub points: Mutex<Vec<(i32, f64)>>, // sample offset, value
 }
 
 impl ParameterValueQueue {
     pub fn new(param_id: u32) -> Self {
         Self {
-            param_id,
+            param_id: AtomicU32::new(param_id),
             points: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// This queue's current parameter id.
+    pub fn param_id(&self) -> u32 {
+        self.param_id.load(Ordering::Relaxed)
+    }
+
+    /// Re-target a pooled queue to a new parameter, clearing its points in place (keeping the
+    /// `points` Vec's capacity). Used when recycling a queue object for a different parameter so
+    /// the steady-state path allocates nothing.
+    fn reset(&self, param_id: u32) {
+        self.param_id.store(param_id, Ordering::Relaxed);
+        if let Ok(mut points) = self.points.lock() {
+            points.clear();
         }
     }
 
@@ -925,7 +982,7 @@ impl Class for ParameterValueQueue {
 
 impl IParamValueQueueTrait for ParameterValueQueue {
     unsafe fn getParameterId(&self) -> u32 {
-        self.param_id
+        self.param_id.load(Ordering::Relaxed)
     }
 
     unsafe fn getPointCount(&self) -> i32 {
@@ -1085,9 +1142,9 @@ mod parameter_changes_tests {
         assert_eq!(unsafe { pc.getParameterCount() }, 2);
         {
             let queues = pc.queues.lock().unwrap();
-            let q7 = queues.iter().find(|q| q.param_id == 7).unwrap();
+            let q7 = queues.iter().find(|q| q.param_id() == 7).unwrap();
             assert_eq!(*q7.points.lock().unwrap(), vec![(0, 0.5), (64, 0.9)]);
-            let q3 = queues.iter().find(|q| q.param_id == 3).unwrap();
+            let q3 = queues.iter().find(|q| q.param_id() == 3).unwrap();
             assert_eq!(*q3.points.lock().unwrap(), vec![(0, 0.1)]);
         }
 
@@ -1108,7 +1165,7 @@ mod parameter_changes_tests {
         pc.enqueue(1, 64, f64::NAN);
 
         let queues = pc.queues.lock().unwrap();
-        let q = queues.iter().find(|q| q.param_id == 1).unwrap();
+        let q = queues.iter().find(|q| q.param_id() == 1).unwrap();
         let points = q.points.lock().unwrap();
         let offsets: Vec<i32> = points.iter().map(|(off, _)| *off).collect();
         assert_eq!(offsets, vec![0, 64, 128]);
