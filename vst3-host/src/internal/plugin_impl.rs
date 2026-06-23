@@ -1164,15 +1164,14 @@ impl PluginInternal for PluginImpl {
                     vst_event.__field0.polyPressure.pressure = pressure as f32 / 127.0;
                     vst_event.__field0.polyPressure.noteId = -1;
                 }
-                MidiEvent::ProgramChange { .. } => {
-                    // VST3 has no MIDI program-change event; programs are switched via
-                    // IUnitInfo program-list parameters, which requires per-plugin unit
-                    // handling not yet implemented.
-                    return Err(Error::MidiError(
-                        "ProgramChange is not supported yet (VST3 routes programs through \
-                         IUnitInfo program lists, not MIDI events)"
-                            .to_string(),
-                    ));
+                MidiEvent::ProgramChange { program, .. } => {
+                    // VST3 has no MIDI program-change event; a program change is routed to the
+                    // root unit's (id 0) program-change parameter via IUnitInfo. The MIDI
+                    // channel does not map cleanly to a VST3 unit, so we target the root unit
+                    // regardless of channel. select_program drives the controller + processor
+                    // queue itself, so we return directly rather than falling through to the
+                    // event-list add below.
+                    return self.select_program(0, program as i32);
                 }
             }
 
@@ -1556,6 +1555,26 @@ impl PluginInternal for PluginImpl {
         }
     }
 
+    fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
+        let (param_id, program_count) = self.resolve_program_change(unit_id)?;
+        if program_index < 0 || program_index >= program_count {
+            return Err(Error::InvalidParameter(format!(
+                "program index {program_index} out of range for unit {unit_id} \
+                 ({program_count} programs)"
+            )));
+        }
+        // VST3 maps a discrete program list onto the program-change parameter's normalized
+        // 0..1 range: index N of a count-C list is N / (C-1). A single-program list maps to 0.
+        let normalized = if program_count > 1 {
+            program_index as f64 / (program_count - 1) as f64
+        } else {
+            0.0
+        };
+        // Drive both halves (controller for display, processor queue for the DSP), exactly as
+        // set_parameter does — a program change is just a parameter change in VST3.
+        self.set_parameter_at(param_id, normalized, 0)
+    }
+
     fn output_channel_count(&self) -> usize {
         unsafe {
             let bus_count = self.component.getBusCount(kAudio as i32, kOutput as i32);
@@ -1691,6 +1710,78 @@ pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
 }
 
 impl PluginImpl {
+    /// Resolve a unit's program-change parameter for [`PluginInternal::select_program`].
+    ///
+    /// Returns `(param_id, program_count)`: the id of the controller parameter that switches
+    /// programs for `unit_id` (the parameter tied to that unit carrying the VST3
+    /// `kIsProgramChange` flag), and the number of programs in the unit's program list. Errors
+    /// if the plugin has no `IUnitInfo`, the unit is unknown, it has no (non-empty) program
+    /// list, or no program-change parameter is found for it.
+    fn resolve_program_change(&self, unit_id: i32) -> Result<(u32, i32)> {
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| Error::InterfaceError("No controller available".to_string()))?;
+        let unit_info = controller.cast::<IUnitInfo>().ok_or_else(|| {
+            Error::Other("Plugin does not implement IUnitInfo (no program lists)".to_string())
+        })?;
+        unsafe {
+            // Find the unit and its program list id.
+            let unit_count = unit_info.getUnitCount();
+            let mut program_list_id = None;
+            for i in 0..unit_count {
+                let mut ui: UnitInfo = std::mem::zeroed();
+                if unit_info.getUnitInfo(i, &mut ui) == kResultOk && ui.id == unit_id {
+                    program_list_id = Some(ui.programListId);
+                    break;
+                }
+            }
+            let Some(program_list_id) = program_list_id else {
+                return Err(Error::InvalidParameter(format!(
+                    "unknown unit id {unit_id}"
+                )));
+            };
+
+            // Look up the program count for that list.
+            let list_count = unit_info.getProgramListCount();
+            let mut program_count = None;
+            for i in 0..list_count {
+                let mut pl: ProgramListInfo = std::mem::zeroed();
+                if unit_info.getProgramListInfo(i, &mut pl) == kResultOk && pl.id == program_list_id
+                {
+                    program_count = Some(pl.programCount);
+                    break;
+                }
+            }
+            let program_count = match program_count {
+                Some(c) if c > 0 => c,
+                _ => {
+                    return Err(Error::InvalidParameter(format!(
+                        "unit {unit_id} has no program list"
+                    )))
+                }
+            };
+
+            // The program-change parameter is the controller parameter tied to this unit
+            // (matching unitId) carrying the kIsProgramChange flag.
+            let count = controller.getParameterCount();
+            for i in 0..count {
+                let mut info: ParameterInfo = std::mem::zeroed();
+                if controller.getParameterInfo(i, &mut info) != kResultOk {
+                    continue;
+                }
+                let is_program_change =
+                    (info.flags & ParameterInfo_::ParameterFlags_::kIsProgramChange) != 0;
+                if is_program_change && info.unitId == unit_id {
+                    return Ok((info.id, program_count));
+                }
+            }
+            Err(Error::Other(format!(
+                "unit {unit_id} has a program list but no program-change parameter"
+            )))
+        }
+    }
+
     /// Send a legacy MIDI CC event
     fn send_legacy_midi_cc(
         &mut self,

@@ -263,9 +263,9 @@ impl MidiEvent {
     /// by a MIDI input device.
     ///
     /// Maps Note On/Off (a Note On with velocity 0 becomes a Note Off), Control Change,
-    /// Pitch Bend (14-bit), and channel/poly aftertouch. Returns `None` for empty/truncated
-    /// input, running-status messages (no leading status byte), system/realtime/SysEx
-    /// messages, and Program Change (which the library doesn't forward).
+    /// Pitch Bend (14-bit), channel/poly aftertouch, and Program Change. Returns `None` for
+    /// empty/truncated input, running-status messages (no leading status byte), and
+    /// system/realtime/SysEx messages.
     pub fn from_midi_bytes(bytes: &[u8]) -> Option<MidiEvent> {
         let status = *bytes.first()?;
         // Require a channel-voice status byte (0x80..=0xEF); reject data bytes (running status)
@@ -317,7 +317,10 @@ impl MidiEvent {
                 let value = (d2()? as u16) << 7 | d1()? as u16;
                 Some(MidiEvent::PitchBend { channel, value })
             }
-            // 0xC0 ProgramChange is intentionally not forwarded.
+            0xC0 => Some(MidiEvent::ProgramChange {
+                channel,
+                program: d1()?,
+            }),
             _ => None,
         }
     }
@@ -600,8 +603,28 @@ mod tests {
         assert_eq!(MidiEvent::from_midi_bytes(&[0x60]), None); // data byte, not status
         assert_eq!(MidiEvent::from_midi_bytes(&[0xF8]), None); // realtime clock
         assert_eq!(MidiEvent::from_midi_bytes(&[0xF0, 1, 2]), None); // sysex
-        assert_eq!(MidiEvent::from_midi_bytes(&[0xC0, 5]), None); // program change (not forwarded)
         assert_eq!(MidiEvent::from_midi_bytes(&[0x90, 60]), None); // truncated note on
+    }
+
+    #[test]
+    fn from_midi_bytes_maps_program_change() {
+        assert_eq!(
+            MidiEvent::from_midi_bytes(&[0xC0, 5]),
+            Some(MidiEvent::ProgramChange {
+                channel: MidiChannel::Ch1,
+                program: 5
+            })
+        );
+        // Channel is taken from the low nibble; the program byte is masked to 7 bits.
+        assert_eq!(
+            MidiEvent::from_midi_bytes(&[0xC9, 0xFF]),
+            Some(MidiEvent::ProgramChange {
+                channel: MidiChannel::Ch10,
+                program: 127
+            })
+        );
+        // Truncated (no program byte) is rejected.
+        assert_eq!(MidiEvent::from_midi_bytes(&[0xC0]), None);
     }
 
     #[test]

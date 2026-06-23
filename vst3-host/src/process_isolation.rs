@@ -132,6 +132,13 @@ pub enum HostCommand {
         /// Channel index.
         channel: i16,
     },
+    /// Select a program in a unit's program list (`IUnitInfo`).
+    SelectProgram {
+        /// Unit id (the root unit is `0`).
+        unit_id: i32,
+        /// 0-based index into the unit's program list.
+        program_index: i32,
+    },
     /// Shutdown the helper process
     Shutdown,
 }
@@ -631,6 +638,26 @@ mod wire_tests {
                 assert_eq!(id, 42);
                 assert_eq!(value, 0.75);
                 assert_eq!(offset, 256);
+            }
+            other => panic!("round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_program_round_trips_across_the_wire() {
+        // Program selection must survive the JSON transport host and helper share.
+        let cmd = HostCommand::SelectProgram {
+            unit_id: 0,
+            program_index: 17,
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize SelectProgram");
+        match serde_json::from_str::<HostCommand>(&json).expect("deserialize SelectProgram") {
+            HostCommand::SelectProgram {
+                unit_id,
+                program_index,
+            } => {
+                assert_eq!(unit_id, 0);
+                assert_eq!(program_index, 17);
             }
             other => panic!("round-trip changed the variant: {other:?}"),
         }

@@ -204,6 +204,14 @@ pub(crate) trait PluginInternal: Send {
     fn get_units(&self) -> Result<Vec<PluginUnit>> {
         Ok(Vec::new())
     }
+    /// Select a program in a unit's program list. Defaults to unsupported (e.g. plugins
+    /// without `IUnitInfo`); implementations resolve the unit's program-change parameter and
+    /// set it to the index's normalized value.
+    fn select_program(&mut self, _unit_id: i32, _program_index: i32) -> Result<()> {
+        Err(Error::Other(
+            "program selection is not supported for this plugin".to_string(),
+        ))
+    }
     /// Processing latency in samples (`IAudioProcessor::getLatencySamples`). Defaults to 0.
     fn latency_samples(&self) -> u32 {
         0
@@ -421,6 +429,26 @@ impl Plugin {
             .as_ref()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .get_units()
+    }
+
+    /// Select a program (preset) in a unit's program list (`IUnitInfo`).
+    ///
+    /// `unit_id` is a [`PluginUnit::id`] from [`get_units`](Self::get_units) (the root unit is
+    /// `0`); `program_index` is a 0-based index into that unit's [`PluginUnit::programs`].
+    /// Internally this locates the unit's program-change parameter (the controller parameter
+    /// tied to the unit with the VST3 `kIsProgramChange` flag) and sets it to the normalized
+    /// value `program_index / max(1, program_count - 1)`, driving both the controller (for the
+    /// editor/display) and the processor (for the audio DSP).
+    ///
+    /// Returns an error for an unknown unit, a unit with no program list, an out-of-range
+    /// index, a plugin that doesn't implement `IUnitInfo`, or a plugin running under process
+    /// isolation only if the helper cannot resolve the unit. Works both in-process and across
+    /// the isolation boundary.
+    pub fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .select_program(unit_id, program_index)
     }
 
     /// The plugin's reported processing latency in samples (e.g. from look-ahead or

@@ -312,6 +312,15 @@ fn handle(
                 Err(e) => err("NoteExpressions", e),
             })
         }
+        HostCommand::SelectProgram {
+            unit_id,
+            program_index,
+        } => with(plugin, |p| match p.select_program(unit_id, program_index) {
+            Ok(()) => HostResponse::Success {
+                message: "program selected".to_string(),
+            },
+            Err(e) => err("SelectProgram", e),
+        }),
         HostCommand::CreateGui => gui_request(gui, true),
         HostCommand::CloseGui => gui_request(gui, false),
         HostCommand::Shutdown => HostResponse::Success {

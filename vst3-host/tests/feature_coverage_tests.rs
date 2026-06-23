@@ -209,6 +209,94 @@ fn test_note_expression_bends_pitch_isolated() {
     );
 }
 
+/// Same as [`load_dexed`], but runs the plugin out-of-process (process isolation).
+#[cfg(feature = "process-isolation")]
+fn load_dexed_isolated() -> Option<(Vst3Host, Plugin)> {
+    let path = dexed_path()?;
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .with_process_isolation(true)
+        .build()
+        .expect("build isolated host");
+    let plugin = host.load_plugin(path).expect("load Dexed (isolated)");
+    Some((host, plugin))
+}
+
+/// Program selection through `IUnitInfo` against Dexed (32 cartridge programs on the root
+/// unit). Selecting a valid program succeeds; out-of-range and unknown-unit selections are
+/// rejected; and a `ProgramChange` MIDI event is honored (routed to the root unit).
+#[test]
+#[ignore = "Requires the bundled Dexed plugin"]
+fn test_program_selection() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed() else {
+        return;
+    };
+
+    let units = plugin.get_units().expect("get_units");
+    let Some(unit) = units.iter().find(|u| !u.programs.is_empty()).cloned() else {
+        println!("Plugin exposes no program list, skipping");
+        return;
+    };
+    let count = unit.programs.len();
+    println!("Unit {} has {count} programs", unit.id);
+    assert!(count >= 2, "expected a multi-program unit");
+
+    plugin
+        .select_program(unit.id, (count - 1) as i32)
+        .expect("select last program");
+    plugin
+        .select_program(unit.id, 0)
+        .expect("select first program");
+
+    assert!(
+        plugin.select_program(unit.id, count as i32).is_err(),
+        "an out-of-range index must be rejected"
+    );
+    assert!(plugin.select_program(unit.id, -1).is_err());
+    assert!(
+        plugin.select_program(9999, 0).is_err(),
+        "an unknown unit must be rejected"
+    );
+
+    plugin
+        .send_midi_event(MidiEvent::ProgramChange {
+            channel: MidiChannel::Ch1,
+            program: 0,
+        })
+        .expect("ProgramChange should be honored (routed to the root unit)");
+}
+
+/// Program selection across the *process-isolation* boundary: the helper owns Dexed, and
+/// `select_program` marshaled over IPC switches a program (and rejects a bad index).
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the bundled Dexed plugin and the helper binary"]
+fn test_program_selection_isolated() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed_isolated() else {
+        return;
+    };
+
+    let units = plugin.get_units().expect("get_units over IPC");
+    // get_units is not yet bridged across isolation, so fall back to the known root unit.
+    let (unit_id, count) = units
+        .iter()
+        .find(|u| !u.programs.is_empty())
+        .map(|u| (u.id, u.programs.len() as i32))
+        .unwrap_or((0, 32));
+    println!("isolated unit {unit_id} reports {count} programs");
+
+    plugin
+        .select_program(unit_id, 1)
+        .expect("select_program over IPC");
+    assert!(
+        plugin.select_program(unit_id, count + 1000).is_err(),
+        "an out-of-range index must be rejected across IPC"
+    );
+}
+
 /// Pick a writable, automatable parameter (falling back to the first one).
 fn pick_writable_param(plugin: &mut Plugin) -> Parameter {
     let params = plugin.get_parameters().expect("get_parameters");
