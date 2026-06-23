@@ -31,12 +31,45 @@
 use crate::{audio::AudioBuffers, error::Result, midi::MidiEvent, plugin::Plugin};
 use rtrb::{Consumer, Producer, RingBuffer};
 
+/// A runtime transport change applied to the plugin's host `ProcessContext` on the audio
+/// thread, taking effect on the next block. Shared by the lock-free runner and the
+/// mutex-based playback path so both apply transport mutation the same way.
+#[derive(Clone, Copy)]
+pub(crate) enum TransportCommand {
+    /// Set the transport tempo (BPM).
+    Tempo(f64),
+    /// Set the transport time signature (`numerator`, `denominator`).
+    TimeSignature(i32, i32),
+    /// Toggle the transport playing state.
+    Playing(bool),
+}
+
+impl TransportCommand {
+    /// Apply this transport change to the plugin, ignoring errors as the audio thread does for
+    /// all queued control. The value was validated on the control thread before being queued.
+    pub(crate) fn apply(self, plugin: &mut Plugin) {
+        match self {
+            TransportCommand::Tempo(bpm) => {
+                let _ = plugin.set_tempo(bpm);
+            }
+            TransportCommand::TimeSignature(num, den) => {
+                let _ = plugin.set_time_signature(num, den);
+            }
+            TransportCommand::Playing(playing) => {
+                let _ = plugin.set_playing(playing);
+            }
+        }
+    }
+}
+
 /// A control command applied to the plugin on the audio thread.
 enum RtCommand {
     /// Deliver a MIDI event on the next block.
     Midi(MidiEvent),
     /// Set a normalized parameter value on the next block.
     Param { id: u32, value: f64 },
+    /// Apply a transport change (tempo / time signature / playing) on the next block.
+    Transport(TransportCommand),
 }
 
 /// Owns a [`Plugin`] on the audio thread and applies queued control commands before each
@@ -91,6 +124,9 @@ impl RealtimePluginRunner {
                 RtCommand::Param { id, value } => {
                     let _ = self.plugin.set_parameter(id, value);
                 }
+                RtCommand::Transport(change) => {
+                    change.apply(&mut self.plugin);
+                }
             }
         }
         self.plugin.process_audio(buffers)
@@ -120,6 +156,47 @@ impl RtControl {
     /// if the queue is full.
     pub fn set_parameter(&mut self, id: u32, value: f64) -> bool {
         let ok = self.tx.push(RtCommand::Param { id, value }).is_ok();
+        self.track(ok)
+    }
+
+    /// Queue a transport tempo change (BPM) for the next block. `bpm` must be finite and
+    /// greater than `0`; an invalid value is rejected (returns `false`) rather than queued.
+    /// Returns `false` if the queue is full.
+    pub fn set_tempo(&mut self, bpm: f64) -> bool {
+        if !(bpm.is_finite() && bpm > 0.0) {
+            return false;
+        }
+        let ok = self
+            .tx
+            .push(RtCommand::Transport(TransportCommand::Tempo(bpm)))
+            .is_ok();
+        self.track(ok)
+    }
+
+    /// Queue a transport time-signature change for the next block. `denominator` must be one
+    /// of `1, 2, 4, 8, 16` and `numerator` must be positive; an invalid value is rejected
+    /// (returns `false`). Returns `false` if the queue is full.
+    pub fn set_time_signature(&mut self, numerator: i32, denominator: i32) -> bool {
+        if numerator <= 0 || !matches!(denominator, 1 | 2 | 4 | 8 | 16) {
+            return false;
+        }
+        let ok = self
+            .tx
+            .push(RtCommand::Transport(TransportCommand::TimeSignature(
+                numerator,
+                denominator,
+            )))
+            .is_ok();
+        self.track(ok)
+    }
+
+    /// Queue a transport playing-state toggle for the next block. Returns `false` if the queue
+    /// is full.
+    pub fn set_playing(&mut self, playing: bool) -> bool {
+        let ok = self
+            .tx
+            .push(RtCommand::Transport(TransportCommand::Playing(playing)))
+            .is_ok();
         self.track(ok)
     }
 
@@ -157,5 +234,44 @@ mod tests {
             velocity: 100
         }));
         assert_eq!(control.dropped_command_count(), 2);
+    }
+
+    #[test]
+    fn transport_commands_round_trip_through_the_ring() {
+        let (tx, mut rx) = RingBuffer::<RtCommand>::new(8);
+        let mut control = RtControl { tx, dropped: 0 };
+
+        assert!(control.set_tempo(140.0));
+        assert!(control.set_time_signature(7, 8));
+        assert!(control.set_playing(false));
+
+        // The three transport commands arrive in order, carrying their payloads intact.
+        match rx.pop().expect("tempo queued") {
+            RtCommand::Transport(TransportCommand::Tempo(bpm)) => assert_eq!(bpm, 140.0),
+            _ => panic!("expected tempo transport command"),
+        }
+        match rx.pop().expect("time sig queued") {
+            RtCommand::Transport(TransportCommand::TimeSignature(n, d)) => {
+                assert_eq!((n, d), (7, 8))
+            }
+            _ => panic!("expected time-signature transport command"),
+        }
+        match rx.pop().expect("playing queued") {
+            RtCommand::Transport(TransportCommand::Playing(p)) => assert!(!p),
+            _ => panic!("expected playing transport command"),
+        }
+    }
+
+    #[test]
+    fn invalid_transport_values_are_rejected_not_queued() {
+        let (tx, _rx) = RingBuffer::<RtCommand>::new(8);
+        let mut control = RtControl { tx, dropped: 0 };
+        // Non-positive / non-finite tempo and malformed time signatures never reach the ring.
+        assert!(!control.set_tempo(0.0));
+        assert!(!control.set_tempo(f64::NAN));
+        assert!(!control.set_time_signature(0, 4));
+        assert!(!control.set_time_signature(4, 3));
+        // Rejected on validation, not because the queue was full.
+        assert_eq!(control.dropped_command_count(), 0);
     }
 }
