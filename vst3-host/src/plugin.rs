@@ -6,7 +6,46 @@ use crate::{
     midi::{MidiChannel, MidiEvent},
     parameters::{Parameter, ParameterUpdate},
 };
+use crossbeam_queue::ArrayQueue;
 use std::sync::{Arc, Mutex};
+
+/// A `Send` + `Sync` handle for draining the MIDI a plugin emits (arpeggiators, MPE, MIDI
+/// thru, …) without locking the audio thread.
+///
+/// Obtain one from [`Plugin::output_midi_handle`]. The plugin's audio thread pushes emitted
+/// events into a lock-free bounded queue; this handle pops them from any other thread (e.g. a
+/// UI poll loop) with no lock on either side — the lock-free counterpart to the audio-thread
+/// drain in [`Plugin::take_output_midi`]. When the queue is full the oldest event is dropped,
+/// so a host that stops polling can't grow it without bound.
+///
+/// Available for in-process plugins; the process-isolation path returns `None` (output MIDI
+/// crosses the boundary in the IPC responses instead).
+#[derive(Clone)]
+pub struct OutputMidiConsumer {
+    queue: Arc<ArrayQueue<MidiEvent>>,
+}
+
+impl OutputMidiConsumer {
+    pub(crate) fn from_queue(queue: Arc<ArrayQueue<MidiEvent>>) -> Self {
+        Self { queue }
+    }
+
+    /// Pop the oldest emitted event, or `None` if none are queued. Lock-free.
+    pub fn pop(&self) -> Option<MidiEvent> {
+        self.queue.pop()
+    }
+
+    /// Drain all currently queued events in emission order into a `Vec`. Lock-free pops; the
+    /// returned `Vec` allocates on the calling thread (intended for a UI/control thread, not
+    /// the audio thread — use [`pop`](Self::pop) in a loop to stay allocation-free).
+    pub fn drain(&self) -> Vec<MidiEvent> {
+        let mut out = Vec::new();
+        while let Some(event) = self.queue.pop() {
+            out.push(event);
+        }
+        out
+    }
+}
 
 /// Information about a VST3 plugin
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -274,6 +313,11 @@ pub(crate) trait PluginInternal: Send {
     /// for implementations that don't capture output MIDI (e.g. process isolation).
     fn take_output_events(&self) -> Vec<MidiEvent> {
         Vec::new()
+    }
+    /// A lock-free handle for draining emitted MIDI from another thread. Defaults to `None`
+    /// for implementations without a shared in-process queue (e.g. process isolation).
+    fn output_midi_handle(&self) -> Option<OutputMidiConsumer> {
+        None
     }
     /// Enumerate the plugin's units and their program lists (`IUnitInfo`). Defaults to empty
     /// for implementations that don't query it yet (e.g. process isolation).
@@ -1055,6 +1099,15 @@ impl Plugin {
             .unwrap_or_default()
     }
 
+    /// Get a `Send` handle for draining emitted MIDI from another thread without locking the
+    /// audio thread (see [`OutputMidiConsumer`]). Returns `None` for an unloaded plugin or the
+    /// process-isolation path. Useful with [`RealtimePluginRunner`](crate::RealtimePluginRunner):
+    /// take the handle, move the plugin into the runner, and poll it from your UI thread while
+    /// the audio thread renders.
+    pub fn output_midi_handle(&self) -> Option<OutputMidiConsumer> {
+        self.internal.as_ref().and_then(|i| i.output_midi_handle())
+    }
+
     /// Save the plugin's current state (parameters, internal settings, loaded preset) to
     /// an opaque byte blob.
     ///
@@ -1405,6 +1458,49 @@ mod vstpreset {
 
     fn read_i64(b: &[u8]) -> i64 {
         i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+    }
+}
+
+#[cfg(test)]
+mod output_midi_consumer_tests {
+    use super::*;
+
+    fn note(n: u8) -> MidiEvent {
+        MidiEvent::NoteOn {
+            channel: MidiChannel::Ch1,
+            note: n,
+            velocity: 100,
+        }
+    }
+
+    #[test]
+    fn drains_in_order_and_drops_oldest_when_full() {
+        let q = Arc::new(ArrayQueue::new(2));
+        let consumer = OutputMidiConsumer::from_queue(q.clone());
+
+        // force_push mirrors what process() does: when full, the oldest is dropped.
+        q.force_push(note(60));
+        q.force_push(note(61));
+        q.force_push(note(62)); // capacity 2 → drops note 60
+
+        assert_eq!(consumer.drain(), vec![note(61), note(62)]);
+        // Drained: now empty.
+        assert_eq!(consumer.pop(), None);
+        assert_eq!(consumer.drain(), vec![]);
+    }
+
+    #[test]
+    fn handle_is_send_and_shares_the_queue_across_threads() {
+        let q = Arc::new(ArrayQueue::new(8));
+        let consumer = OutputMidiConsumer::from_queue(q.clone());
+        // Push from another thread (the audio side is a different thread in practice).
+        let producer = q.clone();
+        std::thread::spawn(move || {
+            producer.force_push(note(64));
+        })
+        .join()
+        .unwrap();
+        assert_eq!(consumer.pop(), Some(note(64)));
     }
 }
 

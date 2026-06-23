@@ -32,6 +32,9 @@ log = { workspace = true }
 libc = "0.2"
 # Lock-free SPSC ring for the real-time plugin runner's command queue.
 rtrb = "0.3"
+# Lock-free bounded MPMC queue for output MIDI: the audio thread pushes emitted events and a
+# UI thread drains them without either locking the other (crossbeam-utils is already in-tree).
+crossbeam-queue = "0.3"
 
 # Optional dependencies
 cpal = { version = "0.18", optional = true }
