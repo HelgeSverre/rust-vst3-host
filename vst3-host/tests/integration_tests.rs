@@ -242,6 +242,73 @@ fn test_audio_processing() {
     );
 }
 
+/// Runtime transport mutation: change tempo / time signature / playing-state while the plugin
+/// is actively processing and confirm the setters take effect on the next block without error.
+///
+/// Dexed isn't tempo-synced, so this asserts the mutation path succeeds (the setters apply to
+/// the live `ProcessContext` and the plugin keeps rendering) rather than an audible change.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_runtime_transport_mutation() {
+    let plugin_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(plugin_path).exists() {
+        println!("Test plugin not found at {plugin_path}, skipping");
+        return;
+    }
+
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .tempo(120.0)
+        .time_signature(4, 4)
+        .build()
+        .expect("Failed to create host");
+
+    let mut plugin = host
+        .load_plugin(plugin_path)
+        .expect("Failed to load plugin");
+
+    plugin
+        .start_processing()
+        .expect("Failed to start processing");
+
+    // Render a few blocks at the initial transport, then mutate it mid-playback.
+    let mut buffers = AudioBuffers::new(0, 2, 512, 48000.0);
+    for _ in 0..4 {
+        plugin.process_audio(&mut buffers).expect("process block");
+    }
+
+    // Each mutation must take effect on the next block while processing is active.
+    plugin.set_tempo(140.0).expect("set_tempo while processing");
+    plugin
+        .set_time_signature(7, 8)
+        .expect("set_time_signature while processing");
+    plugin
+        .set_playing(false)
+        .expect("set_playing(false) while processing");
+
+    for _ in 0..4 {
+        plugin
+            .process_audio(&mut buffers)
+            .expect("process block after transport mutation");
+    }
+
+    plugin.set_playing(true).expect("resume playing");
+    plugin
+        .process_audio(&mut buffers)
+        .expect("process block after resume");
+
+    // Validation is enforced even mid-playback.
+    assert!(plugin.set_tempo(0.0).is_err(), "tempo 0 should be rejected");
+    assert!(
+        plugin.set_time_signature(4, 3).is_err(),
+        "denominator 3 should be rejected"
+    );
+
+    plugin.stop_processing().expect("Failed to stop processing");
+    println!("Runtime transport mutation OK");
+}
+
 /// Track D: real `getState`/`setState` round-trip through the plugin's own serializer,
 /// against the bundled Dexed plugin (so it doesn't depend on the host's plugin install).
 #[test]
