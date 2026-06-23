@@ -39,7 +39,11 @@ isolation-using app, ship the helper alongside it.
 - **Crash containment** — a plugin crash kills the helper, surfaced to you as an `Err`
   rather than a process abort.
 - **Hang protection** — calls wait with a timeout (5s by default); a hung plugin yields a
-  timeout error and the helper is killed, instead of blocking your thread forever.
+  timeout error and the helper is killed, instead of blocking your thread forever. This
+  includes the **load** itself: a plugin that hangs during initialization is bounded here,
+  whereas an in-process `load_plugin` is a synchronous call that cannot be interrupted and
+  will block the calling thread if the plugin hangs. Isolation is the only way to bound a
+  hanging plugin.
 
 ## Validate a plugin before loading it
 

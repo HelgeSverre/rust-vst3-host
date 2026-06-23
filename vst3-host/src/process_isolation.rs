@@ -732,6 +732,46 @@ mod wire_tests {
             "error should name the offending path, got: {err}"
         );
     }
+
+    /// A helper that never responds (a hung plugin) must not hang the host: `send_command`
+    /// returns an error within the timeout and kills the child.
+    #[cfg(unix)]
+    #[test]
+    fn hung_helper_times_out_and_is_killed_not_blocking() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        // Fake helper: read nothing, write nothing, just sleep — i.e. hang forever.
+        let dir = std::env::temp_dir().join(format!("vst3_hang_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("hung-helper");
+        let mut f = std::fs::File::create(&fake).unwrap();
+        // `exec` so the shell is replaced by sleep (no orphaned child holding the stdout
+        // pipe); killing the helper then closes the pipe and ends the reader thread promptly.
+        writeln!(f, "#!/bin/sh\nexec sleep 30").unwrap();
+        drop(f);
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut proc =
+            PluginHostProcess::spawn(fake.clone(), Duration::from_millis(200)).expect("spawn");
+        let started = Instant::now();
+        let res = proc.send_command(HostCommand::Shutdown);
+        let elapsed = started.elapsed();
+
+        assert!(
+            res.is_err(),
+            "a hung helper must yield an error, got {res:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "send_command must return promptly on timeout, took {elapsed:?}"
+        );
+        // The child was killed; a follow-up command also errors rather than hanging.
+        assert!(proc.send_command(HostCommand::Shutdown).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Crash protection utilities for in-process plugins
