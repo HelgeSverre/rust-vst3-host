@@ -6,6 +6,8 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-23
+
 ### Added
 
 - **Crash-resistant plugin discovery**: `Vst3Host::discover_plugins_safe()` (and
@@ -175,6 +177,7 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 - Initial release: safe VST3 hosting — discover, load, parameters, MIDI, audio playback, state
   save/restore, and process isolation.
 
+[0.4.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.4.0
 [0.3.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.3.0
 [0.2.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.2.1
 [0.2.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.2.0

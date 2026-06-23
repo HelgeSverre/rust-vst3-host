@@ -3930,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "vst3-host"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "core-foundation 0.10.1",
  "cpal",
@@ -3963,7 +3963,7 @@ dependencies = [
 
 [[package]]
 name = "vst3-inspector"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "directories",
  "eframe",

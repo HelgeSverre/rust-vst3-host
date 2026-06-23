@@ -221,7 +221,7 @@ fn main() -> vst3_host::Result<()> {
 
 ```toml
 [dependencies]
-vst3-host = "0.3"
+vst3-host = "0.4"
 ```
 
 ## Status & known limitations
