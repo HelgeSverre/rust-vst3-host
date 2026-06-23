@@ -6,6 +6,14 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- Documented and test-locked the process-isolation hang guarantee: a plugin that hangs the
+  helper (including during load) yields a timeout error and the helper is killed, so it can't
+  block the host. A plain in-process `load_plugin` is synchronous and cannot be bounded — a
+  hanging plugin (e.g. Reason Rack, which expects its host ecosystem) blocks the caller, so
+  load it with process isolation.
+
 ## [0.4.1] - 2026-06-23
 
 ### Fixed
