@@ -6,6 +6,8 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-23
+
 ### Changed
 
 - Inspector loads plugins on a background thread: introspection, load, and audio start run off
@@ -201,6 +203,7 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 - Initial release: safe VST3 hosting — discover, load, parameters, MIDI, audio playback, state
   save/restore, and process isolation.
 
+[0.4.2]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.4.2
 [0.4.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.4.1
 [0.4.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.4.0
 [0.3.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.3.0

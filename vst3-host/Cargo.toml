@@ -1,6 +1,6 @@
 [package]
 name = "vst3-host"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 edition = "2021"
 # Default-feature floor (cpal 0.18 needs 1.85). The optional `egui-widgets` feature
