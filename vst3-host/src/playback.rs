@@ -102,7 +102,9 @@ impl AudioSideChannels {
 /// `&mut` for push/pop, so they live behind `Mutex` to expose `&self` methods; this mutex is
 /// only ever touched by the UI/control thread, never the audio callback.
 struct UiSideChannels {
-    control_tx: Mutex<Producer<HybridCommand>>,
+    // Shared (`Arc`) so a `Send` [`MidiSink`] can be cloned out and moved to another thread (e.g.
+    // a MIDI-input callback) while the non-`Send` `AudioHandle` stays put.
+    control_tx: Arc<Mutex<Producer<HybridCommand>>>,
     out_midi_rx: Mutex<Consumer<MidiEvent>>,
     param_rx: Mutex<Consumer<(u32, f64)>>,
     levels: Arc<[AtomicU32]>,
@@ -123,7 +125,7 @@ fn make_side_channels(channels: usize) -> (AudioSideChannels, UiSideChannels) {
         levels: Arc::clone(&levels),
     };
     let ui = UiSideChannels {
-        control_tx: Mutex::new(control_tx),
+        control_tx: Arc::new(Mutex::new(control_tx)),
         out_midi_rx: Mutex::new(out_midi_rx),
         param_rx: Mutex::new(param_rx),
         levels,
@@ -147,6 +149,29 @@ pub struct AudioHandle {
     // Lock-free side channels to/from the audio callback. Used for the hot path (control +
     // per-frame feedback) so a UI thread never contends with the audio thread for the lock.
     ui: UiSideChannels,
+}
+
+/// A cheap, cloneable, `Send` handle for queuing MIDI to a running plugin from another thread.
+///
+/// Obtained from [`AudioHandle::midi_sink`]. It holds only the (shared) lock-free command ring,
+/// not the device stream, so unlike [`AudioHandle`] it is `Send` and can be moved into a
+/// background thread or a MIDI input callback. Cloning is cheap (an `Arc` bump).
+#[derive(Clone)]
+pub struct MidiSink {
+    control_tx: Arc<Mutex<Producer<HybridCommand>>>,
+}
+
+impl MidiSink {
+    /// Queue a MIDI event for the plugin, applied at the start of the next audio block.
+    ///
+    /// Lock-free and non-blocking (the same path as [`AudioHandle::send_midi`]). Returns `false`
+    /// if the command ring is full (the event is dropped).
+    pub fn send_midi(&self, event: MidiEvent) -> bool {
+        self.control_tx
+            .lock()
+            .map(|mut tx| tx.push(HybridCommand::Midi(event)).is_ok())
+            .unwrap_or(false)
+    }
 }
 
 impl AudioHandle {
@@ -187,6 +212,19 @@ impl AudioHandle {
             .lock()
             .map(|mut tx| tx.push(HybridCommand::Midi(event)).is_ok())
             .unwrap_or(false)
+    }
+
+    /// Obtain a [`MidiSink`]: a cheap, cloneable, `Send` handle that can queue MIDI to this
+    /// running plugin from another thread.
+    ///
+    /// Unlike [`AudioHandle`] itself (which is not `Send`, as it owns the device stream), the
+    /// sink can be moved into a background thread or callback — e.g. a MIDI input device
+    /// callback (see [`crate::midi_input`]). It shares the same lock-free command ring as
+    /// [`Self::send_midi`].
+    pub fn midi_sink(&self) -> MidiSink {
+        MidiSink {
+            control_tx: Arc::clone(&self.ui.control_tx),
+        }
     }
 
     /// Queue a normalized parameter change (`0.0..=1.0`) without locking the audio thread.
