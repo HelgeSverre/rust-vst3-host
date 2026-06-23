@@ -8,6 +8,10 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ### Changed
 
+- Inspector loads plugins on a background thread: introspection, load, and audio start run off
+  the UI thread, so a slow or hanging plugin (e.g. Reason Rack) no longer freezes the window —
+  it shows a "Loading…" spinner and stays responsive. (A crashing plugin still aborts the
+  process; only process isolation contains crashes.)
 - Documented and test-locked the process-isolation hang guarantee: a plugin that hangs the
   helper (including during load) yields a timeout error and the helper is killed, so it can't
   block the host. A plain in-process `load_plugin` is synchronous and cannot be bounded — a

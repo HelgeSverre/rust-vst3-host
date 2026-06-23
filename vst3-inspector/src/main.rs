@@ -499,6 +499,20 @@ impl Preferences {
     }
 }
 
+/// Result of a background plugin load, sent back to the UI thread.
+struct LoadedPlugin {
+    detail: vst3_host::DetailedPluginInfo,
+    params: Vec<vst3_host::parameters::Parameter>,
+    audio: AudioHandle,
+    is_processing: bool,
+}
+
+/// A plugin load running on a background thread (so a hanging/slow plugin can't freeze the UI).
+struct PendingLoad {
+    name: String,
+    rx: std::sync::mpsc::Receiver<Result<LoadedPlugin, String>>,
+}
+
 struct VST3Inspector {
     plugin_path: String,
     plugin_info: Option<PluginInfo>,
@@ -514,6 +528,9 @@ struct VST3Inspector {
     // The currently loaded + playing plugin. `Some` when a plugin is loaded; the
     // `Plugin` lives entirely inside this `AudioHandle` for its whole lifetime.
     audio: Option<AudioHandle>,
+    // An in-flight load running on a background thread, so a slow or hanging plugin can't
+    // freeze the UI. Polled each frame in `update`; resolves to the loaded plugin or an error.
+    pending_load: Option<PendingLoad>,
     // Last user-facing error/status message, shown in the header and auto-cleared.
     last_error: Option<String>,
     // When `last_error` was set, for the auto-clear timer.
@@ -604,6 +621,9 @@ impl eframe::App for VST3Inspector {
     fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Finalize any background plugin load that has completed.
+        self.poll_pending_load();
+
         // Auto-clear the status/error line a few seconds after it was set.
         if self
             .last_error_time
@@ -699,7 +719,16 @@ impl eframe::App for VST3Inspector {
                             .map_or("Unknown", |p| &p.factory_info.vendor)
                     ));
 
-                    // Show last error, if any.
+                    // Show an in-flight load, then any error.
+                    if let Some(pending) = &self.pending_load {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.colored_label(
+                                egui::Color32::LIGHT_BLUE,
+                                format!("Loading {}…", pending.name),
+                            );
+                        });
+                    }
                     if let Some(err) = &self.last_error {
                         ui.colored_label(egui::Color32::ORANGE, err.clone());
                     }
@@ -3029,6 +3058,10 @@ impl VST3Inspector {
     ///
     /// The loaded `Plugin` lives inside `self.audio` (an `AudioHandle`) for its whole
     /// lifetime; all parameter / MIDI / processing access goes through `self.audio.lock()`.
+    /// Start loading a plugin on a background thread. Introspection, load, and audio start can
+    /// each be slow or hang (some plugins block on their own ecosystem), so they run off the UI
+    /// thread; `update` polls [`Self::poll_pending_load`] and finalizes when ready. Loading a
+    /// plugin in-process can't be interrupted, but at least the window stays responsive.
     fn load_plugin(&mut self, plugin_path: String) {
         println!("Loading plugin: {}", plugin_path);
 
@@ -3040,6 +3073,7 @@ impl VST3Inspector {
         self.plugin_window = None; // close any open editor from the previous plugin
         self.gui_attached = false;
         self.is_processing = false;
+        self.report_json = None;
         self.last_error = None;
         self.last_error_time = None;
         // A/B snapshots belong to the previous plugin; applying them to a different plugin would
@@ -3047,55 +3081,76 @@ impl VST3Inspector {
         self.slot_a = None;
         self.slot_b = None;
         self.active_slot = None;
+        self.plugin_path = plugin_path.clone();
 
-        // Build the inspector's detailed PluginInfo from the library's introspection.
-        let detail = match vst3_host::get_detailed_plugin_info(std::path::Path::new(&plugin_path)) {
-            Ok(d) => d,
-            Err(e) => {
-                self.set_error(format!("Failed to introspect plugin: {e}"));
-                return;
-            }
+        let name = get_plugin_name_from_path(&plugin_path);
+        let sample_rate = self.sample_rate;
+        let block_size = self.block_size as usize;
+        let path = plugin_path; // moved into the worker thread
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let result = (|| {
+                let detail = vst3_host::get_detailed_plugin_info(std::path::Path::new(&path))
+                    .map_err(|e| format!("Failed to introspect plugin: {e}"))?;
+                let mut host = Vst3Host::builder()
+                    .sample_rate(sample_rate)
+                    .block_size(block_size)
+                    .build()
+                    .map_err(|e| format!("Failed to build host: {e}"))?;
+                let plugin = host
+                    .load_plugin(&path)
+                    .map_err(|e| format!("Failed to load plugin: {e}"))?;
+                let params = plugin.get_parameters().unwrap_or_default();
+                let audio = host
+                    .play(plugin)
+                    .map_err(|e| format!("Failed to start audio playback: {e}"))?;
+                let is_processing = audio.lock().is_processing();
+                Ok(LoadedPlugin {
+                    detail,
+                    params,
+                    audio,
+                    is_processing,
+                })
+            })();
+            let _ = tx.send(result);
+        });
+
+        self.pending_load = Some(PendingLoad { name, rx });
+    }
+
+    /// Poll the in-flight background load (if any) and finalize it when ready.
+    fn poll_pending_load(&mut self) {
+        let Some(pending) = &self.pending_load else {
+            return;
         };
-
-        // Load + play the plugin via the library.
-        let plugin = match self.host.load_plugin(&plugin_path) {
-            Ok(p) => p,
-            Err(e) => {
-                self.set_error(format!("Failed to load plugin: {e}"));
-                return;
+        match pending.rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {} // still loading
+            Ok(Ok(loaded)) => {
+                self.report_json =
+                    vst3_host::PluginReport::new(loaded.detail.clone(), loaded.params.clone())
+                        .to_json()
+                        .ok();
+                self.plugin_info = Some(Self::build_plugin_info(&loaded.detail, &loaded.params));
+                self.is_processing = loaded.is_processing;
+                self.audio = Some(loaded.audio);
+                self.pending_load = None;
+                println!("Plugin loaded successfully!");
+                if self.preferences.auto_start_processing {
+                    if let Err(e) = self.start_processing() {
+                        self.set_error(format!("Failed to auto-start processing: {e}"));
+                    }
+                }
             }
-        };
-
-        // Read the parameter list before the plugin is moved into `play`.
-        let params = plugin.get_parameters().unwrap_or_default();
-
-        let audio = match self.host.play(plugin) {
-            Ok(a) => a,
-            Err(e) => {
-                self.set_error(format!("Failed to start audio playback: {e}"));
-                return;
+            Ok(Err(e)) => {
+                self.set_error(e);
+                self.pending_load = None;
             }
-        };
-
-        // Prebuild the JSON export (full report) so "Copy JSON" never re-introspects a
-        // plugin that's currently loaded.
-        self.report_json = vst3_host::PluginReport::new(detail.clone(), params.clone())
-            .to_json()
-            .ok();
-
-        self.plugin_info = Some(Self::build_plugin_info(&detail, &params));
-        self.is_processing = audio.lock().is_processing();
-        self.audio = Some(audio);
-        self.plugin_path = plugin_path;
-
-        // Auto-start processing if enabled in preferences.
-        if self.preferences.auto_start_processing {
-            if let Err(e) = self.start_processing() {
-                self.set_error(format!("Failed to auto-start processing: {e}"));
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.set_error("Plugin load thread stopped unexpectedly");
+                self.pending_load = None;
             }
         }
-
-        println!("Plugin loaded successfully!");
     }
 
     /// Map the library's `DetailedPluginInfo` + parameter list into the inspector's own
@@ -3663,6 +3718,7 @@ impl VST3Inspector {
             discovered_plugins: Vec::new(),
             host,
             audio: None,
+            pending_load: None,
             last_error: None,
             last_error_time: None,
             gui_attached: false,
