@@ -397,8 +397,7 @@ impl Plugin {
     ) -> Result<()> {
         if self.is_processing {
             return Err(Error::Other(
-                "cannot activate a bus while processing; call stop_processing() first"
-                    .to_string(),
+                "cannot activate a bus while processing; call stop_processing() first".to_string(),
             ));
         }
         self.internal

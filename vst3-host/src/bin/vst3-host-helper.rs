@@ -229,6 +229,19 @@ fn handle(
             },
             Err(e) => err("SendMidi", e),
         }),
+        HostCommand::SetBusActive {
+            media_type,
+            direction,
+            bus_index,
+            active,
+        } => with(plugin, |p| {
+            match p.set_bus_active(media_type, direction, bus_index, active) {
+                Ok(()) => HostResponse::Success {
+                    message: "bus activation set".to_string(),
+                },
+                Err(e) => err("SetBusActive", e),
+            }
+        }),
         HostCommand::Process { inputs, frames } => {
             let sr = *sample_rate;
             with(plugin, |p| {

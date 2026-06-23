@@ -561,6 +561,50 @@ fn test_plugin_metadata_is_detected() {
     assert_eq!(plugin.output_channel_count(), 2, "Dexed is stereo");
 }
 
+/// Bus activation: a plugin's main output bus can be (re)activated through the public API,
+/// an out-of-range bus index is rejected, and activation is refused while processing.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn test_set_bus_active() {
+    use vst3_host::{BusDirection, MediaType};
+
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(path).exists() {
+        println!("Test plugin not found, skipping");
+        return;
+    }
+    let mut host = Vst3Host::new().unwrap();
+    let mut plugin = host.load_plugin(path).unwrap();
+
+    // Dexed has a main stereo output bus at index 0 — (re)activating it succeeds.
+    plugin
+        .set_bus_active(MediaType::Audio, BusDirection::Output, 0, true)
+        .expect("activate main output bus");
+
+    // An out-of-range index is rejected with a clear error.
+    assert!(
+        plugin
+            .set_bus_active(MediaType::Audio, BusDirection::Output, 99, true)
+            .is_err(),
+        "out-of-range bus index should error"
+    );
+
+    // Activation must happen while inactive: it errors while processing.
+    plugin.start_processing().unwrap();
+    assert!(
+        plugin
+            .set_bus_active(MediaType::Audio, BusDirection::Output, 0, true)
+            .is_err(),
+        "activating a bus while processing should error"
+    );
+    plugin.stop_processing().unwrap();
+
+    // After stopping it works again.
+    plugin
+        .set_bus_active(MediaType::Audio, BusDirection::Output, 0, true)
+        .expect("re-activate after stop");
+}
+
 /// Track D: automating a parameter through the public API changes the rendered audio
 /// (end-to-end). The processor-queue mechanism itself is covered deterministically by the
 /// `parameter_changes_tests` unit test; this proves the full path produces an audible effect
