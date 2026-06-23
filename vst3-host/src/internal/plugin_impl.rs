@@ -862,11 +862,12 @@ impl PluginInternal for PluginImpl {
         // since both funnel audio through here.
         let _denormal = crate::internal::denormal::DenormalGuard::new();
 
-        // Drain parameter changes queued since the last block; fed into the processor's
-        // input queue below so the DSP — not just the controller — sees them this block.
-        let pending = std::mem::take(&mut self.pending_param_changes);
-
-        if let Some(ref mut data) = self.process_data {
+        // Parameter changes queued since the last block are fed into the processor's input
+        // queue below (so the DSP — not just the controller — sees them this block) and then
+        // cleared in place. Draining in place (rather than `mem::take`, which leaves a
+        // zero-capacity Vec) keeps the queue's capacity across blocks, so a steady stream of
+        // parameter automation never reallocates on the audio thread.
+        let result = if let Some(ref mut data) = self.process_data {
             unsafe {
                 // Clear output events only - input events should be preserved for processing
                 self.output_events.clear();
@@ -892,7 +893,7 @@ impl PluginInternal for PluginImpl {
 
                 // Feed queued parameter changes into the processor's input queue, clamping
                 // each sample offset into this block.
-                for pc in &pending {
+                for pc in &self.pending_param_changes {
                     let off = pc.sample_offset.clamp(0, frames.saturating_sub(1) as i32);
                     data.input_param_changes.enqueue(pc.id, off, pc.value);
                 }
@@ -981,7 +982,12 @@ impl PluginInternal for PluginImpl {
             }
         } else {
             Err(Error::Other("Process data not initialized".to_string()))
-        }
+        };
+
+        // Clear in place (retains capacity); the changes were copied into the processor's
+        // input queue above. Runs on both the Ok and error paths so the queue can't accumulate.
+        self.pending_param_changes.clear();
+        result
     }
 
     fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
