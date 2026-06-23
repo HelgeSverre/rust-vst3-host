@@ -347,6 +347,16 @@ impl PluginInternal for IsolatedPluginImpl {
         }
     }
 
+    fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
+        self.expect_success(
+            HostCommand::SelectProgram {
+                unit_id,
+                program_index,
+            },
+            "SelectProgram",
+        )
+    }
+
     fn start_processing(&mut self) -> Result<()> {
         self.expect_success(HostCommand::StartProcessing, "StartProcessing")?;
         self.is_processing = true;
