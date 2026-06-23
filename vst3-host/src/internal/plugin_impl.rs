@@ -49,6 +49,8 @@ pub struct PluginImpl {
     time_sig_numerator: i32,
     /// Time signature denominator advertised in the host `ProcessContext`.
     time_sig_denominator: i32,
+    /// Whether the transport is playing (the `kPlaying` flag in `ProcessContext.state`).
+    playing: bool,
     /// Real-time vs offline processing, baked into `ProcessSetup`/`process_data` at setup.
     process_mode: crate::plugin::ProcessMode,
     /// Monotonic allocator for per-voice note ids (note_on); 0/-1 reserved for "unset".
@@ -134,6 +136,36 @@ impl PluginImpl {
         self.tempo = tempo;
         self.time_sig_numerator = time_sig_numerator;
         self.time_sig_denominator = time_sig_denominator;
+    }
+
+    /// Update the transport tempo for the **next** processed block, even while processing is
+    /// active: the stored tempo (used to rebuild the context after a reconfigure) and the live
+    /// `ProcessContext` both move, and the musical playhead derives from the new tempo.
+    fn update_tempo(&mut self, bpm: f64) {
+        self.tempo = bpm;
+        if let Some(ref mut data) = self.process_data {
+            data.process_context.tempo = bpm;
+        }
+    }
+
+    /// Update the transport time signature for the **next** processed block, even while
+    /// processing is active (stored fields plus the live `ProcessContext`).
+    fn update_time_signature(&mut self, numerator: i32, denominator: i32) {
+        self.time_sig_numerator = numerator;
+        self.time_sig_denominator = denominator;
+        if let Some(ref mut data) = self.process_data {
+            data.process_context.timeSigNumerator = numerator;
+            data.process_context.timeSigDenominator = denominator;
+        }
+    }
+
+    /// Toggle the transport playing state (`kPlaying`) for the **next** processed block, even
+    /// while processing is active (stored field plus the live `ProcessContext.state`).
+    fn update_playing(&mut self, playing: bool) {
+        self.playing = playing;
+        if let Some(ref mut data) = self.process_data {
+            data.process_context.state = process_context_state(playing);
+        }
     }
 
     /// Apply the host-configured sample rate / block size before processing starts. Called at
@@ -338,6 +370,7 @@ impl PluginImpl {
                 tempo: 120.0,
                 time_sig_numerator: 4,
                 time_sig_denominator: 4,
+                playing: true,
                 process_mode: crate::plugin::ProcessMode::Realtime,
                 next_note_id: 1,
                 process_data: None,
@@ -551,7 +584,7 @@ impl PluginImpl {
             data.process_context.tempo = self.tempo;
             data.process_context.timeSigNumerator = self.time_sig_numerator;
             data.process_context.timeSigDenominator = self.time_sig_denominator;
-            data.process_context.state = PROCESS_CONTEXT_STATE;
+            data.process_context.state = process_context_state(self.playing);
 
             // Set up process data
             data.process_data.processMode = self.vst_process_mode();
@@ -740,6 +773,21 @@ impl PluginInternal for PluginImpl {
         } else {
             Err(Error::InterfaceError("No controller available".to_string()))
         }
+    }
+
+    fn set_tempo(&mut self, bpm: f64) -> Result<()> {
+        self.update_tempo(bpm);
+        Ok(())
+    }
+
+    fn set_time_signature(&mut self, numerator: i32, denominator: i32) -> Result<()> {
+        self.update_time_signature(numerator, denominator);
+        Ok(())
+    }
+
+    fn set_playing(&mut self, playing: bool) -> Result<()> {
+        self.update_playing(playing);
+        Ok(())
     }
 
     fn get_parameter(&self, id: u32) -> Result<f64> {
@@ -1938,6 +1986,21 @@ const PROCESS_CONTEXT_STATE: u32 = (ProcessContext_::StatesAndFlags_::kPlaying
     | ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid)
     as u32;
 
+/// The `kPlaying` bit on its own, factored out of [`PROCESS_CONTEXT_STATE`] so the playing
+/// state can be toggled at runtime without disturbing the validity flags.
+#[allow(clippy::unnecessary_cast)] // the `as u32` is needed where the constant is i32 (Windows)
+const PROCESS_CONTEXT_PLAYING: u32 = ProcessContext_::StatesAndFlags_::kPlaying as u32;
+
+/// Compute the `ProcessContext.state` flags for a given playing state: the validity flags are
+/// always set; `kPlaying` is included only when the transport is playing.
+fn process_context_state(playing: bool) -> u32 {
+    if playing {
+        PROCESS_CONTEXT_STATE | PROCESS_CONTEXT_PLAYING
+    } else {
+        PROCESS_CONTEXT_STATE & !PROCESS_CONTEXT_PLAYING
+    }
+}
+
 /// Advance the transport in a `ProcessContext` by `frames` samples after a processed block.
 /// Keeps `continousTimeSamples`/`projectTimeSamples` (and the musical playhead derived from
 /// the current tempo) moving so tempo-synced plugins don't see a frozen time-0.
@@ -1966,6 +2029,27 @@ mod transport_tests {
         assert_ne!(PROCESS_CONTEXT_STATE & F::kTimeSigValid as u32, 0);
         assert_ne!(PROCESS_CONTEXT_STATE & F::kContTimeValid as u32, 0);
         assert_ne!(PROCESS_CONTEXT_STATE & F::kProjectTimeMusicValid as u32, 0);
+    }
+
+    #[test]
+    #[allow(clippy::unnecessary_cast)] // `as u32` needed where the constants are i32 (Windows)
+    fn process_context_state_toggles_playing_without_disturbing_validity() {
+        use ProcessContext_::StatesAndFlags_ as F;
+        let playing = process_context_state(true);
+        let stopped = process_context_state(false);
+        // kPlaying tracks the playing flag.
+        assert_ne!(playing & F::kPlaying as u32, 0);
+        assert_eq!(stopped & F::kPlaying as u32, 0);
+        // The validity flags survive in both states.
+        for flag in [
+            F::kTempoValid as u32,
+            F::kTimeSigValid as u32,
+            F::kContTimeValid as u32,
+            F::kProjectTimeMusicValid as u32,
+        ] {
+            assert_ne!(playing & flag, 0);
+            assert_ne!(stopped & flag, 0);
+        }
     }
 
     #[test]

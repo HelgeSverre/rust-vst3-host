@@ -140,6 +140,29 @@ pub(crate) trait PluginInternal: Send {
             "bus arrangement negotiation is not supported for this plugin".to_string(),
         ))
     }
+    /// Update the transport tempo (BPM) advertised in the host `ProcessContext`, taking effect
+    /// on the next processed block. The caller validates `bpm > 0`. Defaults to unsupported
+    /// (overridden by the in-process and isolated implementations).
+    fn set_tempo(&mut self, _bpm: f64) -> Result<()> {
+        Err(Error::Other(
+            "runtime transport mutation is not supported for this plugin".to_string(),
+        ))
+    }
+    /// Update the transport time signature advertised in the host `ProcessContext`, taking
+    /// effect on the next processed block. The caller validates the numerator/denominator.
+    /// Defaults to unsupported.
+    fn set_time_signature(&mut self, _numerator: i32, _denominator: i32) -> Result<()> {
+        Err(Error::Other(
+            "runtime transport mutation is not supported for this plugin".to_string(),
+        ))
+    }
+    /// Toggle the transport playing state (`kPlaying`) in the host `ProcessContext`, taking
+    /// effect on the next processed block. Defaults to unsupported.
+    fn set_playing(&mut self, _playing: bool) -> Result<()> {
+        Err(Error::Other(
+            "runtime transport mutation is not supported for this plugin".to_string(),
+        ))
+    }
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()>;
     /// Schedule a MIDI event at a sample offset within the next process block.
     /// Defaults to a block-start event (ignores the offset) for implementations that don't
@@ -410,6 +433,63 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .set_parameter_at(id, value, sample_offset)
+    }
+
+    /// Change the transport tempo (beats per minute) advertised to the plugin in the host
+    /// `ProcessContext`, taking effect on the **next** processed block — even while the plugin
+    /// is actively processing. Drives tempo-synced DSP (LFOs, synced delays, arpeggiators).
+    ///
+    /// `bpm` must be finite and greater than `0` (a non-positive tempo would freeze or reverse
+    /// the derived musical playhead). Works both in-process and across process isolation.
+    pub fn set_tempo(&mut self, bpm: f64) -> Result<()> {
+        if !(bpm.is_finite() && bpm > 0.0) {
+            return Err(Error::InvalidParameter(format!(
+                "tempo must be finite and positive, got {bpm}"
+            )));
+        }
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .set_tempo(bpm)
+    }
+
+    /// Change the transport time signature advertised to the plugin in the host
+    /// `ProcessContext` (`numerator`/`denominator`, e.g. `7, 8`), taking effect on the
+    /// **next** processed block — even while the plugin is actively processing.
+    ///
+    /// `numerator` must be greater than `0` and `denominator` must be a power of two between
+    /// `1` and `16` (`1`, `2`, `4`, `8`, or `16`) — the standard note values a time signature
+    /// can denominate. Works both in-process and across process isolation.
+    pub fn set_time_signature(&mut self, numerator: i32, denominator: i32) -> Result<()> {
+        if numerator <= 0 {
+            return Err(Error::InvalidParameter(format!(
+                "time signature numerator must be positive, got {numerator}"
+            )));
+        }
+        if !matches!(denominator, 1 | 2 | 4 | 8 | 16) {
+            return Err(Error::InvalidParameter(format!(
+                "time signature denominator must be one of 1, 2, 4, 8, 16, got {denominator}"
+            )));
+        }
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .set_time_signature(numerator, denominator)
+    }
+
+    /// Toggle the transport playing state advertised to the plugin in the host
+    /// `ProcessContext` (the `kPlaying` flag), taking effect on the **next** processed block —
+    /// even while the plugin is actively processing.
+    ///
+    /// While playing, the host advances the continuous and musical playhead each block; while
+    /// stopped, the playhead still advances but the plugin sees the transport as not playing
+    /// (so tempo-synced effects can react to a paused transport). Works both in-process and
+    /// across process isolation.
+    pub fn set_playing(&mut self, playing: bool) -> Result<()> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .set_playing(playing)
     }
 
     /// Enumerate the plugin's units and their program lists (`IUnitInfo`).
