@@ -58,7 +58,7 @@ use vst3_host::{Vst3Host, ProbeResult};
 let host = Vst3Host::new()?;
 match host.probe_plugin("/path/to/plugin.vst3") {
     ProbeResult::Ok => println!("safe to load"),
-    ProbeResult::Crashed => println!("crashes on load — blacklist it"),
+    ProbeResult::Crashed => println!("crashes on load — skip it / add to your deny-list"),
     ProbeResult::TimedOut => println!("hung on load"),
     ProbeResult::Failed(msg) => println!("failed: {msg}"),
 }

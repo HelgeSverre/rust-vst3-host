@@ -590,8 +590,8 @@ impl Plugin {
     ///
     /// Unlike [`send_midi_note`](Self::send_midi_note) (which uses a shared note id and can't be
     /// individually expressed), this allocates a unique voice id. Pair it with
-    /// [`note_off`](Self::note_off). Per-note expression is in-process only — it errors under
-    /// process isolation (not yet marshalled across the boundary).
+    /// [`note_off`](Self::note_off). Per-note expression works both in-process and under
+    /// process isolation — the calls marshal across the boundary.
     pub fn note_on(
         &mut self,
         channel: MidiChannel,

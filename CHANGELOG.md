@@ -6,6 +6,19 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Export `AutomationCurve` and `AutomationPoint` from the crate root and prelude — they were
+  public but unreachable without the full module path, even though `ParameterAutomation::with_curve`
+  takes an `AutomationCurve`.
+
+### Documentation
+
+- Synced the user docs with 0.4.x: documented the crash-resistant discovery API
+  (`discover_plugins_safe`, `SafeDiscoveryReport`, `probe_timeout`, the `vst3-host-probe`
+  binary), corrected stale "MPE is in-process only" claims (it now works across process
+  isolation), and fixed the "no GUI across the boundary" note (macOS isolated editors work).
+
 ## [0.4.2] - 2026-06-23
 
 ### Changed

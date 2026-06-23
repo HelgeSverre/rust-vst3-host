@@ -17,6 +17,14 @@ vst3-host = "0.4"   # = cpal-backend + process-isolation
 works without extra flags. It only changes runtime behavior when you opt in with
 `Vst3Host::builder().with_process_isolation(true)` — the default load path is in-process.
 
+## Binaries
+
+The crate ships two binaries. The `vst3-host-helper` binary (out-of-process hosting) is
+gated on the `process-isolation` feature. The `vst3-host-probe` binary — used by
+crash-resistant discovery ([`discover_plugins_safe`](../how-to/discover-plugins.md)) — is
+**not** gated on any feature: it builds unconditionally, since it only calls the library's
+introspection API.
+
 ## Minimal build
 
 To drop CPAL and isolation (e.g. you supply your own [audio backend](../how-to/custom-audio-backend.md)

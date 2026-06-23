@@ -11,12 +11,13 @@ reach for each.
 | [`simple`](https://docs.rs/vst3-host/latest/vst3_host/simple/) | One-call helpers: `load_plugin`, `play`, `discover_plugins`, `get_plugin_info`. The fastest start. |
 | [`Vst3Host`](https://docs.rs/vst3-host/latest/vst3_host/host/struct.Vst3Host.html) | Configured hosting: sample rate, block size, isolation, custom scan paths. Built via `Vst3Host::builder()`. |
 | [`get_detailed_plugin_info`](https://docs.rs/vst3-host/latest/vst3_host/fn.get_detailed_plugin_info.html) | Deep introspection (factory, classes, bus layout) for inspector-style UIs. |
+| [`Vst3Host::discover_plugins_safe`](https://docs.rs/vst3-host/latest/vst3_host/host/struct.Vst3Host.html#method.discover_plugins_safe) / [`discovery::probe_plugin_info_isolated`](https://docs.rs/vst3-host/latest/vst3_host/discovery/fn.probe_plugin_info_isolated.html) | Crash-resistant discovery: introspect each plugin in a throwaway `vst3-host-probe` process so a crashing plugin is skipped, not fatal. Returns a [`SafeDiscoveryReport`](https://docs.rs/vst3-host/latest/vst3_host/struct.SafeDiscoveryReport.html) (`plugins` + `skipped`, each a [`SafeDiscoverySkip`](https://docs.rs/vst3-host/latest/vst3_host/enum.SafeDiscoverySkip.html)). |
 
 ## Working with a plugin
 
 | Type | Use it for |
 | --- | --- |
-| [`Plugin`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.Plugin.html) | The loaded plugin: parameters, MIDI, processing, editor, `save_state`/`load_state`, `take_output_midi`, and (isolated) `recover`/`isolation_pid`. Also the per-note expression / MPE surface: `note_on`/`note_on_at`, `note_off`/`note_off_at`, `send_note_expression`/`send_note_expression_at`, `note_expressions` (in-process only — these error under process isolation). |
+| [`Plugin`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.Plugin.html) | The loaded plugin: parameters, MIDI, processing, editor, `save_state`/`load_state`, `take_output_midi`, and (isolated) `recover`/`isolation_pid`. Also the per-note expression / MPE surface: `note_on`/`note_on_at`, `note_off`/`note_off_at`, `send_note_expression`/`send_note_expression_at`, `note_expressions` (works in-process and under process isolation). |
 | [`PluginInfo`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.PluginInfo.html) | Metadata (name, vendor, version, category, bus counts, MIDI/audio capability). Serializable. |
 | [`PluginReport`](https://docs.rs/vst3-host/latest/vst3_host/struct.PluginReport.html) | Full serializable report (`detailed` info + `parameters`) with `to_json()` — for export / tooling. |
 | [`Parameter`](https://docs.rs/vst3-host/latest/vst3_host/parameters/struct.Parameter.html) | One parameter's id, name, normalized value, unit, flags. |

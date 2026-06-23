@@ -98,8 +98,9 @@ for info in plugin.note_expressions()? {
 # }
 ```
 
-Note expression is **in-process only** — these calls return an error under
-[process isolation](../explanation/process-isolation.md).
+Note expression works both in-process and under
+[process isolation](../explanation/process-isolation.md) — the calls marshal across the
+boundary.
 
 ## While playing
 

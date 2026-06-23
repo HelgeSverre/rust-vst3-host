@@ -34,7 +34,7 @@ fn main() -> vst3_host::Result<()> {
   plugin itself displays them.
 - **MIDI** — send notes, CC, pitch bend, aftertouch; capture MIDI the plugin emits
   (`take_output_midi`). Per-note expression / MPE via `note_on`/`send_note_expression`
-  (`NoteId`, `NoteExpressionType`), in-process only.
+  (`NoteId`, `NoteExpressionType`), in-process or isolated.
 - **State** — save/restore a plugin's state (`save_state`/`load_state`), in-process or isolated.
 - **Crash isolation** — optionally run a plugin in a separate process (`process-isolation`),
   with typed `Error::PluginCrashed` + `Plugin::recover()`.
@@ -232,8 +232,8 @@ The core is working and exercised against real plugins on macOS. What to be awar
   lock-free path use `play_realtime` / `RealtimePluginRunner`; even that isn't a fully
   RT-audited (zero-allocation) engine yet.
 - Process isolation is opt-in (`Vst3Host::builder().with_process_isolation(true)`); crashes
-  surface as `Error::PluginCrashed` and `Plugin::recover()` reloads, but there is no
-  GUI-across-the-boundary yet.
+  surface as `Error::PluginCrashed` and `Plugin::recover()` reloads. The editor opens across
+  the boundary on macOS (helper-owned window); Windows/Linux not yet.
 - `MidiEvent::ProgramChange` is unsupported (VST3 routes programs through `IUnitInfo`).
 - Windows/Linux build and test in CI but aren't interactively exercised (no plugin run or
   editor opened) — macOS is the exercised platform.

@@ -32,7 +32,7 @@ fn main() -> vst3_host::Result<()> {
 - **Parameters** — list, read, set, and format parameters as the plugin itself displays them,
   with sample-accurate automation (`set_parameter_at`).
 - **MIDI** — notes, control changes, pitch bend, and aftertouch, with sample-accurate
-  scheduling; per-note expression / MPE (`note_on` / `send_note_expression`, in-process).
+  scheduling; per-note expression / MPE (`note_on` / `send_note_expression`).
 - **State & presets** — save/restore a plugin's own state, and read/write `.vstpreset` files.
 - **Metering** — peak/RMS levels with ready-made UI ballistics (`PeakMeter`, `RmsWindow`).
 - **Crash isolation** — run a plugin in a separate process so a crash can't take down your
