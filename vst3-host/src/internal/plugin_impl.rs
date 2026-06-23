@@ -24,6 +24,10 @@ use super::{
     module_loader::{load_module, VstModule},
 };
 
+/// Cap on the buffered output MIDI a plugin emits, so a host that never polls can't grow it
+/// forever. The buffer is pre-reserved to this size so steady-state pushes never reallocate.
+const MAX_OUTPUT_MIDI: usize = 4096;
+
 /// Internal plugin implementation that handles all VST3 COM interactions
 pub struct PluginImpl {
     // Core VST3 interfaces
@@ -379,7 +383,7 @@ impl PluginImpl {
                 gui_param_changes_for_host: Arc::new(Mutex::new(Vec::new())),
                 input_events,
                 output_events,
-                output_midi: Arc::new(Mutex::new(Vec::new())),
+                output_midi: Arc::new(Mutex::new(Vec::with_capacity(MAX_OUTPUT_MIDI))),
                 plugin_view: None,
                 plug_frame,
                 editor_resize,
@@ -957,12 +961,18 @@ impl PluginInternal for PluginImpl {
                 data.input_param_changes.clear_all();
 
                 // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
-                let emitted = self.output_events.drain();
-                if !emitted.is_empty() {
+                // Only touch the poll buffer if the plugin actually emitted something, and drain
+                // the event list in place (no `mem::take`) into the pre-reserved poll buffer, so
+                // the steady-state audio path allocates nothing even while output MIDI flows.
+                if !self.output_events.is_empty() {
                     if let Ok(mut out) = self.output_midi.lock() {
-                        out.extend(emitted.iter().filter_map(event_to_midi));
-                        // Cap the buffer so a host that never polls can't grow it forever.
-                        const MAX_OUTPUT_MIDI: usize = 4096;
+                        self.output_events.for_each_then_clear(|e| {
+                            if let Some(m) = event_to_midi(e) {
+                                out.push(m);
+                            }
+                        });
+                        // Cap the buffer so a host that never polls can't grow it forever (drain
+                        // shifts in place; MidiEvent is plain data so dropped entries don't free).
                         if out.len() > MAX_OUTPUT_MIDI {
                             let drop = out.len() - MAX_OUTPUT_MIDI;
                             out.drain(0..drop);
