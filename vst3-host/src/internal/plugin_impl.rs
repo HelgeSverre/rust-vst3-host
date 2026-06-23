@@ -1081,6 +1081,67 @@ impl PluginInternal for PluginImpl {
         Ok(())
     }
 
+    fn set_bus_active(
+        &mut self,
+        media_type: crate::audio::MediaType,
+        direction: crate::audio::BusDirection,
+        bus_index: i32,
+        active: bool,
+    ) -> Result<()> {
+        use crate::audio::{BusDirection, MediaType};
+        if self.is_processing {
+            return Err(Error::Other(
+                "cannot activate a bus while processing".to_string(),
+            ));
+        }
+        // VST3 bus activation requires the component inactive (it's a setup-time operation).
+        let media = match media_type {
+            MediaType::Audio => kAudio as i32,
+            MediaType::Event => kEvent as i32,
+        };
+        let dir = match direction {
+            BusDirection::Input => kInput as i32,
+            BusDirection::Output => kOutput as i32,
+        };
+        unsafe {
+            let count = self.component.getBusCount(media, dir);
+            if bus_index < 0 || bus_index >= count {
+                return Err(Error::InvalidParameter(format!(
+                    "bus index {bus_index} out of range for {media_type:?} {direction:?} \
+                     bus (count {count})"
+                )));
+            }
+
+            let was_active = self.is_active;
+            if was_active {
+                self.component.setActive(0);
+                self.is_active = false;
+            }
+
+            let result = self
+                .component
+                .activateBus(media, dir, bus_index, active as u8);
+
+            if was_active {
+                let reactivate = self.component.setActive(1);
+                if reactivate != kResultOk {
+                    return Err(Error::Other(format!(
+                        "Failed to reactivate after set_bus_active: {reactivate:#x}"
+                    )));
+                }
+                self.is_active = true;
+            }
+
+            if result != kResultOk {
+                return Err(Error::Other(format!(
+                    "activateBus failed for {media_type:?} {direction:?} bus {bus_index}: \
+                     {result:#x}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()> {
         self.send_midi_event_at(event, 0)
     }
