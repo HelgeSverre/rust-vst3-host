@@ -157,14 +157,18 @@ if let Some(event) = MidiEvent::from_midi_bytes(raw) {
 # }
 ```
 
-It maps note on/off (velocity-0 note-on becomes note-off), control change, pitch bend, and
-aftertouch, and returns `None` for messages the library doesn't carry (program change,
-system/realtime, SysEx). Do the device I/O on its own thread and hand events to the audio
-thread through a channel — never call the plugin from the device callback. (The inspector's
-"MIDI Input Device" picker does exactly this, cross-platform, via the `midir` crate.)
+It maps note on/off (velocity-0 note-on becomes note-off), control change, pitch bend,
+aftertouch, and program change, and returns `None` for messages the library doesn't carry
+(system/realtime, SysEx). Do the device I/O on its own thread and hand events to the audio
+thread through a channel — never call the plugin from the device callback. To bind a port
+without writing that plumbing yourself, enable the `midi-input` feature and use
+[`midi_input::bind_to_handle`](https://docs.rs/vst3-host/latest/vst3_host/midi_input/fn.bind_to_handle.html),
+which forwards parsed events into a running `AudioHandle`. (The inspector's "MIDI Input
+Device" picker does the same, via the `midir` crate.)
 
-## Caveats
+## Program change
 
-- **Program Change is not supported.** VST3 switches programs through `IUnitInfo` program
-  lists, not MIDI events, so `MidiEvent::ProgramChange` returns an error. This is a known
-  gap, not a silent no-op.
+`MidiEvent::ProgramChange` selects a program from the plugin's `IUnitInfo` program list. It
+targets the **root unit** (id 0) — VST3 has no MIDI-channel→unit mapping, so the channel is
+ignored. For explicit control, call [`Plugin::select_program(unit_id, program_index)`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.Plugin.html#method.select_program)
+after enumerating units with `Plugin::get_units`. Plugins without a program list ignore it.

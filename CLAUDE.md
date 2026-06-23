@@ -82,7 +82,8 @@ same `Plugin` type either way. See `docs/explanation/architecture.md`.
   routed to the **root unit (id 0)** — the MIDI channel does not map to a VST3 unit. Both
   paths marshal across process isolation.
 - Features: `cpal-backend` (default), `process-isolation` (default), `egui-widgets`
-  (`EmbeddedEditor` — embed a plugin editor in an egui window, macOS).
+  (`EmbeddedEditor` — embed a plugin editor in an egui window, macOS), `midi-input`
+  (`midi_input` — bind a hardware/virtual MIDI port via `midir`).
 - The `prelude` does NOT export `Result` (it would shadow `std::result::Result`); use
   `vst3_host::Result`.
 

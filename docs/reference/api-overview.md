@@ -17,7 +17,7 @@ reach for each.
 
 | Type | Use it for |
 | --- | --- |
-| [`Plugin`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.Plugin.html) | The loaded plugin: parameters, MIDI, processing, editor, `save_state`/`load_state`, `take_output_midi`, and (isolated) `recover`/`isolation_pid`. Also the per-note expression / MPE surface: `note_on`/`note_on_at`, `note_off`/`note_off_at`, `send_note_expression`/`send_note_expression_at`, `note_expressions` (works in-process and under process isolation). |
+| [`Plugin`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.Plugin.html) | The loaded plugin: parameters, MIDI, processing, editor, `save_state`/`load_state`, `take_output_midi`, and (isolated) `recover`/`isolation_pid`. Program selection (`get_units`, `select_program`), bus activation (`set_bus_active`), runtime transport (`set_tempo`/`set_time_signature`/`set_playing`), and parameter-edit gesture capture (`take_parameter_edits`). Also the per-note expression / MPE surface: `note_on`/`note_on_at`, `note_off`/`note_off_at`, `send_note_expression`/`send_note_expression_at`, `note_expressions` (works in-process and under process isolation). |
 | [`PluginInfo`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.PluginInfo.html) | Metadata (name, vendor, version, category, bus counts, MIDI/audio capability). Serializable. |
 | [`PluginReport`](https://docs.rs/vst3-host/latest/vst3_host/struct.PluginReport.html) | Full serializable report (`detailed` info + `parameters`) with `to_json()` — for export / tooling. |
 | [`Parameter`](https://docs.rs/vst3-host/latest/vst3_host/parameters/struct.Parameter.html) | One parameter's id, name, normalized value, unit, flags. |
@@ -45,6 +45,7 @@ reach for each.
 | [`ProbeResult`](https://docs.rs/vst3-host/latest/vst3_host/host/enum.ProbeResult.html) | Result of `Vst3Host::probe_plugin` — validate a plugin (loads / crashes / times out) without risking the host. |
 | [`PluginWindow`](https://docs.rs/vst3-host/latest/vst3_host/window/struct.PluginWindow.html) | Open a plugin's native editor in a standalone window. |
 | [`EmbeddedEditor`](https://docs.rs/vst3-host/latest/vst3_host/embed/struct.EmbeddedEditor.html) / `EditorRect` | Embed a plugin editor inside a host (egui) window (feature `egui-widgets`, macOS). |
+| [`midi_input`](https://docs.rs/vst3-host/latest/vst3_host/midi_input/) | Bind a hardware/virtual MIDI input port and forward events into a running `AudioHandle` (feature `midi-input`). `list_midi_input_ports`, `connect`, `bind_to_handle`. |
 | [`Error`](https://docs.rs/vst3-host/latest/vst3_host/error/enum.Error.html) / [`Result`](https://docs.rs/vst3-host/latest/vst3_host/error/type.Result.html) | Error handling. `Result<T> = std::result::Result<T, Error>`. |
 
 ## The prelude

@@ -5,6 +5,7 @@
 | `cpal-backend` | ✅ | The bundled [`CpalBackend`](https://docs.rs/vst3-host/latest/vst3_host/backends/struct.CpalBackend.html) and `Vst3Host::play` / `simple::play`. Pulls in `cpal`. |
 | `process-isolation` | ✅ | Out-of-process plugin hosting and the `vst3-host-helper` binary. See [Isolate plugin crashes](../how-to/isolate-plugin-crashes.md). |
 | `egui-widgets` | ✖ | `EmbeddedEditor` — embed a plugin's native editor inside an egui/eframe window (macOS). Pulls in `egui` + `raw-window-handle`. |
+| `midi-input` | ✖ | The [`midi_input`](https://docs.rs/vst3-host/latest/vst3_host/midi_input/index.html) module — bind a hardware/virtual MIDI port and forward events into a running `AudioHandle`. Pulls in `midir`. |
 
 ## Defaults
 

@@ -8,6 +8,27 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ### Added
 
+- **Program selection** — `Plugin::select_program(unit_id, program_index)` selects a program
+  from a unit's `IUnitInfo` program list (via the unit's `kIsProgramChange` parameter), and
+  `MidiEvent::ProgramChange` is now honored instead of rejected (routed to the root unit's
+  program-change parameter; the MIDI channel is ignored, as VST3 has no channel→unit mapping).
+  Marshaled across process isolation.
+- **Bus activation** — `Plugin::set_bus_active(media_type, direction, bus_index, active)` calls
+  `IComponent::activateBus`, unlocking sidechain/aux/surround buses that must be explicitly
+  activated. New public `audio::MediaType` and `audio::BusDirection` enums. Marshaled across
+  process isolation.
+- **Parameter-edit gesture capture** — `Plugin::take_parameter_edits()` drains an ordered log of
+  the plugin GUI's `beginEdit`/`performEdit`/`endEdit` callbacks as `ParameterEdit` /
+  `ParameterEditKind`, so hosts can record automation gestures, not just final values (which
+  `get_parameter_changes` still returns). Marshaled across process isolation.
+- **Runtime transport mutation** — `Plugin::set_tempo`/`set_time_signature`/`set_playing` change
+  the `ProcessContext` transport on the next block while processing. Lock-free equivalents on
+  `AudioHandle` and `RtControl` apply the change from the audio callback without a lock.
+  Marshaled across process isolation.
+- **Live MIDI input** (feature `midi-input`) — `midi_input::list_midi_input_ports`, `connect`,
+  and `bind_to_handle` bind a hardware/virtual MIDI port (via `midir`) and forward parsed events
+  into a running `AudioHandle`. New `AudioHandle::midi_sink()` returns a `Send` `MidiSink` for
+  cross-thread MIDI injection. Off by default; additive when disabled.
 - Export `AutomationCurve` and `AutomationPoint` from the crate root and prelude — they were
   public but unreachable without the full module path, even though `ParameterAutomation::with_curve`
   takes an `AutomationCurve`.
