@@ -132,6 +132,9 @@ pub enum HostCommand {
         /// Channel index.
         channel: i16,
     },
+    /// Drain the ordered parameter-edit gesture log (begin/change/end) the helper's plugin has
+    /// accumulated from its editor since the last poll.
+    TakeParameterEdits,
     /// Shutdown the helper process
     Shutdown,
 }
@@ -224,6 +227,12 @@ pub enum HostResponse {
     NoteExpressions {
         /// The advertised note-expression dimensions.
         expressions: Vec<crate::midi::NoteExpressionInfo>,
+    },
+    /// The ordered parameter-edit gestures drained from the helper (reply to
+    /// `TakeParameterEdits`).
+    ParameterEdits {
+        /// The gesture events, in the order the plugin's editor reported them.
+        edits: Vec<crate::plugin::ParameterEdit>,
     },
 }
 
@@ -633,6 +642,47 @@ mod wire_tests {
                 assert_eq!(offset, 256);
             }
             other => panic!("round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parameter_edits_round_trip_across_the_wire() {
+        // The ordered gesture log must survive the JSON transport host and helper share, both
+        // the empty command and the populated reply.
+        use crate::plugin::{ParameterEdit, ParameterEditKind};
+
+        let cmd = serde_json::to_string(&HostCommand::TakeParameterEdits)
+            .expect("serialize TakeParameterEdits");
+        assert!(matches!(
+            serde_json::from_str::<HostCommand>(&cmd).expect("deserialize TakeParameterEdits"),
+            HostCommand::TakeParameterEdits
+        ));
+
+        let edits = vec![
+            ParameterEdit {
+                id: 9,
+                kind: ParameterEditKind::BeginGesture,
+                value: None,
+            },
+            ParameterEdit {
+                id: 9,
+                kind: ParameterEditKind::ValueChange,
+                value: Some(0.3),
+            },
+            ParameterEdit {
+                id: 9,
+                kind: ParameterEditKind::EndGesture,
+                value: None,
+            },
+        ];
+        let resp = HostResponse::ParameterEdits {
+            edits: edits.clone(),
+        };
+        let resp_json = serde_json::to_string(&resp).expect("serialize ParameterEdits");
+        match serde_json::from_str::<HostResponse>(&resp_json).expect("deserialize ParameterEdits")
+        {
+            HostResponse::ParameterEdits { edits: back } => assert_eq!(back, edits),
+            other => panic!("ParameterEdits round-trip changed the variant: {other:?}"),
         }
     }
 
