@@ -6,6 +6,8 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-23
+
 ### Added
 
 - **Program selection** — `Plugin::select_program(unit_id, program_index)` selects a program
