@@ -139,6 +139,17 @@ pub enum HostCommand {
         /// 0-based index into the unit's program list.
         program_index: i32,
     },
+    /// Activate or deactivate a single bus (`IComponent::activateBus`).
+    SetBusActive {
+        /// Whether the bus carries audio or events.
+        media_type: crate::audio::MediaType,
+        /// Whether the bus is an input or an output.
+        direction: crate::audio::BusDirection,
+        /// 0-based bus index within its `(media_type, direction)` group.
+        bus_index: i32,
+        /// `true` to activate, `false` to deactivate.
+        active: bool,
+    },
     /// Shutdown the helper process
     Shutdown,
 }
@@ -658,6 +669,32 @@ mod wire_tests {
             } => {
                 assert_eq!(unit_id, 0);
                 assert_eq!(program_index, 17);
+            }
+            other => panic!("round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_bus_active_round_trips_across_the_wire() {
+        use crate::audio::{BusDirection, MediaType};
+        let cmd = HostCommand::SetBusActive {
+            media_type: MediaType::Audio,
+            direction: BusDirection::Input,
+            bus_index: 1,
+            active: true,
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize SetBusActive");
+        match serde_json::from_str::<HostCommand>(&json).expect("deserialize SetBusActive") {
+            HostCommand::SetBusActive {
+                media_type,
+                direction,
+                bus_index,
+                active,
+            } => {
+                assert_eq!(media_type, MediaType::Audio);
+                assert_eq!(direction, BusDirection::Input);
+                assert_eq!(bus_index, 1);
+                assert!(active);
             }
             other => panic!("round-trip changed the variant: {other:?}"),
         }

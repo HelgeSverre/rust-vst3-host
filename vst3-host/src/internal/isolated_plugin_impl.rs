@@ -283,6 +283,24 @@ impl PluginInternal for IsolatedPluginImpl {
         self.expect_success(HostCommand::SendMidi { event }, "SendMidi")
     }
 
+    fn set_bus_active(
+        &mut self,
+        media_type: crate::audio::MediaType,
+        direction: crate::audio::BusDirection,
+        bus_index: i32,
+        active: bool,
+    ) -> Result<()> {
+        self.expect_success(
+            HostCommand::SetBusActive {
+                media_type,
+                direction,
+                bus_index,
+                active,
+            },
+            "SetBusActive",
+        )
+    }
+
     fn note_on(
         &mut self,
         channel: crate::midi::MidiChannel,

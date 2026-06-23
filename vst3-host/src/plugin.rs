@@ -140,6 +140,19 @@ pub(crate) trait PluginInternal: Send {
             "bus arrangement negotiation is not supported for this plugin".to_string(),
         ))
     }
+    /// Activate or deactivate a single bus (`IComponent::activateBus`). Defaults to
+    /// unsupported.
+    fn set_bus_active(
+        &mut self,
+        _media_type: crate::audio::MediaType,
+        _direction: crate::audio::BusDirection,
+        _bus_index: i32,
+        _active: bool,
+    ) -> Result<()> {
+        Err(Error::Other(
+            "bus activation is not supported for this plugin".to_string(),
+        ))
+    }
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()>;
     /// Schedule a MIDI event at a sample offset within the next process block.
     /// Defaults to a block-start event (ignores the offset) for implementations that don't
@@ -364,6 +377,41 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .set_bus_arrangements(inputs, outputs)
+    }
+
+    /// Activate or deactivate a single bus on the plugin (`IComponent::activateBus`).
+    ///
+    /// Hosts must explicitly activate the buses they intend to use; a plugin's secondary
+    /// buses (sidechain / aux inputs, extra outputs) commonly start **inactive** and only
+    /// receive/produce audio once activated. (The load sequence already activates the main
+    /// audio and event buses, so call this to enable the rest.)
+    ///
+    /// `media_type` selects audio vs event buses and `direction` selects input vs output;
+    /// `bus_index` is the 0-based index within that `(media_type, direction)` group (the
+    /// same indexing as [`crate::discovery::BusLayout`]). `active` true activates, false
+    /// deactivates.
+    ///
+    /// VST3 requires bus activation to happen while the component is **inactive** — i.e.
+    /// before processing starts. This therefore returns an error if called while the plugin
+    /// is processing; call [`Self::stop_processing`] first, activate the bus, then
+    /// [`Self::start_processing`] again. Returns an error for an out-of-range `bus_index`,
+    /// and under process isolation activation marshals across the boundary.
+    pub fn set_bus_active(
+        &mut self,
+        media_type: crate::audio::MediaType,
+        direction: crate::audio::BusDirection,
+        bus_index: i32,
+        active: bool,
+    ) -> Result<()> {
+        if self.is_processing {
+            return Err(Error::Other(
+                "cannot activate a bus while processing; call stop_processing() first".to_string(),
+            ));
+        }
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .set_bus_active(media_type, direction, bus_index, active)
     }
 
     /// Get all parameters

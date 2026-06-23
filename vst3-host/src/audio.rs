@@ -189,6 +189,26 @@ impl SpeakerArrangement {
     }
 }
 
+/// The kind of data a VST3 bus carries: PCM audio or events (MIDI). Maps to the SDK's
+/// `MediaTypes` (`kAudio` / `kEvent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum MediaType {
+    /// Audio (PCM sample) buses (`kAudio`).
+    Audio,
+    /// Event / MIDI buses (`kEvent`).
+    Event,
+}
+
+/// Which side of the plugin a bus sits on: input or output. Maps to the SDK's
+/// `BusDirections` (`kInput` / `kOutput`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum BusDirection {
+    /// An input bus (`kInput`).
+    Input,
+    /// An output bus (`kOutput`).
+    Output,
+}
+
 /// The speaker arrangements of a plugin's audio input and output buses.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BusArrangements {
@@ -847,6 +867,20 @@ mod speaker_arrangement_tests {
         );
         // Arbitrary 5.1-ish mask: 6 set bits → 6 channels.
         assert_eq!(SpeakerArrangement::from_raw(0b111111).channel_count(), 6);
+    }
+
+    #[test]
+    fn media_type_and_bus_direction_serde_round_trip() {
+        for mt in [MediaType::Audio, MediaType::Event] {
+            let json = serde_json::to_string(&mt).expect("serialize MediaType");
+            let back: MediaType = serde_json::from_str(&json).expect("deserialize MediaType");
+            assert_eq!(mt, back);
+        }
+        for dir in [BusDirection::Input, BusDirection::Output] {
+            let json = serde_json::to_string(&dir).expect("serialize BusDirection");
+            let back: BusDirection = serde_json::from_str(&json).expect("deserialize BusDirection");
+            assert_eq!(dir, back);
+        }
     }
 }
 
