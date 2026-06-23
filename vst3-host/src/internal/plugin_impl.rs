@@ -1891,17 +1891,11 @@ impl PluginImpl {
 
 impl Drop for PluginImpl {
     fn drop(&mut self) {
-        // Teardown: stop processing, deactivate, and disconnect the component/controller
-        // connection points. The COM references then drop, and the plugin frees itself in its
-        // destructor (`Release` -> refcount 0).
-        //
-        // `IPluginBase::terminate()` is deliberately NOT called. Some plugins crash inside
-        // their own `terminate()` (notably shell plugins like Waves' WaveShell, which
-        // null-derefs in `WCWaveShell_VST_Processor::terminate()`), and a hard crash there
-        // can't be caught from the host. Real-world hosts mitigate the same way — they keep
-        // plugin modules resident rather than fully terminating them. `Release` still runs the
-        // plugin's destructor for cleanup, so skipping `terminate()` leaks nothing the plugin
-        // wouldn't otherwise free; it only omits the pre-release notification.
+        // VST3 teardown order: stop processing, deactivate the component, disconnect the
+        // component/controller connection points, terminate the controller and the component,
+        // then drop the COM references. Many plugins (dual-component ones especially) rely on
+        // `terminate()` to break the controller↔component link before release and crash without
+        // it.
         let _ = self.stop_processing();
 
         unsafe {
@@ -1910,9 +1904,9 @@ impl Drop for PluginImpl {
                 self.is_active = false;
             }
 
-            // Disconnect the component/controller connection points (dual-component plugins
-            // only; a single-component plugin is one object with no pair).
             if let Some(ref controller) = self.controller {
+                // A single-component plugin is one object exposed as both, so it has no
+                // connection pair to disconnect and must be terminated once (as the component).
                 if !self.single_component {
                     if let (Some(comp_cp), Some(ctrl_cp)) = (
                         self.component.cast::<IConnectionPoint>(),
@@ -1921,8 +1915,10 @@ impl Drop for PluginImpl {
                         comp_cp.disconnect(ctrl_cp.as_ptr());
                         ctrl_cp.disconnect(comp_cp.as_ptr());
                     }
+                    controller.terminate();
                 }
             }
+            self.component.terminate();
         }
     }
 }

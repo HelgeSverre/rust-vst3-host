@@ -42,10 +42,11 @@ plugin that crashes can't take down the run.
 
 ## Notable findings
 
-- **WaveShell (Waves) loads in-process** despite the duplicate-Obj-C-class warnings it prints
-  from its own packaging. It used to crash on teardown; the host no longer calls a plugin's
-  `terminate()` (relying on COM `Release` for cleanup, which these plugins handle correctly),
-  so no isolation is needed.
+- **WaveShell (Waves) loads and runs in-process** despite the duplicate-Obj-C-class warnings it
+  prints from its own packaging. It can crash *intermittently on unload* — a Waves bug in its
+  own teardown, triggered by the duplicate classes, not a host bug. Load it with process
+  isolation if a clean unload matters. (Most plugins, including dual-component ones, require the
+  standard `terminate()` teardown the host performs, so this is not skippable globally.)
 - **Vital is x86_64-only**, but this host is arm64, so CFBundle can't load it. The loader now
   reports the architecture mismatch explicitly. Run the host under Rosetta, or use a
   universal/arm64 build of the plugin. (Not a library limitation.)
