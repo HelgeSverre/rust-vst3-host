@@ -446,6 +446,15 @@ impl PluginInternal for IsolatedPluginImpl {
         Vec::new()
     }
 
+    fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
+        // Pulled on demand across the boundary, like the value-change drain: the helper's
+        // in-process plugin accumulates gestures from its editor and hands them back here.
+        match self.send_command(HostCommand::TakeParameterEdits) {
+            Ok(HostResponse::ParameterEdits { edits }) => edits,
+            _ => Vec::new(),
+        }
+    }
+
     fn save_state(&self) -> Result<Vec<u8>> {
         match self.send_command(HostCommand::SaveState)? {
             HostResponse::State { data } => Ok(data),

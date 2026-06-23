@@ -1436,6 +1436,13 @@ impl PluginInternal for PluginImpl {
         self.get_parameter_changes()
     }
 
+    fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
+        self.component_handler
+            .as_ref()
+            .map(|h| h.take_parameter_edits())
+            .unwrap_or_default()
+    }
+
     fn take_output_events(&self) -> Vec<MidiEvent> {
         self.output_midi
             .lock()

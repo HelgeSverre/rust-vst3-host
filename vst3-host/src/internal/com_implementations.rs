@@ -487,11 +487,35 @@ pub fn create_host_plug_frame(
 pub struct ComponentHandler {
     // Track parameter changes from the plugin
     pub parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>,
+    // Ordered log of begin/change/end gestures the editor reports, preserving their order so
+    // the host can reconstruct each gesture (drained via `take_parameter_edits`). This is the
+    // richer superset of `parameter_changes` (which keeps only the value changes for the DSP).
+    edits: Arc<Mutex<Vec<crate::plugin::ParameterEdit>>>,
 }
 
 impl ComponentHandler {
     pub fn new(parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>) -> Self {
-        ComponentHandler { parameter_changes }
+        ComponentHandler {
+            parameter_changes,
+            edits: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Drain the ordered parameter-edit gesture log accumulated since the last call.
+    pub fn take_parameter_edits(&self) -> Vec<crate::plugin::ParameterEdit> {
+        // A COM FFI callback could be mid-push when a previous one panicked; recover the lock
+        // rather than propagating a poison panic across the boundary.
+        let mut edits = self.edits.lock().unwrap_or_else(|p| p.into_inner());
+        std::mem::take(&mut *edits)
+    }
+
+    // Append a gesture event, recovering a poisoned lock (these run on the COM FFI callback
+    // path, where a panic would unwind across the C++ boundary — UB).
+    fn push_edit(&self, edit: crate::plugin::ParameterEdit) {
+        self.edits
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(edit);
     }
 }
 
@@ -502,6 +526,11 @@ impl Class for ComponentHandler {
 impl IComponentHandlerTrait for ComponentHandler {
     unsafe fn beginEdit(&self, id: u32) -> i32 {
         log::debug!("Host: Begin edit for parameter {}", id);
+        self.push_edit(crate::plugin::ParameterEdit {
+            id,
+            kind: crate::plugin::ParameterEditKind::BeginGesture,
+            value: None,
+        });
         kResultOk
     }
 
@@ -511,15 +540,26 @@ impl IComponentHandlerTrait for ComponentHandler {
             id,
             value_normalized
         );
-        // Store the parameter change
+        // Store the parameter change for the DSP-feeding drain...
         if let Ok(mut changes) = self.parameter_changes.lock() {
             changes.push((id, value_normalized));
         }
+        // ...and as an ordered gesture event for the richer `take_parameter_edits` drain.
+        self.push_edit(crate::plugin::ParameterEdit {
+            id,
+            kind: crate::plugin::ParameterEditKind::ValueChange,
+            value: Some(value_normalized),
+        });
         kResultOk
     }
 
     unsafe fn endEdit(&self, id: u32) -> i32 {
         log::debug!("Host: End edit for parameter {}", id);
+        self.push_edit(crate::plugin::ParameterEdit {
+            id,
+            kind: crate::plugin::ParameterEditKind::EndGesture,
+            value: None,
+        });
         kResultOk
     }
 
@@ -949,6 +989,59 @@ mod host_attr_tests {
         assert_eq!(list.get_value("s"), Some(AttrValue::Str(vec![72, 105])));
         assert_eq!(list.get_value("b"), Some(AttrValue::Bin(vec![1, 2, 3])));
         assert_eq!(list.get_value("missing"), None);
+    }
+}
+
+#[cfg(test)]
+mod component_handler_tests {
+    use super::*;
+    use crate::plugin::{ParameterEdit, ParameterEditKind};
+
+    #[test]
+    fn captures_begin_perform_end_in_order_and_drains() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+
+        // Drive a full gesture: mouse-down, two drag values, mouse-up.
+        unsafe {
+            handler.beginEdit(5);
+            handler.performEdit(5, 0.25);
+            handler.performEdit(5, 0.5);
+            handler.endEdit(5);
+        }
+
+        let edits = handler.take_parameter_edits();
+        assert_eq!(
+            edits,
+            vec![
+                ParameterEdit {
+                    id: 5,
+                    kind: ParameterEditKind::BeginGesture,
+                    value: None,
+                },
+                ParameterEdit {
+                    id: 5,
+                    kind: ParameterEditKind::ValueChange,
+                    value: Some(0.25),
+                },
+                ParameterEdit {
+                    id: 5,
+                    kind: ParameterEditKind::ValueChange,
+                    value: Some(0.5),
+                },
+                ParameterEdit {
+                    id: 5,
+                    kind: ParameterEditKind::EndGesture,
+                    value: None,
+                },
+            ]
+        );
+
+        // The drain empties the buffer; the value-change sink still mirrors the performEdits.
+        assert!(handler.take_parameter_edits().is_empty());
+        assert_eq!(
+            *handler.parameter_changes.lock().unwrap(),
+            vec![(5, 0.25), (5, 0.5)]
+        );
     }
 }
 

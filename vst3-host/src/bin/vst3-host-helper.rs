@@ -334,6 +334,9 @@ fn handle(
             },
             Err(e) => err("SelectProgram", e),
         }),
+        HostCommand::TakeParameterEdits => with(plugin, |p| HostResponse::ParameterEdits {
+            edits: p.take_parameter_edits(),
+        }),
         HostCommand::CreateGui => gui_request(gui, true),
         HostCommand::CloseGui => gui_request(gui, false),
         HostCommand::Shutdown => HostResponse::Success {

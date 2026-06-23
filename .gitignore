@@ -40,3 +40,5 @@ test-results/
 *.profraw
 *.profdata
 coverage/
+# agent worktrees
+.claude/worktrees/
