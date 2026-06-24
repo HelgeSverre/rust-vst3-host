@@ -5,9 +5,11 @@
 //! ±1 octave (normalized value 0.5 = no bend). That lets the host prove note-expression /
 //! MPE end-to-end — something the bundled Dexed (no note expression) can't do.
 //!
-//! It also exposes two parameters so the host has something to drive: **Cutoff** (#0, a crude
-//! one-pole low-pass on the mixed output) and **Waveform** (#1, a stepped Sine/Saw select).
-//! Both default to a clean open sine so existing tests stay deterministic.
+//! It also exposes parameters so the host has something to drive: **Cutoff** (#0, a crude
+//! one-pole low-pass on the mixed output), **Waveform** (#1, stepped Sine / Saw / Super Saw),
+//! **Detune** (#2) and **Mix** (#3) for the super saw. The super saw stacks 7 detuned saws
+//! after Adam Szabo's JP-8000 analysis ("How To Emulate The Super Saw", 2010). Waveform defaults
+//! to a clean open sine so existing tests stay deterministic.
 //!
 //! Modeled on the `vst3` crate's `gain.rs` example. The only non-obvious detail: the macOS
 //! bundle-entry symbols must be lowercase `bundleEntry`/`bundleExit` (the SDK convention our
@@ -30,8 +32,25 @@ const PLUGIN_NAME: &str = "VST3 Host Test Synth";
 
 /// Parameter id for the crude low-pass cutoff (normalized 0..1, 1.0 = fully open).
 const CUTOFF_PARAM_ID: u32 = 0;
-/// Parameter id for the oscillator waveform (stepped: `< 0.5` = sine, `>= 0.5` = saw).
+/// Parameter id for the oscillator waveform (stepped: sine / saw / super saw).
 const WAVEFORM_PARAM_ID: u32 = 1;
+/// Parameter id for the super-saw detune spread (normalized 0..1).
+const DETUNE_PARAM_ID: u32 = 2;
+/// Parameter id for the super-saw center/side mix (normalized 0..1).
+const MIX_PARAM_ID: u32 = 3;
+
+/// Super-saw oscillators: 7 detuned saws, after Adam Szabo's JP-8000 analysis
+/// ("How To Emulate The Super Saw", 2010). These are the relative detune offsets of the
+/// 7 oscillators (index 3 = center, in tune); the actual offset is scaled by the detune knob.
+const SUPERSAW_DETUNE: [f64; 7] = [
+    -0.11002313,
+    -0.06288439,
+    -0.01952356,
+    0.0,
+    0.01991221,
+    0.06216538,
+    0.10745242,
+];
 
 fn copy_cstring(src: &str, dst: &mut [c_char]) {
     let c = CString::new(src).unwrap_or_default();
@@ -58,12 +77,12 @@ fn copy_wstring(src: &str, dst: &mut [TChar]) {
     }
 }
 
-/// One sounding sine voice.
+/// One sounding voice (up to 7 oscillators for the super-saw; index 0 is used for sine/saw).
 #[derive(Clone, Copy)]
 struct Voice {
     note_id: i32,
     base_freq: f64,
-    phase: f64,
+    phases: [f64; 7],
     /// Tuning expression, normalized 0..1 (0.5 = no bend).
     tuning: f64,
     active: bool,
@@ -74,8 +93,12 @@ struct SynthState {
     voices: Vec<Voice>,
     /// Low-pass cutoff, normalized 0..1 (1.0 = fully open). Read from input parameter changes.
     cutoff: f64,
-    /// Oscillator waveform: `< 0.5` = sine, `>= 0.5` = saw.
+    /// Oscillator waveform: `< 1/3` = sine, `< 2/3` = saw, else super saw.
     waveform: f64,
+    /// Super-saw detune spread, normalized 0..1.
+    detune: f64,
+    /// Super-saw center/side mix, normalized 0..1.
+    mix: f64,
     /// One-pole low-pass filter state, one per output channel.
     lp: [f64; 2],
 }
@@ -98,6 +121,8 @@ impl TestSynthProcessor {
                 voices: Vec::new(),
                 cutoff: 1.0,
                 waveform: 0.0, // sine by default (deterministic for tests); demo opts into saw
+                detune: 0.3,
+                mix: 0.5,
                 lp: [0.0; 2],
             }),
         }
@@ -253,10 +278,17 @@ impl IAudioProcessorTrait for TestSynthProcessor {
                 match ev.r#type as u32 {
                     t if t == Event_::EventTypes_::kNoteOnEvent as u32 => {
                         let n = ev.__field0.noteOn;
+                        // Spread the 7 oscillator phases across the cycle for a fuller super-saw
+                        // (deterministic, not random); index 0 starts at 0 so sine/saw is
+                        // unchanged from before.
+                        let mut phases = [0.0; 7];
+                        for (i, p) in phases.iter_mut().enumerate() {
+                            *p = i as f64 / 7.0 * std::f64::consts::TAU;
+                        }
                         state.voices.push(Voice {
                             note_id: n.noteId,
                             base_freq: note_freq(n.pitch as f64),
-                            phase: 0.0,
+                            phases,
                             tuning: 0.5,
                             active: true,
                         });
@@ -304,6 +336,8 @@ impl IAudioProcessorTrait for TestSynthProcessor {
                 match queue.getParameterId() {
                     CUTOFF_PARAM_ID => state.cutoff = value.clamp(0.0, 1.0),
                     WAVEFORM_PARAM_ID => state.waveform = value.clamp(0.0, 1.0),
+                    DETUNE_PARAM_ID => state.detune = value.clamp(0.0, 1.0),
+                    MIX_PARAM_ID => state.mix = value.clamp(0.0, 1.0),
                     _ => {}
                 }
             }
@@ -333,30 +367,67 @@ impl IAudioProcessorTrait for TestSynthProcessor {
         }
 
         let sr = state.sample_rate.max(1.0);
+        let tau = std::f64::consts::TAU;
         let amp = 0.25_f32;
-        let saw = state.waveform >= 0.5;
+        // 0 = sine, 1 = saw, 2 = super saw.
+        let mode = if state.waveform < 1.0 / 3.0 {
+            0
+        } else if state.waveform < 2.0 / 3.0 {
+            1
+        } else {
+            2
+        };
+        let detune = state.detune;
+        // Center/side oscillator gains as a function of the Mix knob (Szabo's curves).
+        let center_gain = -0.55366 * state.mix + 0.99785;
+        let side_gain = -0.73764 * state.mix * state.mix + 1.2841 * state.mix + 0.044372;
+        // Normalize the 7-osc sum so the super saw sits at a comparable level to a single saw.
+        let supersaw_norm = 1.0 / (center_gain + 6.0 * side_gain);
+
         for v in state.voices.iter_mut().filter(|v| v.active) {
             // Tuning: normalized 0..1, 0.5 = center; ±1 octave at the extremes.
             let bend_semitones = (v.tuning - 0.5) * 24.0;
             let freq = v.base_freq * 2f64.powf(bend_semitones / 12.0);
-            let inc = std::f64::consts::TAU * freq / sr;
-            let mut phase = v.phase;
-            for s in 0..num_samples {
-                // Sine, or a naive (aliasing) saw ramp -1..1 — crude on purpose.
-                let sample = if saw {
-                    (2.0 * (phase / std::f64::consts::TAU) - 1.0) as f32 * amp
-                } else {
-                    (phase.sin() as f32) * amp
-                };
-                for &p in &out_ptrs {
-                    *p.add(s) += sample;
+
+            if mode == 2 {
+                // Super saw: 7 detuned saws, center in tune, sides spread by the detune knob.
+                let mut incs = [0.0f64; 7];
+                for (i, inc) in incs.iter_mut().enumerate() {
+                    *inc = tau * (freq * (1.0 + SUPERSAW_DETUNE[i] * detune)) / sr;
                 }
-                phase += inc;
-                if phase > std::f64::consts::TAU {
-                    phase -= std::f64::consts::TAU;
+                for s in 0..num_samples {
+                    let mut acc = 0.0f64;
+                    for (i, (phase, &inc)) in v.phases.iter_mut().zip(incs.iter()).enumerate() {
+                        let g = if i == 3 { center_gain } else { side_gain };
+                        acc += (2.0 * (*phase / tau) - 1.0) * g;
+                        *phase += inc;
+                        if *phase > tau {
+                            *phase -= tau;
+                        }
+                    }
+                    let sample = (acc * supersaw_norm) as f32 * amp;
+                    for &p in &out_ptrs {
+                        *p.add(s) += sample;
+                    }
+                }
+            } else {
+                // Single oscillator (uses phases[0]): sine, or a naive aliasing saw.
+                let inc = tau * freq / sr;
+                for s in 0..num_samples {
+                    let sample = if mode == 1 {
+                        (2.0 * (v.phases[0] / tau) - 1.0) as f32 * amp
+                    } else {
+                        (v.phases[0].sin() as f32) * amp
+                    };
+                    for &p in &out_ptrs {
+                        *p.add(s) += sample;
+                    }
+                    v.phases[0] += inc;
+                    if v.phases[0] > tau {
+                        v.phases[0] -= tau;
+                    }
                 }
             }
-            v.phase = phase;
         }
 
         // Crude one-pole low-pass filter on the mixed output (per channel), driven by Cutoff.
@@ -393,6 +464,8 @@ impl IProcessContextRequirementsTrait for TestSynthProcessor {
 struct TestSynthController {
     cutoff: Mutex<f64>,
     waveform: Mutex<f64>,
+    detune: Mutex<f64>,
+    mix: Mutex<f64>,
 }
 
 impl Class for TestSynthController {
@@ -406,6 +479,8 @@ impl TestSynthController {
         Self {
             cutoff: Mutex::new(1.0),
             waveform: Mutex::new(0.0), // sine by default
+            detune: Mutex::new(0.3),
+            mix: Mutex::new(0.5),
         }
     }
 }
@@ -430,45 +505,53 @@ impl IEditControllerTrait for TestSynthController {
         kResultOk
     }
     unsafe fn getParameterCount(&self) -> i32 {
-        2
+        4
     }
     unsafe fn getParameterInfo(&self, index: i32, info: *mut ParameterInfo) -> tresult {
         let info = &mut *info;
+        let automate = ParameterInfo_::ParameterFlags_::kCanAutomate as i32;
+        let mut cont = |id: u32, name: &str, default: f64| {
+            info.id = id;
+            copy_wstring(name, &mut info.title);
+            copy_wstring(name, &mut info.shortTitle);
+            copy_wstring("", &mut info.units);
+            info.stepCount = 0; // continuous
+            info.defaultNormalizedValue = default;
+            info.unitId = 0;
+            info.flags = automate;
+        };
         match index {
-            0 => {
-                info.id = CUTOFF_PARAM_ID;
-                copy_wstring("Cutoff", &mut info.title);
-                copy_wstring("Cutoff", &mut info.shortTitle);
-                copy_wstring("", &mut info.units);
-                info.stepCount = 0; // continuous
-                info.defaultNormalizedValue = 1.0;
-                info.unitId = 0;
-                info.flags = ParameterInfo_::ParameterFlags_::kCanAutomate as i32;
-                kResultOk
-            }
+            0 => cont(CUTOFF_PARAM_ID, "Cutoff", 1.0),
+            2 => cont(DETUNE_PARAM_ID, "Detune", 0.3),
+            3 => cont(MIX_PARAM_ID, "Mix", 0.5),
             1 => {
                 info.id = WAVEFORM_PARAM_ID;
                 copy_wstring("Waveform", &mut info.title);
                 copy_wstring("Wave", &mut info.shortTitle);
                 copy_wstring("", &mut info.units);
-                info.stepCount = 1; // two discrete values: Sine / Saw
+                info.stepCount = 2; // three discrete values: Sine / Saw / Super Saw
                 info.defaultNormalizedValue = 0.0; // Sine
                 info.unitId = 0;
-                info.flags = (ParameterInfo_::ParameterFlags_::kCanAutomate
-                    | ParameterInfo_::ParameterFlags_::kIsList) as i32;
-                kResultOk
+                info.flags = automate | ParameterInfo_::ParameterFlags_::kIsList as i32;
             }
-            _ => kInvalidArgument,
+            _ => return kInvalidArgument,
         }
+        kResultOk
     }
     unsafe fn getParamStringByValue(&self, id: u32, v: f64, s: *mut String128) -> tresult {
         match id {
             WAVEFORM_PARAM_ID => {
-                let label = if v >= 0.5 { "Saw" } else { "Sine" };
+                let label = if v < 1.0 / 3.0 {
+                    "Sine"
+                } else if v < 2.0 / 3.0 {
+                    "Saw"
+                } else {
+                    "Super Saw"
+                };
                 copy_wstring(label, &mut *s);
                 kResultOk
             }
-            CUTOFF_PARAM_ID => {
+            CUTOFF_PARAM_ID | DETUNE_PARAM_ID | MIX_PARAM_ID => {
                 let text = format!("{:.0}%", v * 100.0);
                 copy_wstring(&text, &mut *s);
                 kResultOk
@@ -486,16 +569,22 @@ impl IEditControllerTrait for TestSynthController {
         v
     }
     unsafe fn getParamNormalized(&self, id: u32) -> f64 {
+        let read = |m: &Mutex<f64>| *m.lock().unwrap_or_else(|p| p.into_inner());
         match id {
-            CUTOFF_PARAM_ID => *self.cutoff.lock().unwrap_or_else(|p| p.into_inner()),
-            WAVEFORM_PARAM_ID => *self.waveform.lock().unwrap_or_else(|p| p.into_inner()),
+            CUTOFF_PARAM_ID => read(&self.cutoff),
+            WAVEFORM_PARAM_ID => read(&self.waveform),
+            DETUNE_PARAM_ID => read(&self.detune),
+            MIX_PARAM_ID => read(&self.mix),
             _ => 0.0,
         }
     }
     unsafe fn setParamNormalized(&self, id: u32, v: f64) -> tresult {
+        let write = |m: &Mutex<f64>| *m.lock().unwrap_or_else(|p| p.into_inner()) = v;
         match id {
-            CUTOFF_PARAM_ID => *self.cutoff.lock().unwrap_or_else(|p| p.into_inner()) = v,
-            WAVEFORM_PARAM_ID => *self.waveform.lock().unwrap_or_else(|p| p.into_inner()) = v,
+            CUTOFF_PARAM_ID => write(&self.cutoff),
+            WAVEFORM_PARAM_ID => write(&self.waveform),
+            DETUNE_PARAM_ID => write(&self.detune),
+            MIX_PARAM_ID => write(&self.mix),
             _ => {}
         }
         kResultOk
