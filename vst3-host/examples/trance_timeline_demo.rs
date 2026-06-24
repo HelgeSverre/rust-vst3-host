@@ -5,9 +5,10 @@
 //!   cargo run --example trance_timeline_demo                 # defaults to Jup-8000 if present
 //!   cargo run --example trance_timeline_demo -- "/path/to/Synth.vst3"
 //!   VST3_PLUGIN="/path/to/Synth.vst3" cargo run --example trance_timeline_demo
+//!   RIFF=nu-nrg cargo run --example trance_timeline_demo     # pick the embedded riff
 //!
-//! Showcases 0.5.0 program/preset selection + the timeline engine driving a real `.mid`. The
-//! MIDI is embedded so the example is self-contained; you only supply a VST3 synth. The filter
+//! Showcases 0.5.0 program/preset selection + the timeline engine driving a real `.mid`. Two
+//! riffs are embedded so the example is self-contained; you only supply a VST3 synth. The filter
 //! sweep targets a "Cutoff"/"Filter Type" parameter if the synth exposes one (it degrades
 //! gracefully otherwise).
 
@@ -20,8 +21,11 @@ use vst3_host::{
     Vst3Host,
 };
 
-/// A Nu-NRG riff (Basic Dawn — Pure Thrust), embedded so the example needs no external file.
-const MIDI_BYTES: &[u8] = include_bytes!("assets/nu-nrg-riff.mid");
+/// Embedded riffs (name, SMF bytes), so the example needs no external file. Pick with `$RIFF`.
+const RIFFS: &[(&str, &[u8])] = &[
+    ("moon", include_bytes!("assets/moon-loves-the-sun.mid")),
+    ("nu-nrg", include_bytes!("assets/nu-nrg-riff.mid")),
+];
 /// Default synth if none is passed; override with an arg or `VST3_PLUGIN`.
 const DEFAULT_PLUGIN: &str = "/Library/Audio/Plug-Ins/VST3/Jup-8000 V.vst3";
 
@@ -96,7 +100,15 @@ fn main() -> vst3_host::Result<()> {
         return Ok(());
     }
 
-    let (events, bpm) = load_midi(MIDI_BYTES);
+    // Pick the embedded riff (default: the first), selectable with `$RIFF`.
+    let riff = std::env::var("RIFF").unwrap_or_default();
+    let (name, bytes) = RIFFS
+        .iter()
+        .find(|(n, _)| *n == riff)
+        .copied()
+        .unwrap_or(RIFFS[0]);
+    println!("riff: {name}");
+    let (events, bpm) = load_midi(bytes);
     let last_beat = events.iter().map(|(b, _)| *b).fold(0.0, f64::max);
     let note_ons = events
         .iter()
