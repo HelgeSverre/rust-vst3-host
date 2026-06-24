@@ -187,21 +187,25 @@ impl eframe::App for App {
 
         egui::Panel::top("controls").show_inside(&mut root_ui, |ui| {
             ui.add_space(8.0);
-            // One control per line: its label glued directly to the left of its own slider.
-            let control = |ui: &mut egui::Ui, label: &str, a: &AtomicU32| {
-                ui.horizontal(|ui| {
-                    ui.label(label);
-                    let mut v = getf(a);
-                    if ui.add(egui::Slider::new(&mut v, 0.0..=1.0)).changed() {
-                        setf(a, v);
-                    }
-                });
-                ui.add_space(6.0);
-            };
-            control(ui, "Detune", &self.shared.detune);
-            control(ui, "Cutoff", &self.shared.cutoff);
-            control(ui, "Delay FB", &self.shared.delay_feedback);
-            control(ui, "Delay Mix", &self.shared.delay_wet);
+            // Controls side by side: each its own column with the label above its slider.
+            ui.horizontal(|ui| {
+                let control = |ui: &mut egui::Ui, label: &str, a: &AtomicU32| {
+                    ui.vertical(|ui| {
+                        ui.label(label);
+                        ui.spacing_mut().slider_width = 120.0;
+                        let mut v = getf(a);
+                        if ui.add(egui::Slider::new(&mut v, 0.0..=1.0)).changed() {
+                            setf(a, v);
+                        }
+                    });
+                    ui.add_space(24.0); // gap between control groups
+                };
+                control(ui, "Detune", &self.shared.detune);
+                control(ui, "Cutoff", &self.shared.cutoff);
+                control(ui, "Delay FB", &self.shared.delay_feedback);
+                control(ui, "Delay Mix", &self.shared.delay_wet);
+            });
+            ui.add_space(8.0);
         });
 
         egui::CentralPanel::default().show_inside(&mut root_ui, |ui| {
