@@ -186,23 +186,25 @@ impl eframe::App for App {
         root_ui.set_clip_rect(ctx.content_rect());
 
         egui::Panel::top("controls").show_inside(&mut root_ui, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let knob = |ui: &mut egui::Ui, label: &str, a: &AtomicU32| {
-                    let mut v = getf(a);
-                    if ui
-                        .add(egui::Slider::new(&mut v, 0.0..=1.0).text(label))
-                        .changed()
-                    {
-                        setf(a, v);
-                    }
-                };
-                knob(ui, "Detune", &self.shared.detune);
-                knob(ui, "Cutoff", &self.shared.cutoff);
-                knob(ui, "Delay FB", &self.shared.delay_feedback);
-                knob(ui, "Delay Mix", &self.shared.delay_wet);
-            });
-            ui.add_space(4.0);
+            ui.add_space(8.0);
+            egui::Grid::new("controls")
+                .num_columns(2)
+                .spacing([16.0, 12.0]) // [between label & slider, between rows]
+                .show(ui, |ui| {
+                    let row = |ui: &mut egui::Ui, label: &str, a: &AtomicU32| {
+                        ui.label(label); // label on the left
+                        let mut v = getf(a);
+                        if ui.add(egui::Slider::new(&mut v, 0.0..=1.0)).changed() {
+                            setf(a, v);
+                        }
+                        ui.end_row();
+                    };
+                    row(ui, "Detune", &self.shared.detune);
+                    row(ui, "Cutoff", &self.shared.cutoff);
+                    row(ui, "Delay FB", &self.shared.delay_feedback);
+                    row(ui, "Delay Mix", &self.shared.delay_wet);
+                });
+            ui.add_space(8.0);
         });
 
         egui::CentralPanel::default().show_inside(&mut root_ui, |ui| {
