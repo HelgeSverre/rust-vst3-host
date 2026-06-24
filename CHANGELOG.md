@@ -8,6 +8,16 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ### Added
 
+- **Timeline / sequencer engine** (`transport` module): schedule MIDI clips (`MidiClip`) and
+  parameter-automation lanes (`AutomationLane`) on a beat grid and drive them into a plugin
+  sample-accurately. `Timeline::advance_block` resolves the next block to `(event, sample_offset)`
+  and `(param_id, sample_offset, value)` lists; `Timeline::drive_block` pushes them into a
+  `Plugin` and renders one block. Beats timebase at a constant tempo (a tempo curve is future
+  work). Exported from the crate root and prelude.
+- `RtControl::send_midi_at`, `AudioHandle::send_midi_at`, `MidiSink::send_midi_at`, and
+  `HostCommand::SendMidiAt` (isolation) carry a MIDI sample offset end-to-end, so scheduled notes
+  land at the same block position on the in-process, lock-free, and isolated paths (the realtime
+  and mutex playback bridges previously dropped the offset to block start).
 - `Plugin::output_midi_handle()` returns an [`OutputMidiConsumer`] — a `Send` + `Sync` handle
   for draining the MIDI a plugin emits (arpeggiators, MPE, thru) from any thread without locking
   the audio thread. Pairs with `RealtimePluginRunner`: the lock-free runner previously had no way

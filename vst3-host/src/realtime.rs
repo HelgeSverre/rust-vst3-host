@@ -64,8 +64,8 @@ impl TransportCommand {
 
 /// A control command applied to the plugin on the audio thread.
 enum RtCommand {
-    /// Deliver a MIDI event on the next block.
-    Midi(MidiEvent),
+    /// Deliver a MIDI event at `offset` samples into the next block.
+    Midi { event: MidiEvent, offset: i32 },
     /// Set a normalized parameter value on the next block.
     Param { id: u32, value: f64 },
     /// Apply a transport change (tempo / time signature / playing) on the next block.
@@ -142,8 +142,8 @@ impl RealtimePluginRunner {
     pub fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
         while let Ok(cmd) = self.rx.pop() {
             match cmd {
-                RtCommand::Midi(event) => {
-                    let _ = self.plugin.send_midi_event(event);
+                RtCommand::Midi { event, offset } => {
+                    let _ = self.plugin.send_midi_event_at(event, offset);
                 }
                 RtCommand::Param { id, value } => {
                     let _ = self.plugin.set_parameter(id, value);
@@ -169,10 +169,23 @@ impl RealtimePluginRunner {
 }
 
 impl RtControl {
-    /// Queue a MIDI event for the next block. Returns `false` if the command queue is full
-    /// (the event is dropped rather than blocking the caller).
+    /// Queue a MIDI event for the next block (at block start). Returns `false` if the command
+    /// queue is full (the event is dropped rather than blocking the caller).
     pub fn send_midi(&mut self, event: MidiEvent) -> bool {
-        let ok = self.tx.push(RtCommand::Midi(event)).is_ok();
+        self.send_midi_at(event, 0)
+    }
+
+    /// Queue a MIDI event scheduled at `sample_offset` samples into the next block, for
+    /// sample-accurate sequencing. A negative offset is floored to `0`; `process()` clamps it
+    /// into the actual (possibly shorter) block. Returns `false` if the queue is full.
+    pub fn send_midi_at(&mut self, event: MidiEvent, sample_offset: i32) -> bool {
+        let ok = self
+            .tx
+            .push(RtCommand::Midi {
+                event,
+                offset: sample_offset.max(0),
+            })
+            .is_ok();
         self.track(ok)
     }
 
@@ -242,6 +255,7 @@ impl RtControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::midi::MidiChannel;
 
     #[test]
     fn control_queue_reports_full_without_blocking() {
@@ -283,6 +297,36 @@ mod tests {
         match rx.pop().expect("playing queued") {
             RtCommand::Transport(TransportCommand::Playing(p)) => assert!(!p),
             _ => panic!("expected playing transport command"),
+        }
+    }
+
+    #[test]
+    fn midi_offset_round_trips_through_the_ring() {
+        let (tx, mut rx) = RingBuffer::<RtCommand>::new(8);
+        let mut control = RtControl { tx, dropped: 0 };
+
+        assert!(control.send_midi_at(
+            MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 100,
+            },
+            128,
+        ));
+        // send_midi is the offset-0 convenience.
+        assert!(control.send_midi(MidiEvent::NoteOff {
+            channel: MidiChannel::Ch1,
+            note: 60,
+            velocity: 0,
+        }));
+
+        match rx.pop().expect("scheduled note queued") {
+            RtCommand::Midi { offset, .. } => assert_eq!(offset, 128),
+            _ => panic!("expected a MIDI command"),
+        }
+        match rx.pop().expect("block-start note queued") {
+            RtCommand::Midi { offset, .. } => assert_eq!(offset, 0),
+            _ => panic!("expected a MIDI command"),
         }
     }
 

@@ -252,6 +252,17 @@ fn handle(
             },
             Err(e) => err("SendMidi", e),
         }),
+        HostCommand::SendMidiAt {
+            event,
+            sample_offset,
+        } => with(plugin, |p| {
+            match p.send_midi_event_at(event, sample_offset) {
+                Ok(()) => HostResponse::Success {
+                    message: "midi sent".to_string(),
+                },
+                Err(e) => err("SendMidiAt", e),
+            }
+        }),
         HostCommand::SetBusActive {
             media_type,
             direction,

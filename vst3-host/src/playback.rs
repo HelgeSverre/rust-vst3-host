@@ -29,7 +29,7 @@ const SIDE_CHANNEL_CAPACITY: usize = 4096;
 /// A control command queued by a UI/control thread and applied on the audio thread (inside the
 /// callback, under the plugin lock it already holds) at the start of the next block.
 enum HybridCommand {
-    Midi(MidiEvent),
+    Midi { event: MidiEvent, offset: i32 },
     Param { id: u32, value: f64 },
     Transport(TransportCommand),
     Panic,
@@ -63,8 +63,8 @@ impl AudioSideChannels {
     fn apply_control(&mut self, plugin: &mut Plugin) {
         while let Ok(cmd) = self.control_rx.pop() {
             match cmd {
-                HybridCommand::Midi(event) => {
-                    let _ = plugin.send_midi_event(event);
+                HybridCommand::Midi { event, offset } => {
+                    let _ = plugin.send_midi_event_at(event, offset);
                 }
                 HybridCommand::Param { id, value } => {
                     let _ = plugin.set_parameter(id, value);
@@ -171,9 +171,22 @@ impl MidiSink {
     /// Lock-free and non-blocking (the same path as [`AudioHandle::send_midi`]). Returns `false`
     /// if the command ring is full (the event is dropped).
     pub fn send_midi(&self, event: MidiEvent) -> bool {
+        self.send_midi_at(event, 0)
+    }
+
+    /// Queue a MIDI event scheduled at `sample_offset` samples into the next block, for
+    /// sample-accurate sequencing. A negative offset is floored to `0`. Returns `false` if the
+    /// ring is full.
+    pub fn send_midi_at(&self, event: MidiEvent, sample_offset: i32) -> bool {
         self.control_tx
             .lock()
-            .map(|mut tx| tx.push(HybridCommand::Midi(event)).is_ok())
+            .map(|mut tx| {
+                tx.push(HybridCommand::Midi {
+                    event,
+                    offset: sample_offset.max(0),
+                })
+                .is_ok()
+            })
             .unwrap_or(false)
     }
 }
@@ -211,10 +224,23 @@ impl AudioHandle {
     /// block. Prefer this over `lock().send_midi_event(..)` on a UI thread — it never blocks
     /// on the audio mutex. Returns `false` if the ring is full (the event is dropped).
     pub fn send_midi(&self, event: MidiEvent) -> bool {
+        self.send_midi_at(event, 0)
+    }
+
+    /// Queue a MIDI event scheduled at `sample_offset` samples into the next block, for
+    /// sample-accurate sequencing, without locking the audio thread. A negative offset is
+    /// floored to `0`. Returns `false` if the ring is full.
+    pub fn send_midi_at(&self, event: MidiEvent, sample_offset: i32) -> bool {
         self.ui
             .control_tx
             .lock()
-            .map(|mut tx| tx.push(HybridCommand::Midi(event)).is_ok())
+            .map(|mut tx| {
+                tx.push(HybridCommand::Midi {
+                    event,
+                    offset: sample_offset.max(0),
+                })
+                .is_ok()
+            })
             .unwrap_or(false)
     }
 
@@ -659,6 +685,26 @@ mod tests {
         let mut out = vec![0.0; 6]; // 3 frames * 2 channels
         interleave_outputs(&outputs, &mut out, 2);
         assert_eq!(out, vec![1.0, -1.0, 2.0, -2.0, 3.0, -3.0]);
+    }
+
+    #[test]
+    fn hybrid_midi_carries_sample_offset() {
+        // The control ring (and apply_control) must preserve the scheduled offset so the mutex
+        // playback path schedules MIDI sample-accurately, like the lock-free path.
+        let (mut tx, mut rx) = RingBuffer::<HybridCommand>::new(4);
+        tx.push(HybridCommand::Midi {
+            event: MidiEvent::NoteOn {
+                channel: crate::midi::MidiChannel::Ch1,
+                note: 60,
+                velocity: 100,
+            },
+            offset: 200,
+        })
+        .expect("queue scheduled note");
+        match rx.pop().expect("note queued") {
+            HybridCommand::Midi { offset, .. } => assert_eq!(offset, 200),
+            _ => panic!("expected a MIDI command"),
+        }
     }
 
     #[test]

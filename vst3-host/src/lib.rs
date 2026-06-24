@@ -63,6 +63,7 @@ pub mod playback;
 pub mod plugin;
 pub mod realtime;
 pub mod simple;
+pub mod transport;
 pub mod window;
 
 pub mod discovery;
@@ -111,6 +112,7 @@ pub use plugin::{
     PluginUnit, ProcessMode, WindowHandle,
 };
 pub use realtime::{RealtimePluginRunner, RtControl};
+pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
 pub use window::PluginWindow;
 
 /// Prelude module for convenient imports
@@ -130,6 +132,7 @@ pub mod prelude {
         parameters::{AutomationCurve, AutomationPoint, Parameter, ParameterAutomation},
         playback::{play_with_backend, AudioHandle},
         plugin::{ParameterEdit, ParameterEditKind, Plugin, PluginInfo, ProcessMode, WindowHandle},
+        transport::{AutomationLane, MidiClip, Timeline},
         window::PluginWindow,
     };
 

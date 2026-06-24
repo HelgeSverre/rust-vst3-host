@@ -100,6 +100,13 @@ pub enum HostCommand {
         /// The event to deliver.
         event: crate::midi::MidiEvent,
     },
+    /// Schedule a MIDI event at a sample offset within the next process block.
+    SendMidiAt {
+        /// The event to deliver.
+        event: crate::midi::MidiEvent,
+        /// Sample offset within the next processed block.
+        sample_offset: i32,
+    },
     /// Process one block of audio. `inputs` is per-channel; `frames` is the block length.
     Process {
         /// Per-channel input samples (`[channel][frame]`).
@@ -678,6 +685,39 @@ mod wire_tests {
                 assert_eq!(id, 42);
                 assert_eq!(value, 0.75);
                 assert_eq!(offset, 256);
+            }
+            other => panic!("round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scheduled_midi_offset_ipc_round_trips() {
+        // Sample-accurate MIDI must carry its offset across the isolation boundary, so isolated
+        // playback schedules the event in the same block position as the in-process path.
+        use crate::midi::{MidiChannel, MidiEvent};
+        let cmd = HostCommand::SendMidiAt {
+            event: MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 100,
+            },
+            sample_offset: 256,
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize SendMidiAt");
+        match serde_json::from_str::<HostCommand>(&json).expect("deserialize SendMidiAt") {
+            HostCommand::SendMidiAt {
+                event,
+                sample_offset,
+            } => {
+                assert_eq!(
+                    event,
+                    MidiEvent::NoteOn {
+                        channel: MidiChannel::Ch1,
+                        note: 60,
+                        velocity: 100
+                    }
+                );
+                assert_eq!(sample_offset, 256);
             }
             other => panic!("round-trip changed the variant: {other:?}"),
         }
