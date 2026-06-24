@@ -1,9 +1,13 @@
 //! A tiny, deterministic VST3 test instrument for verifying `vst3-host`.
 //!
-//! It plays one sine voice per MIDI note (keyed by the host-assigned `noteId`) and implements
+//! It plays one voice per MIDI note (keyed by the host-assigned `noteId`) and implements
 //! `INoteExpressionController` with a single **Tuning** expression: a per-note pitch bend of
 //! ±1 octave (normalized value 0.5 = no bend). That lets the host prove note-expression /
 //! MPE end-to-end — something the bundled Dexed (no note expression) can't do.
+//!
+//! It also exposes two parameters so the host has something to drive: **Cutoff** (#0, a crude
+//! one-pole low-pass on the mixed output) and **Waveform** (#1, a stepped Sine/Saw select).
+//! Both default to a clean open sine so existing tests stay deterministic.
 //!
 //! Modeled on the `vst3` crate's `gain.rs` example. The only non-obvious detail: the macOS
 //! bundle-entry symbols must be lowercase `bundleEntry`/`bundleExit` (the SDK convention our
@@ -23,6 +27,11 @@ use std::sync::Mutex;
 use vst3::{uid, Class, ComRef, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 
 const PLUGIN_NAME: &str = "VST3 Host Test Synth";
+
+/// Parameter id for the crude low-pass cutoff (normalized 0..1, 1.0 = fully open).
+const CUTOFF_PARAM_ID: u32 = 0;
+/// Parameter id for the oscillator waveform (stepped: `< 0.5` = sine, `>= 0.5` = saw).
+const WAVEFORM_PARAM_ID: u32 = 1;
 
 fn copy_cstring(src: &str, dst: &mut [c_char]) {
     let c = CString::new(src).unwrap_or_default();
@@ -63,6 +72,12 @@ struct Voice {
 struct SynthState {
     sample_rate: f64,
     voices: Vec<Voice>,
+    /// Low-pass cutoff, normalized 0..1 (1.0 = fully open). Read from input parameter changes.
+    cutoff: f64,
+    /// Oscillator waveform: `< 0.5` = sine, `>= 0.5` = saw.
+    waveform: f64,
+    /// One-pole low-pass filter state, one per output channel.
+    lp: [f64; 2],
 }
 
 struct TestSynthProcessor {
@@ -81,6 +96,9 @@ impl TestSynthProcessor {
             state: Mutex::new(SynthState {
                 sample_rate: 48_000.0,
                 voices: Vec::new(),
+                cutoff: 1.0,
+                waveform: 0.0, // sine by default (deterministic for tests); demo opts into saw
+                lp: [0.0; 2],
             }),
         }
     }
@@ -211,6 +229,7 @@ impl IAudioProcessorTrait for TestSynthProcessor {
         if let Ok(mut s) = self.state.lock() {
             s.sample_rate = (*setup).sampleRate;
             s.voices.clear();
+            s.lp = [0.0; 2];
         }
         kResultOk
     }
@@ -265,6 +284,31 @@ impl IAudioProcessorTrait for TestSynthProcessor {
             }
         }
 
+        // Read parameter changes the host queued (cutoff + waveform). We take the last point of
+        // each queue for the block (block-granular — crude, but enough for a test synth).
+        if let Some(changes) = ComRef::from_raw(data.inputParameterChanges) {
+            for i in 0..changes.getParameterCount() {
+                let queue = changes.getParameterData(i);
+                let Some(queue) = ComRef::from_raw(queue) else {
+                    continue;
+                };
+                let points = queue.getPointCount();
+                if points <= 0 {
+                    continue;
+                }
+                let mut offset = 0i32;
+                let mut value = 0f64;
+                if queue.getPoint(points - 1, &mut offset, &mut value) != kResultOk {
+                    continue;
+                }
+                match queue.getParameterId() {
+                    CUTOFF_PARAM_ID => state.cutoff = value.clamp(0.0, 1.0),
+                    WAVEFORM_PARAM_ID => state.waveform = value.clamp(0.0, 1.0),
+                    _ => {}
+                }
+            }
+        }
+
         let num_samples = data.numSamples as usize;
         if data.numOutputs < 1 || num_samples == 0 {
             return kResultOk;
@@ -290,6 +334,7 @@ impl IAudioProcessorTrait for TestSynthProcessor {
 
         let sr = state.sample_rate.max(1.0);
         let amp = 0.25_f32;
+        let saw = state.waveform >= 0.5;
         for v in state.voices.iter_mut().filter(|v| v.active) {
             // Tuning: normalized 0..1, 0.5 = center; ±1 octave at the extremes.
             let bend_semitones = (v.tuning - 0.5) * 24.0;
@@ -297,7 +342,12 @@ impl IAudioProcessorTrait for TestSynthProcessor {
             let inc = std::f64::consts::TAU * freq / sr;
             let mut phase = v.phase;
             for s in 0..num_samples {
-                let sample = (phase.sin() as f32) * amp;
+                // Sine, or a naive (aliasing) saw ramp -1..1 — crude on purpose.
+                let sample = if saw {
+                    (2.0 * (phase / std::f64::consts::TAU) - 1.0) as f32 * amp
+                } else {
+                    (phase.sin() as f32) * amp
+                };
                 for &p in &out_ptrs {
                     *p.add(s) += sample;
                 }
@@ -307,6 +357,22 @@ impl IAudioProcessorTrait for TestSynthProcessor {
                 }
             }
             v.phase = phase;
+        }
+
+        // Crude one-pole low-pass filter on the mixed output (per channel), driven by Cutoff.
+        let fc = 20.0 * 1000f64.powf(state.cutoff); // ~20 Hz (closed) .. ~20 kHz (open)
+        let alpha = (1.0 - (-std::f64::consts::TAU * fc / sr).exp()).clamp(0.0, 1.0);
+        for (ch, &p) in out_ptrs.iter().enumerate() {
+            if ch >= state.lp.len() {
+                break;
+            }
+            let mut y = state.lp[ch];
+            for s in 0..num_samples {
+                let x = *p.add(s) as f64;
+                y += alpha * (x - y);
+                *p.add(s) = y as f32;
+            }
+            state.lp[ch] = y;
         }
 
         // Drop voices that finished (note off).
@@ -324,7 +390,10 @@ impl IProcessContextRequirementsTrait for TestSynthProcessor {
     }
 }
 
-struct TestSynthController;
+struct TestSynthController {
+    cutoff: Mutex<f64>,
+    waveform: Mutex<f64>,
+}
 
 impl Class for TestSynthController {
     type Interfaces = (IEditController, INoteExpressionController);
@@ -332,6 +401,13 @@ impl Class for TestSynthController {
 
 impl TestSynthController {
     const CID: TUID = uid(0x54455354, 0x53594E54, 0x4354524C, 0x00000001);
+
+    fn new() -> Self {
+        Self {
+            cutoff: Mutex::new(1.0),
+            waveform: Mutex::new(0.0), // sine by default
+        }
+    }
 }
 
 impl IPluginBaseTrait for TestSynthController {
@@ -354,13 +430,51 @@ impl IEditControllerTrait for TestSynthController {
         kResultOk
     }
     unsafe fn getParameterCount(&self) -> i32 {
-        0
+        2
     }
-    unsafe fn getParameterInfo(&self, _i: i32, _info: *mut ParameterInfo) -> tresult {
-        kInvalidArgument
+    unsafe fn getParameterInfo(&self, index: i32, info: *mut ParameterInfo) -> tresult {
+        let info = &mut *info;
+        match index {
+            0 => {
+                info.id = CUTOFF_PARAM_ID;
+                copy_wstring("Cutoff", &mut info.title);
+                copy_wstring("Cutoff", &mut info.shortTitle);
+                copy_wstring("", &mut info.units);
+                info.stepCount = 0; // continuous
+                info.defaultNormalizedValue = 1.0;
+                info.unitId = 0;
+                info.flags = ParameterInfo_::ParameterFlags_::kCanAutomate as i32;
+                kResultOk
+            }
+            1 => {
+                info.id = WAVEFORM_PARAM_ID;
+                copy_wstring("Waveform", &mut info.title);
+                copy_wstring("Wave", &mut info.shortTitle);
+                copy_wstring("", &mut info.units);
+                info.stepCount = 1; // two discrete values: Sine / Saw
+                info.defaultNormalizedValue = 0.0; // Sine
+                info.unitId = 0;
+                info.flags = (ParameterInfo_::ParameterFlags_::kCanAutomate
+                    | ParameterInfo_::ParameterFlags_::kIsList) as i32;
+                kResultOk
+            }
+            _ => kInvalidArgument,
+        }
     }
-    unsafe fn getParamStringByValue(&self, _id: u32, _v: f64, _s: *mut String128) -> tresult {
-        kNotImplemented
+    unsafe fn getParamStringByValue(&self, id: u32, v: f64, s: *mut String128) -> tresult {
+        match id {
+            WAVEFORM_PARAM_ID => {
+                let label = if v >= 0.5 { "Saw" } else { "Sine" };
+                copy_wstring(label, &mut *s);
+                kResultOk
+            }
+            CUTOFF_PARAM_ID => {
+                let text = format!("{:.0}%", v * 100.0);
+                copy_wstring(&text, &mut *s);
+                kResultOk
+            }
+            _ => kNotImplemented,
+        }
     }
     unsafe fn getParamValueByString(&self, _id: u32, _s: *mut TChar, _v: *mut f64) -> tresult {
         kNotImplemented
@@ -371,10 +485,19 @@ impl IEditControllerTrait for TestSynthController {
     unsafe fn plainParamToNormalized(&self, _id: u32, v: f64) -> f64 {
         v
     }
-    unsafe fn getParamNormalized(&self, _id: u32) -> f64 {
-        0.0
+    unsafe fn getParamNormalized(&self, id: u32) -> f64 {
+        match id {
+            CUTOFF_PARAM_ID => *self.cutoff.lock().unwrap_or_else(|p| p.into_inner()),
+            WAVEFORM_PARAM_ID => *self.waveform.lock().unwrap_or_else(|p| p.into_inner()),
+            _ => 0.0,
+        }
     }
-    unsafe fn setParamNormalized(&self, _id: u32, _v: f64) -> tresult {
+    unsafe fn setParamNormalized(&self, id: u32, v: f64) -> tresult {
+        match id {
+            CUTOFF_PARAM_ID => *self.cutoff.lock().unwrap_or_else(|p| p.into_inner()) = v,
+            WAVEFORM_PARAM_ID => *self.waveform.lock().unwrap_or_else(|p| p.into_inner()) = v,
+            _ => {}
+        }
         kResultOk
     }
     unsafe fn setComponentHandler(&self, _h: *mut IComponentHandler) -> tresult {
@@ -489,7 +612,7 @@ impl IPluginFactoryTrait for Factory {
                     .unwrap(),
             ),
             TestSynthController::CID => Some(
-                ComWrapper::new(TestSynthController)
+                ComWrapper::new(TestSynthController::new())
                     .to_com_ptr::<FUnknown>()
                     .unwrap(),
             ),

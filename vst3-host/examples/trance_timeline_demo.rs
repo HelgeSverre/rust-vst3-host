@@ -186,6 +186,14 @@ fn main() -> vst3_host::Result<()> {
         plugin.set_parameter(res.id, 0.35)?;
         println!("resonance → 0.35 on #{} \"{}\"", res.id, res.name);
     }
+    // Prefer a saw if the synth offers a waveform select (richer for trance).
+    if let Some(wave) = find("Waveform") {
+        plugin.set_parameter(wave.id, 1.0)?;
+        let label = plugin
+            .format_parameter(wave.id, 1.0)
+            .unwrap_or_else(|_| "saw".into());
+        println!("waveform → \"{label}\" on #{} \"{}\"", wave.id, wave.name);
+    }
 
     // Build the timeline straight from the MIDI events.
     let mut clip = MidiClip::new();
