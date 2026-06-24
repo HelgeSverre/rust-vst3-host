@@ -301,6 +301,16 @@ impl PluginInternal for IsolatedPluginImpl {
         self.expect_success(HostCommand::SendMidi { event }, "SendMidi")
     }
 
+    fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
+        self.expect_success(
+            HostCommand::SendMidiAt {
+                event,
+                sample_offset,
+            },
+            "SendMidiAt",
+        )
+    }
+
     fn set_bus_active(
         &mut self,
         media_type: crate::audio::MediaType,
