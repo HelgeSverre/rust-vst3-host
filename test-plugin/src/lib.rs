@@ -52,6 +52,23 @@ const SUPERSAW_DETUNE: [f64; 7] = [
     0.10745242,
 ];
 
+/// Szabo's empirical detune curve: maps the detune knob `x` (0..1) to the amount that scales the
+/// per-oscillator offsets above. An 11th-order polynomial fit of the JP-8000's (non-linear) knob
+/// response, so most of the musically useful detune lives in the lower half of the knob.
+fn supersaw_detune_curve(x: f64) -> f64 {
+    (10028.7312891634 * x.powi(11)) - (50818.8652045924 * x.powi(10))
+        + (111363.4808729368 * x.powi(9))
+        - (138150.6761080548 * x.powi(8))
+        + (106649.6679158292 * x.powi(7))
+        - (53046.9642751875 * x.powi(6))
+        + (17019.9518580080 * x.powi(5))
+        - (3425.0836591318 * x.powi(4))
+        + (404.2703938388 * x.powi(3))
+        - (24.1878824391 * x.powi(2))
+        + (0.6717417634 * x)
+        + 0.0030115596
+}
+
 fn copy_cstring(src: &str, dst: &mut [c_char]) {
     let c = CString::new(src).unwrap_or_default();
     for (s, d) in c.as_bytes_with_nul().iter().zip(dst.iter_mut()) {
@@ -377,7 +394,7 @@ impl IAudioProcessorTrait for TestSynthProcessor {
         } else {
             2
         };
-        let detune = state.detune;
+        let detune = supersaw_detune_curve(state.detune);
         // Center/side oscillator gains as a function of the Mix knob (Szabo's curves).
         let center_gain = -0.55366 * state.mix + 0.99785;
         let side_gain = -0.73764 * state.mix * state.mix + 1.2841 * state.mix + 0.044372;

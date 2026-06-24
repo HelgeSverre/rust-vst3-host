@@ -84,6 +84,50 @@ fn load_midi(bytes: &[u8]) -> (Vec<(f64, MidiEvent)>, f64) {
     (events, bpm)
 }
 
+/// A tempo-synced ping-pong delay applied in place to a stereo pair. Echoes cross channels
+/// (left's delayed signal feeds the right buffer and vice versa) so they bounce L/R — the
+/// classic trance delay. `delay_secs` is one tap; `feedback`/`wet` are 0..1.
+fn ping_pong(
+    left: &mut [f32],
+    right: &mut [f32],
+    sr: f64,
+    delay_secs: f64,
+    feedback: f32,
+    wet: f32,
+) {
+    let d = (delay_secs * sr).round() as usize;
+    if d == 0 {
+        return;
+    }
+    let mut buf_l = vec![0f32; d];
+    let mut buf_r = vec![0f32; d];
+    let mut w = 0usize;
+    for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+        let (dl, dr) = (buf_l[w], buf_r[w]); // signals delayed by `d` samples
+        let (in_l, in_r) = (*l, *r);
+        // Cross-feed the feedback so repeats alternate channels.
+        buf_l[w] = in_l + dr * feedback;
+        buf_r[w] = in_r + dl * feedback;
+        *l = in_l + dl * wet;
+        *r = in_r + dr * wet;
+        w = (w + 1) % d;
+    }
+}
+
+/// Resolve a delay-division name to its length in beats. Trance staples: dotted-1/8 (rolling
+/// lead) and 1/16 / dotted-1/16 (fast supersaw-pluck shimmer).
+fn delay_beats(name: &str) -> Option<f64> {
+    match name {
+        "off" => None,
+        "quarter" => Some(1.0),
+        "dotted8" => Some(0.75),
+        "8" => Some(0.5),
+        "dotted16" => Some(0.375),
+        "16" => Some(0.25),
+        _ => Some(0.375), // default: dotted 1/16
+    }
+}
+
 fn main() -> vst3_host::Result<()> {
     let sr = 48_000.0;
     let block = 512usize;
@@ -207,8 +251,8 @@ fn main() -> vst3_host::Result<()> {
         println!("waveform → \"{label}\" on #{} \"{}\"", wave.id, wave.name);
     }
     if let Some(detune) = find("Detune") {
-        plugin.set_parameter(detune.id, 0.5)?;
-        println!("detune → 0.5 on #{} \"{}\"", detune.id, detune.name);
+        plugin.set_parameter(detune.id, 0.75)?;
+        println!("detune → 0.75 on #{} \"{}\"", detune.id, detune.name);
     }
 
     // Build the timeline straight from the MIDI events.
@@ -245,6 +289,22 @@ fn main() -> vst3_host::Result<()> {
         right.extend_from_slice(&buf.outputs[r]);
     }
     plugin.stop_processing().ok();
+
+    // Tempo-synced ping-pong delay (classic trance). Pick the division with $DELAY.
+    let delay_name = std::env::var("DELAY").unwrap_or_else(|_| "dotted16".into());
+    if let Some(beats) = delay_beats(&delay_name) {
+        let delay_secs = beats * 60.0 / bpm;
+        let (feedback, wet) = (0.6, 0.5);
+        // Pad a couple of seconds of silence so the echoes ring out rather than getting cut.
+        let tail = (2.0 * sr) as usize;
+        left.resize(left.len() + tail, 0.0);
+        right.resize(right.len() + tail, 0.0);
+        ping_pong(&mut left, &mut right, sr, delay_secs, feedback, wet);
+        println!(
+            "ping-pong delay: {delay_name} ({:.0} ms, feedback {feedback}, wet {wet})",
+            delay_secs * 1000.0
+        );
+    }
 
     let peak = left
         .iter()
