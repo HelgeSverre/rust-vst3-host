@@ -51,6 +51,11 @@ inspector:
 play PLUGIN_PATH=PLUGIN:
     cargo run -p vst3-host --example play_synth -- "{{ PLUGIN_PATH }}"
 
+# Render an embedded Nu-NRG MIDI riff through the timeline with an LPF cutoff sweep, then play it
+[group('run')]
+trance PLUGIN_PATH="/Library/Audio/Plug-Ins/VST3/Jup-8000 V.vst3":
+    cargo run -p vst3-host --example trance_timeline_demo -- "{{ PLUGIN_PATH }}"
+
 # Headless self-test: drive the library through the inspector binary (no GUI)
 [group('test')]
 selftest PLUGIN_PATH=PLUGIN:

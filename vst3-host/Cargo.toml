@@ -89,6 +89,7 @@ env_logger = "0.11"
 rfd = "0.17"
 eframe = "0.34"
 raw-window-handle = "0.6"
+midly = "0.5"
 
 [[example]]
 name = "play_synth"
