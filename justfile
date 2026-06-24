@@ -57,6 +57,11 @@ play PLUGIN_PATH=PLUGIN:
 trance PLUGIN_PATH="test_plugins/TestSynth.vst3": test-plugin
     cargo run -p vst3-host --example trance_timeline_demo -- "{{ PLUGIN_PATH }}"
 
+# Live trance GUI: piano-roll + playhead + live detune/cutoff/delay knobs (builds the test synth)
+[group('run')]
+trance-gui PLUGIN_PATH="test_plugins/TestSynth.vst3": test-plugin
+    cargo run -p vst3-host --example trance_timeline_gui -- "{{ PLUGIN_PATH }}"
+
 # Headless self-test: drive the library through the inspector binary (no GUI)
 [group('test')]
 selftest PLUGIN_PATH=PLUGIN:
