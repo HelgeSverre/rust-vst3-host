@@ -44,6 +44,8 @@ pub struct PluginWindow {
     native_window: Option<HWND>,
     #[cfg(target_os = "linux")]
     native_window: Option<XcbWindowState>,
+    #[cfg(target_os = "android")]
+    native_window: Option<()>,
 }
 
 impl PluginWindow {
@@ -51,7 +53,12 @@ impl PluginWindow {
     pub fn new(plugin: Arc<Mutex<Plugin>>) -> Self {
         Self {
             plugin,
-            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "windows",
+                target_os = "linux",
+                target_os = "android"
+            ))]
             native_window: None,
         }
     }
@@ -296,6 +303,13 @@ impl PluginWindow {
             self.native_window = Some(XcbWindowState { connection, window });
         }
 
+        #[cfg(target_os = "android")]
+        {
+            return Err(Error::Other(
+                "PluginWindow::open() is not supported on Android".to_string(),
+            ));
+        }
+
         Ok(())
     }
 
@@ -334,6 +348,11 @@ impl PluginWindow {
                 });
                 let _ = state.connection.flush();
             }
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let _ = self.native_window.take();
         }
     }
 
