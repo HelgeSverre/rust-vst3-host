@@ -3,6 +3,19 @@
 [advisories]
 version = 2
 # Fail on security advisories for crates in the dependency graph.
+ignore = [
+    # quick-xml DoS/quadratic-parse advisories. Both copies in our graph are Linux-only and
+    # parse *trusted, local* protocol XML at build time — `xcb` (build-dep, X11 protocol) pulls
+    # 0.30 and `wayland-scanner` (proc-macro) pulls 0.39. No untrusted XML reaches them, and the
+    # fixes sit outside those crates' pinned version ranges (can't upgrade without patching them
+    # upstream). Not part of the published `vst3-host` runtime surface.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # `ttf-parser` unmaintained. Pulled only through egui's text stack (GUI/dev path), never by
+    # the published `vst3-host` library. "Unmaintained" is an informational advisory, not a
+    # vulnerability; nothing to upgrade to until egui migrates off it.
+    "RUSTSEC-2026-0192",
+]
 
 [licenses]
 version = 2

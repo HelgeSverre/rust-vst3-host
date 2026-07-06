@@ -161,9 +161,16 @@ mod tests {
 
     #[test]
     fn list_midi_input_ports_does_not_error() {
-        // May be empty in CI (no devices), but must not fail to enumerate.
-        let ports = list_midi_input_ports();
-        assert!(ports.is_ok(), "enumeration failed: {:?}", ports.err());
+        // On a machine with a MIDI subsystem, enumeration must succeed (possibly empty).
+        // Headless CI has no ALSA sequencer (`/dev/snd/seq`), so `midir` can't initialize a
+        // backend at all — that's an absent subsystem, not an enumeration bug, so accept it.
+        match list_midi_input_ports() {
+            Ok(_) => {}
+            Err(Error::MidiError(msg)) if msg.contains("could not be initialized") => {
+                eprintln!("skipping: no MIDI subsystem available ({msg})");
+            }
+            Err(e) => panic!("enumeration failed: {e:?}"),
+        }
     }
 
     #[test]

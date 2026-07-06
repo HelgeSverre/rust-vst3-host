@@ -1,0 +1,56 @@
+name: Release
+
+# Fires when a version tag is pushed. Publishes the library to crates.io and creates the
+# matching GitHub release from its CHANGELOG section. Requires a `CARGO_REGISTRY_TOKEN` repo
+# secret (Settings → Secrets and variables → Actions) for the crates.io publish step.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  publish-crate:
+    name: Publish vst3-host to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build deps (libclang, libxcb, ALSA)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev clang libxcb1-dev libxcb-util-dev libasound2-dev pkg-config
+      - name: Verify the tag matches the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import sys,json; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="vst3-host"))')"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match vst3-host crate version $crate"; exit 1
+          fi
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p vst3-host
+
+  github-release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Extract this version's changelog section
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v ver="$ver" '$0 ~ "^## \\["ver"\\]"{s=1;next} /^## \[/{if(s)exit} s{print}' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then echo "Release ${GITHUB_REF_NAME}." > RELEASE_NOTES.md; fi
+      - name: Create release (marked latest — GitHub compares semver)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md \
+            --verify-tag \
+            --latest
