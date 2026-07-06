@@ -72,6 +72,11 @@ pub fn load_module(path: &Path) -> Result<Box<dyn VstModule>> {
     {
         linux::LinuxModuleLoader::load(path)
     }
+
+    #[cfg(target_os = "android")]
+    {
+        linux::LinuxModuleLoader::load(path)
+    }
 }
 
 /// Pure, platform-independent binary-header parsing for architecture-mismatch diagnostics.
@@ -285,5 +290,5 @@ pub mod private_namespace;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod linux;

@@ -1418,6 +1418,8 @@ impl PluginInternal for PluginImpl {
                 let platform_type = c"HWND".as_ptr();
                 #[cfg(target_os = "linux")]
                 let platform_type = c"X11EmbedWindowID".as_ptr();
+                #[cfg(target_os = "android")]
+                let platform_type = c"kNativeWindowHandle".as_ptr();
 
                 // Check platform support
                 if view.isPlatformTypeSupported(platform_type) != kResultOk {

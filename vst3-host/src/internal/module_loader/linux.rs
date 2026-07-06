@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use std::path::Path;
 use vst3::Steinberg::IPluginFactory;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use libloading::{Library, Symbol};
 
 /// Function signature for ModuleEntry
