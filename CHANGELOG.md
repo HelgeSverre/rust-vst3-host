@@ -6,6 +6,8 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-06
+
 ### Added
 
 - **Timeline / sequencer engine** (`transport` module): schedule MIDI clips (`MidiClip`) and
@@ -24,6 +26,11 @@ All notable changes to `vst3-host` are documented here. The format is based on
   to surface output MIDI; now you take the handle, move the plugin into the runner, and poll from
   your UI thread while the audio thread pushes. In-process only (`None` under process isolation,
   where output MIDI crosses the boundary in IPC responses).
+- **Android build support**: the crate now compiles for `target_os = "android"` (verified
+  on-device on `arm64-v8a`, Android 13). Android reuses the Linux VST3 module path — `dlopen`
+  plus the required `ModuleEntry`/`ModuleExit` entry points — so discover → load → parameters →
+  `process_audio` all run natively on a phone through the library's public API. Plugin-editor
+  windowing is not supported on Android (`PluginWindow::open` returns an error; there is no X11).
 
 ### Changed
 
@@ -273,6 +280,9 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 - Initial release: safe VST3 hosting — discover, load, parameters, MIDI, audio playback, state
   save/restore, and process isolation.
 
+[Unreleased]: https://github.com/HelgeSverre/rust-vst3-host/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.6.0
+[0.5.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.5.0
 [0.4.2]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.4.2
 [0.4.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.4.1
 [0.4.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.4.0

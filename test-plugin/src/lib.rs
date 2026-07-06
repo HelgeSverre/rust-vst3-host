@@ -1473,13 +1473,15 @@ extern "system" fn ExitDll() -> bool {
     true
 }
 
-#[cfg(target_os = "linux")]
+// Linux and Android share the VST3 module convention (ModuleEntry/ModuleExit). Gating these
+// in for Android too lets the plugin cross-compile and load on-device (verified on arm64-v8a).
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[no_mangle]
 extern "system" fn ModuleEntry(_handle: *mut c_void) -> bool {
     true
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[no_mangle]
 extern "system" fn ModuleExit() -> bool {
     true
