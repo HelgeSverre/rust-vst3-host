@@ -14,6 +14,11 @@ jobs:
   publish-crate:
     name: Publish vst3-host to crates.io
     runs-on: ubuntu-latest
+    # crates.io Trusted Publishing (OIDC): no stored token secret. Requires a one-time trusted
+    # publisher registered on the crate at crates.io (owner/repo + this workflow file name).
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -29,9 +34,12 @@ jobs:
           if [ "$tag" != "$crate" ]; then
             echo "::error::tag v$tag does not match vst3-host crate version $crate"; exit 1
           fi
+      - name: Authenticate to crates.io via OIDC (no token secret)
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
       - name: cargo publish
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish -p vst3-host
 
   github-release:
