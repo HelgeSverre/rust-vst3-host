@@ -1,6 +1,7 @@
 //! Example: play a real MIDI file (a Nu-NRG riff, embedded) through the `transport::Timeline`
-//! into a VST3 synth, with an LPF cutoff sweep + program selection, render it offline to a WAV,
-//! and (on macOS) play it.
+//! into a VST3 synth, with an LPF cutoff sweep + program selection, render it offline through a
+//! small trance FX chain (3-band EQ → tempo-synced ping-pong delay → Dattorro plate reverb, all
+//! in `examples/dsp/`) to a WAV, and (on macOS) play it.
 //!
 //!   cargo run --example trance_timeline_demo                 # defaults to Jup-8000 if present
 //!   cargo run --example trance_timeline_demo -- "/path/to/Synth.vst3"
@@ -12,6 +13,10 @@
 //! sweep targets a "Cutoff"/"Filter Type" parameter if the synth exposes one (it degrades
 //! gracefully otherwise).
 
+#[path = "dsp/mod.rs"]
+mod dsp;
+
+use dsp::{EqBand, PingPong, PlateReverb, ThreeBandEq};
 use midly::{MetaMessage, MidiMessage, Smf, Timing, TrackEventKind};
 use vst3_host::{
     audio::{write_wav, AudioBuffers},
@@ -25,12 +30,14 @@ use vst3_host::{
 const RIFFS: &[(&str, &[u8])] = &[
     ("moon", include_bytes!("assets/moon-loves-the-sun.mid")),
     ("nu-nrg", include_bytes!("assets/nu-nrg-riff.mid")),
+    ("anthem", include_bytes!("assets/helgewave-anthem.mid")),
 ];
 /// Default synth if none is passed; override with an arg or `VST3_PLUGIN`.
 const DEFAULT_PLUGIN: &str = "/Library/Audio/Plug-Ins/VST3/Jup-8000 V.vst3";
 
 /// Parse the SMF into `(beat, MidiEvent)` note events plus the file's tempo (BPM).
-/// Drum channel (MIDI ch 10 / index 9) is skipped; everything else collapses onto Ch1.
+/// Drum channel (MIDI ch 10 / index 9) is skipped; other channels are preserved (the
+/// bitimbral TestSynth plays channel 2 with its pad part).
 fn load_midi(bytes: &[u8]) -> (Vec<(f64, MidiEvent)>, f64) {
     let smf = Smf::parse(bytes).expect("parse embedded midi");
     let tpq = match smf.header.timing {
@@ -53,12 +60,13 @@ fn load_midi(bytes: &[u8]) -> (Vec<(f64, MidiEvent)>, f64) {
                     if channel.as_int() == 9 {
                         continue; // skip GM drums
                     }
+                    let ch = MidiChannel::from_index(channel.as_int()).unwrap_or(MidiChannel::Ch1);
                     match message {
                         MidiMessage::NoteOn { key, vel } if vel.as_int() > 0 => {
                             events.push((
                                 beat,
                                 MidiEvent::NoteOn {
-                                    channel: MidiChannel::Ch1,
+                                    channel: ch,
                                     note: key.as_int(),
                                     velocity: vel.as_int(),
                                 },
@@ -68,7 +76,7 @@ fn load_midi(bytes: &[u8]) -> (Vec<(f64, MidiEvent)>, f64) {
                             events.push((
                                 beat,
                                 MidiEvent::NoteOff {
-                                    channel: MidiChannel::Ch1,
+                                    channel: ch,
                                     note: key.as_int(),
                                     velocity: 0,
                                 },
@@ -84,36 +92,6 @@ fn load_midi(bytes: &[u8]) -> (Vec<(f64, MidiEvent)>, f64) {
     (events, bpm)
 }
 
-/// A tempo-synced ping-pong delay applied in place to a stereo pair. Echoes cross channels
-/// (left's delayed signal feeds the right buffer and vice versa) so they bounce L/R — the
-/// classic trance delay. `delay_secs` is one tap; `feedback`/`wet` are 0..1.
-fn ping_pong(
-    left: &mut [f32],
-    right: &mut [f32],
-    sr: f64,
-    delay_secs: f64,
-    feedback: f32,
-    wet: f32,
-) {
-    let d = (delay_secs * sr).round() as usize;
-    if d == 0 {
-        return;
-    }
-    let mut buf_l = vec![0f32; d];
-    let mut buf_r = vec![0f32; d];
-    let mut w = 0usize;
-    for (l, r) in left.iter_mut().zip(right.iter_mut()) {
-        let (dl, dr) = (buf_l[w], buf_r[w]); // signals delayed by `d` samples
-        let (in_l, in_r) = (*l, *r);
-        // Cross-feed the feedback so repeats alternate channels.
-        buf_l[w] = in_l + dr * feedback;
-        buf_r[w] = in_r + dl * feedback;
-        *l = in_l + dl * wet;
-        *r = in_r + dr * wet;
-        w = (w + 1) % d;
-    }
-}
-
 /// Resolve a delay-division name to its length in beats. Trance staples: dotted-1/8 (rolling
 /// lead) and 1/16 / dotted-1/16 (fast supersaw-pluck shimmer).
 fn delay_beats(name: &str) -> Option<f64> {
@@ -124,7 +102,7 @@ fn delay_beats(name: &str) -> Option<f64> {
         "8" => Some(0.5),
         "dotted16" => Some(0.375),
         "16" => Some(0.25),
-        _ => Some(0.375), // default: dotted 1/16
+        _ => Some(0.75), // default: dotted 1/8, the rolling trance staple
     }
 }
 
@@ -152,6 +130,9 @@ fn main() -> vst3_host::Result<()> {
         .copied()
         .unwrap_or(RIFFS[0]);
     println!("riff: {name}");
+    // The anthem is written as a sustained lead piece — it skips the pluck→lead morph below
+    // and plays a fully open supersaw throughout.
+    let is_anthem = name == "anthem";
     let (events, bpm) = load_midi(bytes);
     let last_beat = events.iter().map(|(b, _)| *b).fold(0.0, f64::max);
     let note_ons = events
@@ -251,28 +232,95 @@ fn main() -> vst3_host::Result<()> {
         println!("waveform → \"{label}\" on #{} \"{}\"", wave.id, wave.name);
     }
     if let Some(detune) = find("Detune") {
-        plugin.set_parameter(detune.id, 0.75)?;
-        println!("detune → 0.75 on #{} \"{}\"", detune.id, detune.name);
+        plugin.set_parameter(detune.id, 0.6)?;
+        println!("detune → 0.6 on #{} \"{}\"", detune.id, detune.name);
+    }
+    // Bright center/side blend (Szabo's curves put the classic JP-8000 mix around 0.7).
+    if let Some(mix) = find("Mix") {
+        plugin.set_parameter(mix.id, 0.7)?;
+        println!("mix → 0.7 on #{} \"{}\"", mix.id, mix.name);
+    }
+    // Envelope base settings (TestSynth ADSRs). Default arrangement: a tight pluck that the
+    // automation lanes below morph into the sustained lead. The anthem instead runs fully
+    // open from bar one.
+    let base_settings: &[(&str, f64)] = if is_anthem {
+        &[
+            ("Amp Sustain", 1.0),
+            ("Amp Release", 0.62),
+            ("Cutoff", 1.0), // wide open, no sweep — the anthem stays bright throughout
+            ("Filter Env Amount", 0.1),
+            ("Resonance", 0.18),
+            ("Ch2 Program", 1.0),
+        ]
+    } else {
+        &[
+            ("Amp Decay", 0.6), // ~95 ms — tighter than the riff's 16th grid, so notes gate
+            ("Filter Decay", 0.62), // ~110 ms filter fall
+            ("Filter Sustain", 0.1),
+            ("Filter Release", 0.5),
+            ("Ch2 Program", 1.0), // second timbre = Lush Pad...
+            ("Ch2 Level", 0.5),   // ...playing whatever the riff has on MIDI channel 2
+        ]
+    };
+    let mut env_set = 0;
+    for (name, v) in base_settings {
+        if let Some(p) = find(name) {
+            plugin.set_parameter(p.id, *v)?;
+            env_set += 1;
+        }
+    }
+    if env_set > 0 {
+        println!(
+            "envelopes: {} settings on {env_set} params",
+            if is_anthem {
+                "open supersaw lead"
+            } else {
+                "pluck base"
+            }
+        );
     }
 
-    // Build the timeline straight from the MIDI events.
+    // Build the timeline straight from the MIDI events (kept around — the anthem's second
+    // render pass rebuilds a fresh timeline from them).
     let mut clip = MidiClip::new();
-    for (beat, ev) in events {
+    for &(beat, ev) in &events {
         clip.add(beat, ev);
     }
     let mut timeline = Timeline::new(sr, bpm).with_clip(clip);
 
-    // A trance filter sweep over the whole riff.
-    if let Some(p) = &cutoff {
-        let span = last_beat.max(8.0);
+    // The arrangement: a gated pluck for the first half that morphs into the sustained
+    // supersaw lead — amp sustain ramps up, the filter envelope hands over to an open cutoff.
+    let span = last_beat.max(8.0);
+    let (morph_from, morph_to) = (span * 0.45, span * 0.6);
+    if let Some(p) = cutoff.as_ref().filter(|_| !is_anthem) {
         let sweep = ParameterAutomation::new()
-            .add_point(0.0, 0.30)
-            .add_point(span * 0.25, 0.95)
-            .add_point(span * 0.5, 0.40)
-            .add_point(span * 0.75, 1.0)
-            .add_point(span, 0.5)
+            .add_point(0.0, 0.32)
+            .add_point(morph_from, 0.40)
+            .add_point(morph_to, 0.75)
+            .add_point(span * 0.8, 0.95)
+            .add_point(span, 0.6)
             .with_curve(AutomationCurve::Linear);
         timeline.add_lane(AutomationLane::new(p.id, sweep, 16));
+    }
+    if let Some(p) = find("Amp Sustain").filter(|_| !is_anthem) {
+        let morph = ParameterAutomation::new()
+            .add_point(0.0, 0.12)
+            .add_point(morph_from, 0.12)
+            .add_point(morph_to, 1.0)
+            .add_point(span, 1.0)
+            .with_curve(AutomationCurve::Linear);
+        timeline.add_lane(AutomationLane::new(p.id, morph, 16));
+        println!("amp sustain: pluck (12%) → lead (100%) over beats {morph_from:.0}–{morph_to:.0}");
+    }
+    if let Some(p) = find("Filter Env Amount").filter(|_| !is_anthem) {
+        let morph = ParameterAutomation::new()
+            .add_point(0.0, 0.60)
+            .add_point(morph_from, 0.60)
+            .add_point(morph_to, 0.15)
+            .add_point(span, 0.15)
+            .with_curve(AutomationCurve::Linear);
+        timeline.add_lane(AutomationLane::new(p.id, morph, 16));
+        println!("filter env amount: pluck (60%) → lead (15%)");
     }
 
     // Render to the end of the riff + a release tail.
@@ -280,30 +328,133 @@ fn main() -> vst3_host::Result<()> {
     let total_blocks = (total_secs * sr / block as f64).ceil() as usize;
 
     let mut buf = AudioBuffers::new(0, 2, block, sr);
-    let mut left = Vec::with_capacity(total_blocks * block);
-    let mut right = Vec::with_capacity(total_blocks * block);
-    for _ in 0..total_blocks {
-        timeline.drive_block(&mut plugin, &mut buf)?;
-        left.extend_from_slice(&buf.outputs[0]);
-        let r = if buf.outputs.len() > 1 { 1 } else { 0 };
-        right.extend_from_slice(&buf.outputs[r]);
-    }
+    let mut render = |timeline: &mut Timeline, plugin: &mut vst3_host::Plugin| {
+        let mut l = Vec::with_capacity(total_blocks * block);
+        let mut r = Vec::with_capacity(total_blocks * block);
+        for _ in 0..total_blocks {
+            timeline.drive_block(plugin, &mut buf)?;
+            l.extend_from_slice(&buf.outputs[0]);
+            let ri = if buf.outputs.len() > 1 { 1 } else { 0 };
+            r.extend_from_slice(&buf.outputs[ri]);
+        }
+        vst3_host::Result::Ok((l, r))
+    };
+
+    // The anthem renders its two parts to separate buses (via the Ch1/Ch2 Level params), so
+    // the lead can take delay + reverb while the pad stays dry and unmuddied.
+    let mut pad_bus: Option<(Vec<f32>, Vec<f32>)> = None;
+    let (mut left, mut right) = if is_anthem {
+        let set = |plugin: &mut vst3_host::Plugin, name: &str, v: f64| {
+            if let Some(id) = params.iter().find(|p| p.name == name).map(|p| p.id) {
+                let _ = plugin.set_parameter(id, v);
+            }
+        };
+        set(&mut plugin, "Ch2 Level", 0.0); // pass 1: lead only
+        let lead = render(&mut timeline, &mut plugin)?;
+        set(&mut plugin, "Ch1 Level", 0.0); // pass 2: pad only
+        set(&mut plugin, "Ch2 Level", 0.6);
+        let mut clip = MidiClip::new();
+        for &(beat, ev) in &events {
+            clip.add(beat, ev);
+        }
+        let mut pad_timeline = Timeline::new(sr, bpm).with_clip(clip);
+        pad_bus = Some(render(&mut pad_timeline, &mut plugin)?);
+        println!("anthem: lead and pad rendered to separate buses");
+        lead
+    } else {
+        render(&mut timeline, &mut plugin)?
+    };
     plugin.stop_processing().ok();
 
+    // Channel EQ before the sends: trim the mud, add presence, lift the sparkle.
+    let mut eq = ThreeBandEq::new(
+        sr as f32,
+        EqBand {
+            hz: 120.0,
+            gain_db: -1.5,
+            q: 0.7,
+        },
+        EqBand {
+            hz: 2500.0,
+            gain_db: 1.0,
+            q: 1.0,
+        },
+        EqBand {
+            hz: 8000.0,
+            gain_db: 2.5,
+            q: 0.7,
+        },
+    );
+    eq.process(&mut left, &mut right);
+    println!("EQ: low shelf 120 Hz -1.5 dB, peak 2.5 kHz +1 dB, high shelf 8 kHz +2.5 dB");
+
+    // Pad a few seconds of silence so the delay echoes and reverb tail ring out.
+    let tail = (4.0 * sr) as usize;
+    left.resize(left.len() + tail, 0.0);
+    right.resize(right.len() + tail, 0.0);
+
     // Tempo-synced ping-pong delay (classic trance). Pick the division with $DELAY.
-    let delay_name = std::env::var("DELAY").unwrap_or_else(|_| "dotted16".into());
+    // The anthem sends the lead bus hotter into it.
+    let delay_name = std::env::var("DELAY").unwrap_or_else(|_| "dotted8".into());
     if let Some(beats) = delay_beats(&delay_name) {
         let delay_secs = beats * 60.0 / bpm;
-        let (feedback, wet) = (0.6, 0.5);
-        // Pad a couple of seconds of silence so the echoes ring out rather than getting cut.
-        let tail = (2.0 * sr) as usize;
-        left.resize(left.len() + tail, 0.0);
-        right.resize(right.len() + tail, 0.0);
-        ping_pong(&mut left, &mut right, sr, delay_secs, feedback, wet);
+        let (feedback, wet) = if is_anthem { (0.52, 0.5) } else { (0.45, 0.35) };
+        let mut delay = PingPong::new((delay_secs * sr) as usize, sr as f32);
+        delay.process(&mut left, &mut right, feedback, wet);
         println!(
             "ping-pong delay: {delay_name} ({:.0} ms, feedback {feedback}, wet {wet})",
             delay_secs * 1000.0
         );
+    }
+
+    // Dattorro plate reverb (disable with REVERB=off) — on the anthem this only touches the
+    // lead bus, bigger and wetter; the pad joins afterwards, dry.
+    if std::env::var("REVERB").map(|v| v != "off").unwrap_or(true) {
+        let mut reverb = PlateReverb::new(sr, 20.0);
+        let wet = if is_anthem {
+            reverb.decay = 0.85;
+            reverb.damping = 0.3;
+            0.38
+        } else {
+            reverb.decay = 0.8;
+            reverb.damping = 0.35;
+            0.22
+        };
+        reverb.process(&mut left, &mut right, wet);
+        println!(
+            "plate reverb: decay {}, wet {wet}, pre-delay 20 ms{}",
+            reverb.decay,
+            if is_anthem { " (lead bus only)" } else { "" }
+        );
+    }
+
+    // Sum the dry pad bus back under the lead.
+    if let Some((pl, pr)) = pad_bus {
+        for (dst, src) in left.iter_mut().zip(pl.iter()) {
+            *dst += src;
+        }
+        for (dst, src) in right.iter_mut().zip(pr.iter()) {
+            *dst += src;
+        }
+    }
+
+    // Four-on-the-floor kick + sidechain pump — off by default so the riff itself stays the
+    // star; opt in with KICK=on. Ducks the synth bus as if keyed by the kick, then lays the
+    // kick on top unducked.
+    if std::env::var("KICK").map(|v| v == "on").unwrap_or(false) {
+        let samples_per_beat = 60.0 / bpm * sr;
+        let kicked = (((last_beat + 1.0) * samples_per_beat) as usize).min(left.len());
+        dsp::sidechain_duck(&mut left[..kicked], &mut right[..kicked], sr, bpm, 0.55);
+        let mut kick = dsp::Kick::new(sr as f32);
+        let mut beat = 0.0;
+        while beat <= last_beat {
+            let pos = (beat * samples_per_beat) as usize;
+            let end = (pos + (sr * 0.4) as usize).min(left.len());
+            kick.trigger();
+            kick.process(&mut left[pos..end], &mut right[pos..end], 0.65, 0.55, 0.4);
+            beat += 1.0;
+        }
+        println!("kick + sidechain: 4-on-the-floor, duck depth 0.55");
     }
 
     let peak = left

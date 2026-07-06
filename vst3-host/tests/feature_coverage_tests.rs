@@ -1172,3 +1172,276 @@ fn test_plugin_preset_serde_roundtrip() {
     assert_eq!(back.plugin_name, preset.plugin_name);
     assert_eq!(back.state, preset.state);
 }
+
+// ---------------------------------------------------------------------------
+// TestSynth capability coverage: these run the library's state, program, MIDI-mapping and
+// sample-accurate-event paths against the in-repo synth, so they need no third-party plugin.
+// ---------------------------------------------------------------------------
+
+/// State persistence: parameter values survive a save_state → fresh instance → load_state trip.
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn test_testsynth_state_roundtrip() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_test_synth() else {
+        return;
+    };
+    plugin.set_parameter(0, 0.33).expect("set cutoff"); // Cutoff
+    plugin.set_parameter(2, 0.77).expect("set detune"); // Detune
+    plugin.set_parameter(7, 0.41).expect("set sustain"); // Amp Sustain
+                                                         // Parameter changes reach the processor as part of process(), so run one block before
+                                                         // asking the processor to serialize its state.
+    plugin.start_processing().expect("start_processing");
+    let mut buffers = AudioBuffers::new(0, 2, 512, 48000.0);
+    plugin.process_audio(&mut buffers).expect("process_audio");
+    plugin.stop_processing().ok();
+    let state = plugin.save_state().expect("save_state");
+    assert!(!state.is_empty(), "saved state is empty");
+    drop(plugin);
+
+    let (_host2, mut restored) = load_test_synth().expect("second load");
+    restored.load_state(&state).expect("load_state");
+    for (id, expected) in [(0u32, 0.33), (2, 0.77), (7, 0.41)] {
+        let got = restored.get_parameter(id).expect("get_parameter");
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "param {id} did not survive the state round-trip: got {got}, expected {expected}"
+        );
+    }
+}
+
+/// Factory programs: IUnitInfo exposes the list, and select_program loads the preset.
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn test_testsynth_program_selection() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_test_synth() else {
+        return;
+    };
+    let units = plugin.get_units().expect("get_units");
+    let root = units
+        .iter()
+        .find(|u| !u.programs.is_empty())
+        .expect("TestSynth should expose a unit with programs");
+    assert_eq!(
+        root.programs,
+        vec!["Init Sine", "Trance Pluck", "Super Lead", "Lush Pad"],
+        "unexpected factory program list"
+    );
+
+    plugin
+        .select_program(root.id, 1)
+        .expect("select Trance Pluck");
+    // The Trance Pluck preset sets Cutoff (#0) to 0.42 and Waveform (#1) to Super Saw (1.0).
+    let cutoff = plugin.get_parameter(0).expect("get cutoff");
+    let waveform = plugin.get_parameter(1).expect("get waveform");
+    assert!(
+        (cutoff - 0.42).abs() < 1e-9,
+        "program change did not load preset cutoff (got {cutoff})"
+    );
+    assert!(
+        (waveform - 1.0).abs() < 1e-9,
+        "program change did not load preset waveform (got {waveform})"
+    );
+}
+
+/// Sample-accurate events: a note scheduled at offset 256 keeps the block's leading window
+/// silent (same differential design as the Dexed variant of this test).
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn test_testsynth_sample_accurate_offset() {
+    let _guard = plugin_guard();
+
+    const BLOCK: usize = 512;
+    const OFFSET: i32 = 256;
+    const WINDOW: usize = 200;
+
+    fn render_onset(offset: i32) -> Option<(f32, f32)> {
+        let path = test_synth_path()?;
+        let mut host = Vst3Host::builder()
+            .sample_rate(48000.0)
+            .block_size(BLOCK)
+            .build()
+            .expect("build host");
+        let mut plugin = host.load_plugin(path).expect("load TestSynth");
+        plugin.start_processing().expect("start_processing");
+        let note = MidiEvent::NoteOn {
+            channel: MidiChannel::Ch1,
+            note: 60,
+            velocity: 110,
+        };
+        plugin
+            .send_midi_event_at(note, offset)
+            .expect("send at offset");
+        let mut buffers = AudioBuffers::new(0, 2, BLOCK, 48000.0);
+        plugin.process_audio(&mut buffers).expect("process_audio");
+        let peak = |range: std::ops::Range<usize>| {
+            buffers
+                .outputs
+                .iter()
+                .flat_map(|ch| ch[range.clone()].iter())
+                .fold(0.0f32, |m, &s| m.max(s.abs()))
+        };
+        Some((peak(0..WINDOW), peak(OFFSET as usize..BLOCK)))
+    }
+
+    let Some((early_at_0, _)) = render_onset(0) else {
+        return;
+    };
+    let (early_at_256, late_at_256) = render_onset(OFFSET).expect("second load");
+    println!(
+        "TestSynth offset0 early={early_at_0:.5} offset256 early={early_at_256:.5} late={late_at_256:.5}"
+    );
+    assert!(
+        early_at_0 > 1e-4,
+        "control produced no audio in the leading window"
+    );
+    assert!(late_at_256 > 1e-4, "offset note produced no audio at all");
+    assert!(
+        early_at_256 < early_at_0 * 0.1,
+        "offset did not delay onset: early {early_at_256} vs control {early_at_0}"
+    );
+}
+
+/// IMidiMapping: the documented CC assignments resolve, unmapped/invalid CCs do not.
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn test_testsynth_midi_cc_mapping() {
+    let _guard = plugin_guard();
+    let Some((_host, plugin)) = load_test_synth() else {
+        return;
+    };
+    // Mod wheel → Filter Env Amount (#13), GM2 sound controllers → filter/env params.
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, 1), Some(13));
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, 71), Some(4)); // Resonance
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, 72), Some(8)); // Amp Release
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, 73), Some(5)); // Amp Attack
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, 74), Some(0)); // Cutoff
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, 7), None); // volume: unmapped
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, 200), None); // out of range
+}
+
+/// The super saw is genuinely stereo: with detune up, left and right differ; the default
+/// sine stays mono (identical channels), which older tests rely on.
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn test_testsynth_supersaw_stereo() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_test_synth() else {
+        return;
+    };
+    plugin.start_processing().expect("start_processing");
+
+    let note = MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 57,
+        velocity: 100,
+    };
+    let side_energy = |plugin: &mut Plugin| {
+        let mut buffers = AudioBuffers::new(0, 2, 4096, 48000.0);
+        plugin.process_audio(&mut buffers).expect("process_audio");
+        buffers.outputs[0]
+            .iter()
+            .zip(buffers.outputs[1].iter())
+            .map(|(l, r)| ((l - r) * (l - r)) as f64)
+            .sum::<f64>()
+    };
+
+    // Control: default sine is mono — channels identical.
+    plugin.send_midi_event(note).expect("note on (sine)");
+    let sine_side = side_energy(&mut plugin);
+    plugin
+        .send_midi_event(MidiEvent::NoteOff {
+            channel: MidiChannel::Ch1,
+            note: 57,
+            velocity: 0,
+        })
+        .expect("note off");
+    let _ = side_energy(&mut plugin); // let releases die out
+
+    // Super saw with detune: the panned side oscillators must decorrelate the channels.
+    plugin.set_parameter(1, 1.0).expect("waveform → super saw");
+    plugin.set_parameter(2, 0.6).expect("detune");
+    plugin.send_midi_event(note).expect("note on (supersaw)");
+    let saw_side = side_energy(&mut plugin);
+
+    println!("side energy: sine={sine_side:.6}, supersaw={saw_side:.6}");
+    assert!(
+        sine_side < 1e-9,
+        "sine should be mono (side energy {sine_side})"
+    );
+    assert!(
+        saw_side > 1e-4,
+        "super saw should be stereo (side energy {saw_side})"
+    );
+}
+
+/// Multitimbral routing: TestSynth plays MIDI channel 2 with a second timbre gated by its
+/// "Ch2 Level" parameter — channel-2 notes are silent at the default level 0 (proving the
+/// event's channel actually reaches the plugin) and audible once the part is dialed up.
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn test_testsynth_multitimbral_channels() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_test_synth() else {
+        return;
+    };
+    let params = plugin.get_parameters().expect("get_parameters");
+    let ch2_level = params
+        .iter()
+        .find(|p| p.name == "Ch2 Level")
+        .expect("Ch2 Level param")
+        .id;
+    plugin.start_processing().expect("start_processing");
+
+    let peak_of = |plugin: &mut Plugin, channel: MidiChannel| {
+        plugin
+            .send_midi_event(MidiEvent::NoteOn {
+                channel,
+                note: 60,
+                velocity: 100,
+            })
+            .expect("note on");
+        let mut peak = 0.0f32;
+        for _ in 0..4 {
+            let mut buffers = AudioBuffers::new(0, 2, 4096, 48000.0);
+            plugin.process_audio(&mut buffers).expect("process_audio");
+            for ch in &buffers.outputs {
+                for &s in ch {
+                    peak = peak.max(s.abs());
+                }
+            }
+        }
+        plugin
+            .send_midi_event(MidiEvent::NoteOff {
+                channel,
+                note: 60,
+                velocity: 0,
+            })
+            .expect("note off");
+        // Drain the release tail so runs don't bleed into each other.
+        for _ in 0..4 {
+            let mut buffers = AudioBuffers::new(0, 2, 4096, 48000.0);
+            plugin.process_audio(&mut buffers).expect("process_audio");
+        }
+        peak
+    };
+
+    let ch1 = peak_of(&mut plugin, MidiChannel::Ch1);
+    let ch2_muted = peak_of(&mut plugin, MidiChannel::Ch2);
+    plugin.set_parameter(ch2_level, 1.0).expect("set ch2 level");
+    let ch2_live = peak_of(&mut plugin, MidiChannel::Ch2);
+
+    println!(
+        "multitimbral peaks: ch1={ch1:.4} ch2(level 0)={ch2_muted:.4} ch2(level 1)={ch2_live:.4}"
+    );
+    assert!(ch1 > 1e-3, "channel 1 should sound with the live params");
+    assert!(
+        ch2_muted < 1e-5,
+        "channel 2 should be silent at Ch2 Level 0 (got {ch2_muted})"
+    );
+    assert!(
+        ch2_live > 1e-3,
+        "channel 2 should sound once Ch2 Level is up (got {ch2_live})"
+    );
+}
