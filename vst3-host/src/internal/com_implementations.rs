@@ -839,10 +839,10 @@ impl IParameterChangesTrait for ParameterChanges {
                 let used = self.used.load(Ordering::Relaxed);
                 if (index as usize) < used {
                     let queue = &queues[index as usize];
-                    match queue.to_com_ptr::<IParamValueQueue>() {
+                    match queue.as_com_ref::<IParamValueQueue>() {
                         Some(ptr) => {
                             log::trace!("Internal ParameterChanges: getParameterData returning queue for index {}", index);
-                            ptr.into_raw()
+                            ptr.as_ptr()
                         }
                         None => {
                             log::error!("Internal ParameterChanges: Failed to convert queue to COM pointer for index {}", index);
@@ -885,8 +885,8 @@ impl IParameterChangesTrait for ParameterChanges {
                             param_id
                         );
                         return queue
-                            .to_com_ptr::<IParamValueQueue>()
-                            .map(|ptr| ptr.into_raw())
+                            .as_com_ref::<IParamValueQueue>()
+                            .map(|ptr| ptr.as_ptr())
                             .unwrap_or_else(|| {
                                 log::error!("Internal ParameterChanges: Failed to convert existing queue to COM pointer");
                                 ptr::null_mut()
@@ -901,8 +901,8 @@ impl IParameterChangesTrait for ParameterChanges {
                     queues[used].reset(param_id);
                 }
                 let queue_ptr = queues[used]
-                    .to_com_ptr::<IParamValueQueue>()
-                    .map(|ptr| ptr.into_raw())
+                    .as_com_ref::<IParamValueQueue>()
+                    .map(|ptr| ptr.as_ptr())
                     .unwrap_or_else(|| {
                         log::error!(
                             "Internal ParameterChanges: Failed to convert new queue to COM pointer"

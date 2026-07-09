@@ -43,6 +43,40 @@ jobs:
       - run: cargo test -p vst3-host --all-features
       - run: cargo clippy -p vst3-host --all-features --all-targets -- -D warnings
 
+  asan-lsan:
+    name: "ci: AddressSanitizer + LeakSanitizer"
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-Zsanitizer=address -Clink-arg=-Wl,--export-dynamic"
+      RUSTDOCFLAGS: "-Zsanitizer=address -Clink-arg=-Wl,--export-dynamic"
+      ASAN_OPTIONS: "detect_leaks=1:verify_asan_link_order=0"
+      CARGO_TARGET_DIR: target/asan
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Install build deps (libclang, libxcb, ALSA)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev clang libxcb1-dev libxcb-util-dev libasound2-dev pkg-config
+      - name: Build ASan-instrumented TestSynth fixture
+        run: |
+          cargo +nightly build -p vst3-host-testplug -Zbuild-std --target x86_64-unknown-linux-gnu
+          mkdir -p test_plugins/TestSynth.vst3/Contents/x86_64-linux
+          cp target/asan/x86_64-unknown-linux-gnu/debug/libvst3_host_testplug.so \
+            test_plugins/TestSynth.vst3/Contents/x86_64-linux/TestSynth.so
+      - name: Build ASan-instrumented isolation helper
+        run: cargo +nightly build -p vst3-host -Zbuild-std --target x86_64-unknown-linux-gnu --bin vst3-host-helper --features process-isolation
+      - name: Sanitizer test suite
+        run: cargo +nightly test -p vst3-host -Zbuild-std --target x86_64-unknown-linux-gnu
+      - name: Sanitizer TestSynth load/process coverage
+        env:
+          VST3_HOST_HELPER_PATH: ${{ github.workspace }}/target/asan/x86_64-unknown-linux-gnu/debug/vst3-host-helper
+        run: |
+          cargo +nightly test -p vst3-host -Zbuild-std --target x86_64-unknown-linux-gnu --test feature_coverage_tests test_testsynth -- --ignored --nocapture --test-threads=1
+          cargo +nightly test -p vst3-host -Zbuild-std --target x86_64-unknown-linux-gnu --test feature_coverage_tests test_note_expression_bends_pitch -- --ignored --nocapture --test-threads=1
+
   # Windows is the most regression-prone platform (DLL/module loading, paths) — build AND test.
   windows:
     name: Windows (vst3-host)

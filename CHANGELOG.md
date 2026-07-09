@@ -6,6 +6,22 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-08
+
+### Fixed
+
+- **Memory leak: host-owned COM objects leaked a reference on every `process()` setup.** The
+  host handed borrowed, host-owned COM objects to the plugin with `to_com_ptr().into_raw()`,
+  which transfers a `+1` reference that is never released. The affected pointers — `ProcessData`
+  input/output event lists and parameter changes, the `IComponentHandler` passed to
+  `setComponentHandler`, and the `IParamValueQueue` pointers returned from `IParameterChanges` —
+  are only borrowed for the duration of the call, so they are now passed as borrowed pointers via
+  `as_com_ref().as_ptr()`. The `queryInterface` sites are unchanged: returning ownership there is
+  required by the COM contract. LeakSanitizer reported 944 bytes leaked in 17 allocations before
+  the fix; the sanitizer suite is clean after. ([#4])
+- Bumped the `crossbeam-epoch` lockfile entry to 0.9.20 to clear an advisory flagged by
+  `cargo-deny`.
+
 ## [0.6.0] - 2026-07-06
 
 ### Added
@@ -280,7 +296,8 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 - Initial release: safe VST3 hosting — discover, load, parameters, MIDI, audio playback, state
   save/restore, and process isolation.
 
-[Unreleased]: https://github.com/HelgeSverre/rust-vst3-host/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/HelgeSverre/rust-vst3-host/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.6.1
 [0.6.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.6.0
 [0.5.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.5.0
 [0.4.2]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.4.2
@@ -291,3 +308,4 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 [0.2.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.2.0
 [0.1.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.1.1
 [0.1.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.1.0
+[#4]: https://github.com/HelgeSverre/rust-vst3-host/issues/4

@@ -287,8 +287,8 @@ impl PluginImpl {
 
                 // Set component handler on controller for parameter change notifications
                 log::debug!("Step 11: Setting component handler on controller...");
-                if let Some(handler_ptr) = component_handler.to_com_ptr::<IComponentHandler>() {
-                    let result = ctrl.setComponentHandler(handler_ptr.into_raw());
+                if let Some(handler_ptr) = component_handler.as_com_ref::<IComponentHandler>() {
+                    let result = ctrl.setComponentHandler(handler_ptr.as_ptr());
                     if result == kResultOk {
                         log::debug!("Component handler set on controller successfully");
                     } else {
@@ -601,25 +601,25 @@ impl PluginImpl {
             // Set up event lists
             data.process_data.inputEvents = self
                 .input_events
-                .to_com_ptr::<IEventList>()
-                .map(|ptr| ptr.into_raw())
+                .as_com_ref::<IEventList>()
+                .map(|ptr| ptr.as_ptr())
                 .unwrap_or(ptr::null_mut());
             data.process_data.outputEvents = self
                 .output_events
-                .to_com_ptr::<IEventList>()
-                .map(|ptr| ptr.into_raw())
+                .as_com_ref::<IEventList>()
+                .map(|ptr| ptr.as_ptr())
                 .unwrap_or(ptr::null_mut());
 
             // Set up parameter changes
             data.process_data.inputParameterChanges = data
                 .input_param_changes
-                .to_com_ptr::<IParameterChanges>()
-                .map(|ptr| ptr.into_raw())
+                .as_com_ref::<IParameterChanges>()
+                .map(|ptr| ptr.as_ptr())
                 .unwrap_or(ptr::null_mut());
             data.process_data.outputParameterChanges = data
                 .output_param_changes
-                .to_com_ptr::<IParameterChanges>()
-                .map(|ptr| ptr.into_raw())
+                .as_com_ref::<IParameterChanges>()
+                .map(|ptr| ptr.as_ptr())
                 .unwrap_or(ptr::null_mut());
 
             // Prepare buffers
