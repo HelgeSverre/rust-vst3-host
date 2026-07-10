@@ -53,6 +53,10 @@ const RIFFS: &[(&str, &[u8])] = &[
         "SUNBLIND - BELIEVE",
         include_bytes!("assets/sunblind-believe.mid"),
     ),
+    (
+        "ARAMANJA - MEMORIES",
+        include_bytes!("assets/aramanja-memories.mid"),
+    ),
 ];
 
 /// What the audio callback needs to rebuild the timeline when the riff changes.
