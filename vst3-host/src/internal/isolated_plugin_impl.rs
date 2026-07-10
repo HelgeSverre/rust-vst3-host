@@ -415,6 +415,25 @@ impl PluginInternal for IsolatedPluginImpl {
         Ok(())
     }
 
+    fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
+        self.expect_success(
+            HostCommand::Reconfigure {
+                sample_rate,
+                block_size: block_size as u32,
+            },
+            "Reconfigure",
+        )?;
+        // Track the new config so a post-crash reload uses it.
+        self.sample_rate = sample_rate;
+        self.block_size = block_size;
+        Ok(())
+    }
+
+    fn set_process_mode(&mut self, mode: crate::plugin::ProcessMode) -> Result<()> {
+        self.expect_success(HostCommand::SetProcessMode { mode }, "SetProcessMode")?;
+        Ok(())
+    }
+
     fn has_editor(&self) -> bool {
         self.info.has_gui
     }

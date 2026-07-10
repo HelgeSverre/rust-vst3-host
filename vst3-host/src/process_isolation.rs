@@ -45,6 +45,18 @@ pub enum HostCommand {
     StartProcessing,
     /// Stop the plugin's audio processing.
     StopProcessing,
+    /// Re-run the plugin's `setupProcessing` at a new sample rate / block size.
+    Reconfigure {
+        /// New sample rate in Hz.
+        sample_rate: f64,
+        /// New block size in frames.
+        block_size: u32,
+    },
+    /// Switch the plugin between real-time and offline (`kOffline`) processing.
+    SetProcessMode {
+        /// Desired process mode.
+        mode: crate::plugin::ProcessMode,
+    },
     /// Set a parameter (normalized 0.0..=1.0).
     SetParameter {
         /// Parameter id.
