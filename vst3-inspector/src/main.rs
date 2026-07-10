@@ -316,7 +316,7 @@ fn apply_frappe_theme(ctx: &egui::Context) {
     v.widgets.hovered.bg_fill = surface1;
     v.widgets.active.bg_fill = surface1;
     v.selection.bg_fill = blue.gamma_multiply(0.4);
-    v.selection.stroke = egui::Stroke::new(1.0, blue);
+    v.selection.stroke = egui::Stroke::new(1.0_f32, blue);
     ctx.set_visuals(v);
 }
 
@@ -2101,7 +2101,7 @@ impl VST3Inspector {
                                         ui.painter().vline(
                                             hold_x,
                                             bar_rect.y_range(),
-                                            egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                            egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
                                         );
                                     }
 
@@ -2157,7 +2157,7 @@ impl VST3Inspector {
                                         ui.painter().vline(
                                             hold_x,
                                             bar_rect.y_range(),
-                                            egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                            egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
                                         );
                                     }
 
@@ -3567,7 +3567,7 @@ impl VST3Inspector {
                 painter.rect_stroke(
                     key_rect,
                     egui::CornerRadius::ZERO,
-                    egui::Stroke::new(1.0, egui::Color32::BLACK),
+                    egui::Stroke::new(1.0_f32, egui::Color32::BLACK),
                     egui::epaint::StrokeKind::Middle,
                 );
 
@@ -3638,7 +3638,7 @@ impl VST3Inspector {
                 painter.rect_stroke(
                     key_rect,
                     egui::CornerRadius::ZERO,
-                    egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
+                    egui::Stroke::new(1.0_f32, egui::Color32::DARK_GRAY),
                     egui::epaint::StrokeKind::Middle,
                 );
 

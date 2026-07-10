@@ -507,7 +507,7 @@ fn paint_panel_texture(p: &egui::Painter, rect: egui::Rect) {
         };
         p.line_segment(
             [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-            egui::Stroke::new(1.0, color),
+            egui::Stroke::new(1.0_f32, color),
         );
         y += 2.0;
     }
@@ -598,14 +598,14 @@ fn draw_knob(
     p.circle_stroke(
         center,
         r,
-        egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(70)),
     );
     // Pointer: dark line, like the printed line on a plastic cap. 270° sweep from 7 o'clock.
     let a = (-135.0 + 270.0 * v).to_radians();
     let dir = egui::vec2(a.sin(), -a.cos());
     p.line_segment(
         [center + dir * 2.0, center + dir * (r - 1.5)],
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(40, 42, 48)),
+        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(40, 42, 48)),
     );
 
     // Green LED readout in a dark bezel below.
@@ -617,7 +617,7 @@ fn draw_knob(
     p.rect_stroke(
         led,
         2.0,
-        egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(20)),
         egui::StrokeKind::Inside,
     );
     p.text(
@@ -646,7 +646,7 @@ fn draw_section(ui: &mut egui::Ui, sec: &SectionDef, shared: &Shared, base_idx: 
     p.rect_stroke(
         rect,
         5.0,
-        egui::Stroke::new(1.0, egui::Color32::from_gray(110)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(110)),
         egui::StrokeKind::Inside,
     );
     // Header: uppercase silkscreen with divider lines flanking it, SuperWave style.
@@ -672,14 +672,14 @@ fn draw_section(ui: &mut egui::Ui, sec: &SectionDef, shared: &Shared, base_idx: 
             egui::pos2(rect.left() + 7.0, line_y),
             egui::pos2(rect.center().x - text_w / 2.0 - 5.0, line_y),
         ],
-        egui::Stroke::new(1.0, line_color),
+        egui::Stroke::new(1.0_f32, line_color),
     );
     p.line_segment(
         [
             egui::pos2(rect.center().x + text_w / 2.0 + 5.0, line_y),
             egui::pos2(rect.right() - 7.0, line_y),
         ],
-        egui::Stroke::new(1.0, line_color),
+        egui::Stroke::new(1.0_f32, line_color),
     );
     // ON/OFF LED toggle (KICK section): red LED lit when active, click anywhere on it.
     if sec.toggle {
@@ -801,7 +801,7 @@ fn lcd_picker(
         p.rect_stroke(
             rect,
             3.0,
-            egui::Stroke::new(1.0, egui::Color32::from_gray(130)),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(130)),
             egui::StrokeKind::Inside,
         );
         p.text(
@@ -823,7 +823,7 @@ fn lcd_picker(
     p.rect_stroke(
         lcd,
         2.0,
-        egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(20)),
         egui::StrokeKind::Inside,
     );
     p.text(
@@ -908,7 +908,7 @@ impl eframe::App for App {
             painter.rect_stroke(
                 rect,
                 3.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 64, 36)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(42, 64, 36)),
                 egui::StrokeKind::Inside,
             );
 
@@ -927,7 +927,10 @@ impl eframe::App for App {
                 let a = if (beat as u32) % 4 == 0 { 44 } else { 16 };
                 painter.line_segment(
                     [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(130, 210, 130, a)),
+                    egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgba_unmultiplied(130, 210, 130, a),
+                    ),
                 );
                 beat += 1.0;
             }
@@ -960,11 +963,14 @@ impl eframe::App for App {
             let px = beat_to_x(getf(&self.shared.playhead_beats) as f64);
             painter.line_segment(
                 [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
-                egui::Stroke::new(5.0, egui::Color32::from_rgba_unmultiplied(216, 70, 50, 50)),
+                egui::Stroke::new(
+                    5.0_f32,
+                    egui::Color32::from_rgba_unmultiplied(216, 70, 50, 50),
+                ),
             );
             painter.line_segment(
                 [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
-                egui::Stroke::new(2.0, SW_RED),
+                egui::Stroke::new(2.0_f32, SW_RED),
             );
         });
 

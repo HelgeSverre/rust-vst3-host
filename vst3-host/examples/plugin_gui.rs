@@ -404,7 +404,7 @@ impl PluginGuiApp {
                     key_rect,
                     0.0,
                     fill_color,
-                    egui::Stroke::new(1.0, egui::Color32::BLACK),
+                    egui::Stroke::new(1.0_f32, egui::Color32::BLACK),
                     StrokeKind::Inside,
                 );
 
@@ -467,7 +467,7 @@ impl PluginGuiApp {
                     key_rect,
                     0.0,
                     fill_color,
-                    egui::Stroke::new(1.0, egui::Color32::DARK_GRAY),
+                    egui::Stroke::new(1.0_f32, egui::Color32::DARK_GRAY),
                     StrokeKind::Inside,
                 );
             }
@@ -704,7 +704,7 @@ impl eframe::App for PluginGuiApp {
                                 ui.painter().vline(
                                     hold_x,
                                     bar_rect.y_range(),
-                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                    egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
                                 );
                             }
 
@@ -753,7 +753,7 @@ impl eframe::App for PluginGuiApp {
                                 ui.painter().vline(
                                     hold_x,
                                     bar_rect.y_range(),
-                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                    egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
                                 );
                             }
 
