@@ -295,6 +295,33 @@ fn handle(
                 Err(e) => err("SetBusActive", e),
             }
         }),
+        HostCommand::BusArrangements => with(plugin, |p| match p.bus_arrangements() {
+            Ok(arrangements) => HostResponse::BusArrangements { arrangements },
+            Err(e) => err("BusArrangements", e),
+        }),
+        HostCommand::SetBusArrangements { inputs, outputs } => with(plugin, |p| {
+            match p.set_bus_arrangements(&inputs, &outputs) {
+                Ok(()) => HostResponse::Success {
+                    message: "bus arrangements set".to_string(),
+                },
+                Err(e) => err("SetBusArrangements", e),
+            }
+        }),
+        HostCommand::GetUnits => with(plugin, |p| match p.get_units() {
+            Ok(units) => HostResponse::Units { units },
+            Err(e) => err("GetUnits", e),
+        }),
+        HostCommand::LatencySamples => with(plugin, |p| HostResponse::LatencySamples {
+            samples: p.latency_samples(),
+        }),
+        HostCommand::TailSamples => with(plugin, |p| HostResponse::TailSamples {
+            samples: p.tail_samples(),
+        }),
+        HostCommand::MidiCcToParameter { bus, channel, cc } => {
+            with(plugin, |p| HostResponse::MidiParameterMapping {
+                id: p.midi_cc_to_parameter(bus, channel, cc),
+            })
+        }
         HostCommand::Process { inputs, frames } => {
             let sr = *sample_rate;
             with(plugin, |p| {

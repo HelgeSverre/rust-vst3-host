@@ -25,6 +25,9 @@ pub struct IsolatedPluginImpl {
     sample_rate: f64,
     /// Current block size
     block_size: usize,
+    /// Current process mode (replayed on post-crash reload, which resets the helper's
+    /// plugin to the `Realtime` default).
+    process_mode: crate::plugin::ProcessMode,
     /// Transport tempo (BPM) advertised in the helper's host `ProcessContext`
     /// (also used to reload after a crash).
     tempo: f64,
@@ -83,6 +86,7 @@ impl IsolatedPluginImpl {
             info,
             sample_rate,
             block_size,
+            process_mode: crate::plugin::ProcessMode::Realtime,
             tempo,
             time_sig_numerator,
             time_sig_denominator,
@@ -329,6 +333,32 @@ impl PluginInternal for IsolatedPluginImpl {
         )
     }
 
+    fn bus_arrangements(&self) -> Result<crate::audio::BusArrangements> {
+        match self.send_command(HostCommand::BusArrangements)? {
+            HostResponse::BusArrangements { arrangements } => Ok(arrangements),
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("BusArrangements: {message}")))
+            }
+            _ => Err(Error::Other(
+                "BusArrangements: unexpected response".to_string(),
+            )),
+        }
+    }
+
+    fn set_bus_arrangements(
+        &mut self,
+        inputs: &[crate::audio::SpeakerArrangement],
+        outputs: &[crate::audio::SpeakerArrangement],
+    ) -> Result<()> {
+        self.expect_success(
+            HostCommand::SetBusArrangements {
+                inputs: inputs.to_vec(),
+                outputs: outputs.to_vec(),
+            },
+            "SetBusArrangements",
+        )
+    }
+
     fn note_on(
         &mut self,
         channel: crate::midi::MidiChannel,
@@ -403,6 +433,35 @@ impl PluginInternal for IsolatedPluginImpl {
         )
     }
 
+    fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
+        match self.send_command(HostCommand::GetUnits)? {
+            HostResponse::Units { units } => Ok(units),
+            HostResponse::Error { message } => Err(Error::Other(format!("GetUnits: {message}"))),
+            _ => Err(Error::Other("GetUnits: unexpected response".to_string())),
+        }
+    }
+
+    fn latency_samples(&self) -> u32 {
+        match self.send_command(HostCommand::LatencySamples) {
+            Ok(HostResponse::LatencySamples { samples }) => samples,
+            _ => 0,
+        }
+    }
+
+    fn tail_samples(&self) -> u32 {
+        match self.send_command(HostCommand::TailSamples) {
+            Ok(HostResponse::TailSamples { samples }) => samples,
+            _ => 0,
+        }
+    }
+
+    fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
+        match self.send_command(HostCommand::MidiCcToParameter { bus, channel, cc }) {
+            Ok(HostResponse::MidiParameterMapping { id }) => id,
+            _ => None,
+        }
+    }
+
     fn start_processing(&mut self) -> Result<()> {
         self.expect_success(HostCommand::StartProcessing, "StartProcessing")?;
         self.is_processing = true;
@@ -431,6 +490,8 @@ impl PluginInternal for IsolatedPluginImpl {
 
     fn set_process_mode(&mut self, mode: crate::plugin::ProcessMode) -> Result<()> {
         self.expect_success(HostCommand::SetProcessMode { mode }, "SetProcessMode")?;
+        // Track the mode so a post-crash reload restores it.
+        self.process_mode = mode;
         Ok(())
     }
 
@@ -572,6 +633,14 @@ impl IsolatedPluginImpl {
             Ok(_) => return Err(Error::Other("unexpected response while reloading".into())),
             // The reload itself crashed the fresh helper — the plugin is unrecoverable.
             Err(e) => return Err(classify_ipc_error(&e)),
+        }
+
+        // Re-apply a non-default process mode before (re)starting processing — the fresh
+        // helper's plugin comes up in `Realtime`. Best-effort, like the rest of the replay.
+        if self.process_mode != crate::plugin::ProcessMode::Realtime {
+            let _ = fresh.send_command(HostCommand::SetProcessMode {
+                mode: self.process_mode,
+            });
         }
 
         // Restore processing state (parameter values are NOT replayed; see Plugin::recover).

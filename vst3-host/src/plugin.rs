@@ -93,7 +93,7 @@ pub struct PluginPreset {
 ///
 /// Units form a hierarchy (via [`parent_id`](Self::parent_id)); a unit may carry a named
 /// program list (e.g. a synth's factory patches). Query with [`Plugin::get_units`].
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PluginUnit {
     /// Unit id (unique within the plugin; the root unit is conventionally `0`).
     pub id: i32,
@@ -174,7 +174,7 @@ pub(crate) trait PluginInternal: Send {
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
     /// Schedule a parameter change at a sample offset within the next process block.
     /// Defaults to a block-start change (ignores the offset) for implementations that don't
-    /// support sample-accurate scheduling (e.g. process isolation).
+    /// support sample-accurate scheduling.
     fn set_parameter_at(&mut self, id: u32, value: f64, _sample_offset: i32) -> Result<()> {
         self.set_parameter(id, value)
     }
@@ -183,14 +183,14 @@ pub(crate) trait PluginInternal: Send {
     fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()>;
     /// Re-run `setupProcessing` for a new sample rate / block size. Defaults to unsupported
-    /// (e.g. process isolation, where reconfigure isn't marshalled across the boundary).
+    /// for implementations that don't support it.
     fn reconfigure(&mut self, _sample_rate: f64, _block_size: usize) -> Result<()> {
         Err(Error::Other(
             "runtime reconfigure is not supported for this plugin".to_string(),
         ))
     }
     /// Switch the plugin's process mode (real-time vs offline), re-running `setupProcessing`.
-    /// Defaults to unsupported (e.g. process isolation, where it isn't marshalled).
+    /// Defaults to unsupported for implementations that don't support it.
     fn set_process_mode(&mut self, _mode: crate::plugin::ProcessMode) -> Result<()> {
         Err(Error::Other(
             "process mode switching is not supported for this plugin".to_string(),
@@ -203,7 +203,7 @@ pub(crate) trait PluginInternal: Send {
         ))
     }
     /// Request specific speaker arrangements for the audio buses (re-runs `setupProcessing`).
-    /// Defaults to unsupported (e.g. process isolation, where it isn't marshalled).
+    /// Defaults to unsupported for implementations that don't support it.
     fn set_bus_arrangements(
         &mut self,
         _inputs: &[crate::audio::SpeakerArrangement],
@@ -252,12 +252,12 @@ pub(crate) trait PluginInternal: Send {
     fn send_midi_event(&mut self, event: MidiEvent) -> Result<()>;
     /// Schedule a MIDI event at a sample offset within the next process block.
     /// Defaults to a block-start event (ignores the offset) for implementations that don't
-    /// support sample-accurate scheduling (e.g. process isolation).
+    /// support sample-accurate scheduling.
     fn send_midi_event_at(&mut self, event: MidiEvent, _sample_offset: i32) -> Result<()> {
         self.send_midi_event(event)
     }
     /// Start a note and return a per-voice [`NoteId`] for targeting note-expression. Default:
-    /// unsupported (process isolation does not yet marshal note expression, so it errors).
+    /// unsupported, for implementations that don't support per-note expression.
     fn note_on(
         &mut self,
         _channel: MidiChannel,
@@ -310,7 +310,7 @@ pub(crate) trait PluginInternal: Send {
         Vec::new()
     }
     /// Take the MIDI events the plugin has emitted since the last call. Defaults to empty
-    /// for implementations that don't capture output MIDI (e.g. process isolation).
+    /// for implementations that don't capture output MIDI.
     fn take_output_events(&self) -> Vec<MidiEvent> {
         Vec::new()
     }
@@ -320,7 +320,7 @@ pub(crate) trait PluginInternal: Send {
         None
     }
     /// Enumerate the plugin's units and their program lists (`IUnitInfo`). Defaults to empty
-    /// for implementations that don't query it yet (e.g. process isolation).
+    /// for implementations that don't query it.
     fn get_units(&self) -> Result<Vec<PluginUnit>> {
         Ok(Vec::new())
     }
@@ -341,7 +341,7 @@ pub(crate) trait PluginInternal: Send {
         0
     }
     /// Resolve a MIDI controller `(bus, channel, cc)` to a parameter id via `IMidiMapping`.
-    /// Defaults to `None` (plugin doesn't implement the interface, or no mapping / isolation).
+    /// Defaults to `None` (plugin doesn't implement the interface, or no mapping).
     fn midi_cc_to_parameter(&self, _bus: i32, _channel: i16, _cc: u16) -> Option<u32> {
         None
     }
@@ -404,8 +404,9 @@ impl Plugin {
     ///
     /// Use this when the audio device's sample rate changes mid-session instead of reloading.
     /// The plugin must **not** be processing: call [`Self::stop_processing`] first, reconfigure,
-    /// then [`Self::start_processing`] again. Returns an error if called while processing, on an
-    /// invalid sample rate / zero block size, or under process isolation (not yet marshalled).
+    /// then [`Self::start_processing`] again. Returns an error if called while processing, or
+    /// on an invalid sample rate / zero block size. Works both in-process and across process
+    /// isolation.
     pub fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
         if self.is_processing {
             return Err(Error::Other(
@@ -438,8 +439,8 @@ impl Plugin {
     /// bounce.
     ///
     /// Like [`Self::reconfigure`], the plugin must **not** be processing: call
-    /// [`Self::stop_processing`] first. Returns an error if called while processing, or under
-    /// process isolation (not marshalled across the boundary).
+    /// [`Self::stop_processing`] first. Returns an error if called while processing. Works both
+    /// in-process and across process isolation.
     pub fn set_process_mode(&mut self, mode: ProcessMode) -> Result<()> {
         if self.is_processing {
             return Err(Error::Other(
@@ -453,7 +454,8 @@ impl Plugin {
             .set_process_mode(mode)
     }
 
-    /// Query the current speaker arrangement of each audio input/output bus.
+    /// Query the current speaker arrangement of each audio input/output bus. Works both
+    /// in-process and across process isolation.
     pub fn bus_arrangements(&self) -> Result<crate::audio::BusArrangements> {
         self.internal
             .as_ref()
@@ -468,7 +470,7 @@ impl Plugin {
     /// Re-runs the plugin's `setupProcessing`, so the plugin must **not** be processing (call
     /// [`Self::stop_processing`] first). A plugin may decline a requested layout and keep its
     /// own; re-query with [`Self::bus_arrangements`] to see what was actually applied. Errors
-    /// while processing or under process isolation (not marshalled).
+    /// while processing. Works both in-process and across process isolation.
     pub fn set_bus_arrangements(
         &mut self,
         inputs: &[crate::audio::SpeakerArrangement],
@@ -634,8 +636,8 @@ impl Plugin {
 
     /// Enumerate the plugin's units and their program lists (`IUnitInfo`).
     ///
-    /// Returns an empty list for plugins that don't implement `IUnitInfo`, and (for now) for
-    /// plugins running under process isolation. The root unit (id `0`) is typically present.
+    /// Returns an empty list for plugins that don't implement `IUnitInfo`. The root unit (id
+    /// `0`) is typically present. Works both in-process and across process isolation.
     pub fn get_units(&self) -> Result<Vec<PluginUnit>> {
         self.internal
             .as_ref()
@@ -665,8 +667,8 @@ impl Plugin {
 
     /// The plugin's reported processing latency in samples (e.g. from look-ahead or
     /// oversampling), via `IAudioProcessor::getLatencySamples`. Use it to delay-compensate
-    /// when aligning the plugin's output with other signals. `0` if it reports none, or for
-    /// plugins running under process isolation (not bridged).
+    /// when aligning the plugin's output with other signals. `0` if it reports none. Works
+    /// both in-process and across process isolation.
     pub fn latency_samples(&self) -> u32 {
         self.internal
             .as_ref()
@@ -676,8 +678,8 @@ impl Plugin {
 
     /// The plugin's reported tail length in samples (how long it keeps producing output
     /// after input stops — e.g. reverb/delay), via `IAudioProcessor::getTailSamples`. `0`
-    /// means no tail; `u32::MAX` means an infinite tail. `0` for isolated plugins (not
-    /// bridged).
+    /// means no tail; `u32::MAX` means an infinite tail. Works both in-process and across
+    /// process isolation.
     pub fn tail_samples(&self) -> u32 {
         self.internal
             .as_ref()
@@ -691,8 +693,8 @@ impl Plugin {
     /// `bus` is the event input bus index (usually `0`), `channel` the 0-based MIDI channel,
     /// and `cc` the MIDI controller number (`0–127`, or the VST3 specials such as `128`
     /// aftertouch / `129` pitch-bend). Returns the parameter id the controller drives, or
-    /// `None` if the plugin doesn't implement `IMidiMapping`, the controller is unmapped, or
-    /// the plugin is process-isolated (not bridged).
+    /// `None` if the plugin doesn't implement `IMidiMapping` or the controller is unmapped.
+    /// Works both in-process and across process isolation.
     pub fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
         // VST3 controller numbers are 0..130 (0–127 MIDI CCs + the specials up to pitch-bend).
         // Reject out-of-range values rather than forwarding a meaningless controller number.
@@ -813,8 +815,8 @@ impl Plugin {
     /// offset within the upcoming block's frame count ([`Plugin::block_size`] is the maximum);
     /// a negative offset is treated as 0, and an offset past the block end is plugin-defined.
     ///
-    /// Under process isolation the offset is not marshalled across the boundary — the event is
-    /// delivered at block start (offset 0), same as [`Self::send_midi_event`].
+    /// Works both in-process and across process isolation — the offset is carried across the
+    /// boundary and applied by the helper's in-process plugin.
     ///
     /// [`process_audio`]: Self::process_audio
     pub fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {

@@ -313,14 +313,15 @@ fn test_program_selection_isolated() {
         return;
     };
 
+    // get_units now marshals across isolation (previously fell back to a guessed root unit).
     let units = plugin.get_units().expect("get_units over IPC");
-    // get_units is not yet bridged across isolation, so fall back to the known root unit.
-    let (unit_id, count) = units
+    let unit = units
         .iter()
         .find(|u| !u.programs.is_empty())
-        .map(|u| (u.id, u.programs.len() as i32))
-        .unwrap_or((0, 32));
+        .expect("Dexed should report a unit with a program list, even over IPC");
+    let (unit_id, count) = (unit.id, unit.programs.len() as i32);
     println!("isolated unit {unit_id} reports {count} programs");
+    assert!(count >= 2, "expected a multi-program unit");
 
     plugin
         .select_program(unit_id, 1)
@@ -612,6 +613,48 @@ fn test_midi_cc_to_parameter_mapping() {
     assert_eq!(plugin.midi_cc_to_parameter(0, 0, u16::MAX), None);
 }
 
+/// `midi_cc_to_parameter` across the *process-isolation* boundary: the same CC→param
+/// mappings Dexed reports in-process must survive the IPC round trip. Mirrors
+/// [`test_midi_cc_to_parameter_mapping`].
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the bundled Dexed plugin and the helper binary"]
+fn test_midi_cc_to_parameter_mapping_isolated() {
+    let _guard = plugin_guard();
+    let Some((_host, plugin)) = load_dexed_isolated() else {
+        return;
+    };
+
+    let param_ids: std::collections::HashSet<u32> = plugin
+        .get_parameters()
+        .unwrap()
+        .iter()
+        .map(|p| p.id)
+        .collect();
+
+    let mut mappings = Vec::new();
+    for cc in 0u16..=129 {
+        if let Some(id) = plugin.midi_cc_to_parameter(0, 0, cc) {
+            mappings.push((cc, id));
+            assert!(
+                param_ids.contains(&id),
+                "CC {cc} mapped to id {id} over IPC, which is not a real parameter"
+            );
+        }
+    }
+    println!(
+        "Dexed (isolated) reported {} CC→param mappings: {mappings:?}",
+        mappings.len()
+    );
+    assert!(
+        !mappings.is_empty(),
+        "expected at least one CC→param mapping from Dexed over IPC"
+    );
+
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, 200), None);
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, u16::MAX), None);
+}
+
 /// Mirrors the inspector's "Export WAV" path (roadmap 4.5): snapshot a live plugin's state,
 /// load a fresh instance, restore the state, and offline-render to a non-silent WAV via the
 /// library's `render_to_wav`. Exercised here against Dexed (single-instance: the first is
@@ -745,6 +788,42 @@ fn test_bus_arrangements() {
         after.outputs[0].channel_count(),
         plugin.output_channel_count(),
         "reported arrangement and channel count must stay consistent"
+    );
+}
+
+/// Bus arrangements across the *process-isolation* boundary: query and negotiation both
+/// marshal over IPC. Mirrors [`test_bus_arrangements`].
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the bundled Dexed plugin and the helper binary"]
+fn test_bus_arrangements_isolated() {
+    use vst3_host::SpeakerArrangement;
+
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_dexed_isolated() else {
+        return;
+    };
+
+    let arr = plugin
+        .bus_arrangements()
+        .expect("bus_arrangements over IPC");
+    println!(
+        "Dexed (isolated) buses: inputs={:?} outputs={:?}",
+        arr.inputs, arr.outputs
+    );
+    assert!(arr.inputs.is_empty());
+    assert_eq!(arr.outputs.len(), 1);
+    assert_eq!(arr.outputs[0], SpeakerArrangement::STEREO);
+
+    plugin
+        .set_bus_arrangements(&[], &[SpeakerArrangement::STEREO])
+        .expect("set stereo over IPC");
+    assert_eq!(
+        plugin
+            .bus_arrangements()
+            .expect("re-query over IPC")
+            .outputs[0],
+        SpeakerArrangement::STEREO
     );
 }
 
@@ -1038,6 +1117,26 @@ fn test_get_units_enumerates() {
     assert_eq!(ids.len(), units.len(), "duplicate unit ids reported");
 }
 
+/// `get_units` across the *process-isolation* boundary: unit/program-list enumeration
+/// marshals over IPC. Mirrors [`test_get_units_enumerates`].
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the bundled Dexed plugin and the helper binary"]
+fn test_get_units_enumerates_isolated() {
+    let _guard = plugin_guard();
+    let Some((_host, plugin)) = load_dexed_isolated() else {
+        return;
+    };
+    let units = plugin.get_units().expect("get_units over IPC");
+    println!("Dexed (isolated) reports {} unit(s)", units.len());
+    assert!(
+        !units.is_empty(),
+        "Dexed implements IUnitInfo, expected at least the root unit over IPC"
+    );
+    let ids: std::collections::HashSet<i32> = units.iter().map(|u| u.id).collect();
+    assert_eq!(ids.len(), units.len(), "duplicate unit ids reported");
+}
+
 /// Offline render-to-WAV: bounce a held note from Dexed to a WAV file and verify the file
 /// has a valid float-WAV header and non-silent audio.
 #[test]
@@ -1160,6 +1259,22 @@ fn test_latency_and_tail_accessors() {
     let tail = plugin.tail_samples();
     println!("Dexed latency={latency} samples, tail={tail} samples");
     // Sanity: a synth's latency is small; we just assert the calls work and are bounded.
+    assert!(latency < 1_000_000, "implausible latency {latency}");
+}
+
+/// Latency/tail accessors across the *process-isolation* boundary: both round-trip over IPC
+/// instead of silently reporting 0. Mirrors [`test_latency_and_tail_accessors`].
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the bundled Dexed plugin and the helper binary"]
+fn test_latency_and_tail_accessors_isolated() {
+    let _guard = plugin_guard();
+    let Some((_host, plugin)) = load_dexed_isolated() else {
+        return;
+    };
+    let latency = plugin.latency_samples();
+    let tail = plugin.tail_samples();
+    println!("Dexed (isolated) latency={latency} samples, tail={tail} samples");
     assert!(latency < 1_000_000, "implausible latency {latency}");
 }
 

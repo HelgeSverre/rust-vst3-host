@@ -189,6 +189,31 @@ pub enum HostCommand {
         /// `true` to activate, `false` to deactivate.
         active: bool,
     },
+    /// Query each audio bus's current speaker arrangement (`IAudioProcessor::getBusArrangement`).
+    BusArrangements,
+    /// Request specific speaker arrangements for the audio buses (re-runs `setupProcessing`).
+    SetBusArrangements {
+        /// Desired arrangement per input bus, in bus-index order.
+        inputs: Vec<crate::audio::SpeakerArrangement>,
+        /// Desired arrangement per output bus, in bus-index order.
+        outputs: Vec<crate::audio::SpeakerArrangement>,
+    },
+    /// Enumerate the plugin's units and their program lists (`IUnitInfo`).
+    GetUnits,
+    /// Query the plugin's reported processing latency in samples
+    /// (`IAudioProcessor::getLatencySamples`).
+    LatencySamples,
+    /// Query the plugin's reported tail length in samples (`IAudioProcessor::getTailSamples`).
+    TailSamples,
+    /// Resolve a MIDI controller to the parameter it's mapped to (`IMidiMapping`).
+    MidiCcToParameter {
+        /// Event input bus index.
+        bus: i32,
+        /// 0-based MIDI channel.
+        channel: i16,
+        /// MIDI controller number (0-127, or a VST3 special such as aftertouch/pitch-bend).
+        cc: u16,
+    },
     /// Drain the ordered parameter-edit gesture log (begin/change/end) the helper's plugin has
     /// accumulated from its editor since the last poll.
     TakeParameterEdits,
@@ -290,6 +315,31 @@ pub enum HostResponse {
     ParameterEdits {
         /// The gesture events, in the order the plugin's editor reported them.
         edits: Vec<crate::plugin::ParameterEdit>,
+    },
+    /// Each audio bus's current speaker arrangement (reply to `BusArrangements`).
+    BusArrangements {
+        /// The input/output arrangements.
+        arrangements: crate::audio::BusArrangements,
+    },
+    /// The plugin's units and program lists (reply to `GetUnits`).
+    Units {
+        /// The advertised units.
+        units: Vec<crate::plugin::PluginUnit>,
+    },
+    /// The plugin's reported processing latency in samples (reply to `LatencySamples`).
+    LatencySamples {
+        /// Latency in samples.
+        samples: u32,
+    },
+    /// The plugin's reported tail length in samples (reply to `TailSamples`).
+    TailSamples {
+        /// Tail length in samples.
+        samples: u32,
+    },
+    /// The parameter a MIDI controller is mapped to, if any (reply to `MidiCcToParameter`).
+    MidiParameterMapping {
+        /// The mapped parameter id, or `None` if unmapped / not implemented.
+        id: Option<u32>,
     },
 }
 
@@ -810,6 +860,132 @@ mod wire_tests {
                 assert!(active);
             }
             other => panic!("round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bus_arrangements_round_trip_across_the_wire() {
+        use crate::audio::{BusArrangements, SpeakerArrangement};
+
+        let cmd = serde_json::to_string(&HostCommand::BusArrangements)
+            .expect("serialize BusArrangements");
+        assert!(matches!(
+            serde_json::from_str::<HostCommand>(&cmd).expect("deserialize BusArrangements"),
+            HostCommand::BusArrangements
+        ));
+
+        let set = HostCommand::SetBusArrangements {
+            inputs: vec![],
+            outputs: vec![SpeakerArrangement::STEREO],
+        };
+        let set_json = serde_json::to_string(&set).expect("serialize SetBusArrangements");
+        match serde_json::from_str::<HostCommand>(&set_json).expect("deserialize") {
+            HostCommand::SetBusArrangements { inputs, outputs } => {
+                assert!(inputs.is_empty());
+                assert_eq!(outputs, vec![SpeakerArrangement::STEREO]);
+            }
+            other => panic!("SetBusArrangements round-trip changed the variant: {other:?}"),
+        }
+
+        let arrangements = BusArrangements {
+            inputs: vec![],
+            outputs: vec![SpeakerArrangement::STEREO],
+        };
+        let resp = HostResponse::BusArrangements {
+            arrangements: arrangements.clone(),
+        };
+        let resp_json = serde_json::to_string(&resp).expect("serialize BusArrangements response");
+        match serde_json::from_str::<HostResponse>(&resp_json).expect("deserialize") {
+            HostResponse::BusArrangements { arrangements: back } => {
+                assert_eq!(back, arrangements);
+            }
+            other => panic!("BusArrangements response round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_units_round_trips_across_the_wire() {
+        use crate::plugin::PluginUnit;
+
+        let cmd = serde_json::to_string(&HostCommand::GetUnits).expect("serialize GetUnits");
+        assert!(matches!(
+            serde_json::from_str::<HostCommand>(&cmd).expect("deserialize GetUnits"),
+            HostCommand::GetUnits
+        ));
+
+        let units = vec![PluginUnit {
+            id: 0,
+            parent_id: -1,
+            name: "Root".to_string(),
+            programs: vec!["Init".to_string(), "Lead".to_string()],
+        }];
+        let resp = HostResponse::Units {
+            units: units.clone(),
+        };
+        let resp_json = serde_json::to_string(&resp).expect("serialize Units");
+        match serde_json::from_str::<HostResponse>(&resp_json).expect("deserialize Units") {
+            HostResponse::Units { units: back } => assert_eq!(back, units),
+            other => panic!("Units round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn latency_and_tail_round_trip_across_the_wire() {
+        let latency_cmd = serde_json::to_string(&HostCommand::LatencySamples).expect("serialize");
+        assert!(matches!(
+            serde_json::from_str::<HostCommand>(&latency_cmd).expect("deserialize"),
+            HostCommand::LatencySamples
+        ));
+        let tail_cmd = serde_json::to_string(&HostCommand::TailSamples).expect("serialize");
+        assert!(matches!(
+            serde_json::from_str::<HostCommand>(&tail_cmd).expect("deserialize"),
+            HostCommand::TailSamples
+        ));
+
+        let latency_resp = HostResponse::LatencySamples { samples: 128 };
+        let json = serde_json::to_string(&latency_resp).expect("serialize");
+        match serde_json::from_str::<HostResponse>(&json).expect("deserialize") {
+            HostResponse::LatencySamples { samples } => assert_eq!(samples, 128),
+            other => panic!("LatencySamples round-trip changed the variant: {other:?}"),
+        }
+
+        let tail_resp = HostResponse::TailSamples { samples: 44100 };
+        let json = serde_json::to_string(&tail_resp).expect("serialize");
+        match serde_json::from_str::<HostResponse>(&json).expect("deserialize") {
+            HostResponse::TailSamples { samples } => assert_eq!(samples, 44100),
+            other => panic!("TailSamples round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn midi_cc_to_parameter_round_trips_across_the_wire() {
+        let cmd = HostCommand::MidiCcToParameter {
+            bus: 0,
+            channel: 1,
+            cc: 74,
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize MidiCcToParameter");
+        match serde_json::from_str::<HostCommand>(&json).expect("deserialize") {
+            HostCommand::MidiCcToParameter { bus, channel, cc } => {
+                assert_eq!((bus, channel, cc), (0, 1, 74));
+            }
+            other => panic!("MidiCcToParameter round-trip changed the variant: {other:?}"),
+        }
+
+        let resp = HostResponse::MidiParameterMapping { id: Some(42) };
+        let json = serde_json::to_string(&resp).expect("serialize MidiParameterMapping");
+        match serde_json::from_str::<HostResponse>(&json).expect("deserialize") {
+            HostResponse::MidiParameterMapping { id } => assert_eq!(id, Some(42)),
+            other => panic!("MidiParameterMapping round-trip changed the variant: {other:?}"),
+        }
+
+        let none_resp = HostResponse::MidiParameterMapping { id: None };
+        let json = serde_json::to_string(&none_resp).expect("serialize");
+        match serde_json::from_str::<HostResponse>(&json).expect("deserialize") {
+            HostResponse::MidiParameterMapping { id } => assert_eq!(id, None),
+            other => {
+                panic!("MidiParameterMapping (None) round-trip changed the variant: {other:?}")
+            }
         }
     }
 
