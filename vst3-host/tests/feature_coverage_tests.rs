@@ -158,6 +158,40 @@ fn load_test_synth_isolated() -> Option<(Vst3Host, Plugin)> {
     Some((host, plugin))
 }
 
+/// Regression for the isolated `set_process_mode` / `reconfigure` gap: an out-of-process
+/// plugin must accept an offline-mode switch and a sample-rate / block-size change (both
+/// returned `Err("… not supported")` before the fix, because `IsolatedPluginImpl` didn't
+/// override them), then still process audio at the new config across the IPC boundary.
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn test_isolated_reconfigure_and_process_mode() {
+    let Some((_host, mut plugin)) = load_test_synth_isolated() else {
+        return;
+    };
+    // Both of these returned Err on isolated plugins before the fix.
+    plugin
+        .set_process_mode(ProcessMode::Offline)
+        .expect("isolated set_process_mode(Offline)");
+    plugin
+        .reconfigure(44100.0, 512)
+        .expect("isolated reconfigure(44100, 512)");
+
+    // The plugin still works at the new config: a held note produces audio.
+    plugin.start_processing().expect("start_processing");
+    let _id = plugin.note_on(MidiChannel::Ch1, 60, 100).expect("note_on");
+    let mut buffers = AudioBuffers::new(0, 2, 512, 44100.0);
+    plugin.process_audio(&mut buffers).expect("process_audio");
+    let peak = buffers.outputs[0]
+        .iter()
+        .fold(0.0f32, |m, &s| m.max(s.abs()));
+    plugin.stop_processing().ok();
+    assert!(
+        peak > 0.0,
+        "reconfigured isolated plugin should produce audio, peak={peak}"
+    );
+}
+
 /// Note expression (MPE) end-to-end across the *process-isolation* boundary: the helper owns
 /// the real plugin (and allocates the NoteId), and a per-note Tuning expression marshaled over
 /// IPC still audibly bends the voice's pitch. Mirrors [`test_note_expression_bends_pitch`].

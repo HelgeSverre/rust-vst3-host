@@ -193,6 +193,25 @@ fn handle(
             },
             Err(e) => err("StopProcessing", e),
         }),
+        HostCommand::Reconfigure {
+            sample_rate: sr,
+            block_size,
+        } => {
+            // Track the new rate so a post-crash reload uses it.
+            *sample_rate = sr;
+            with(plugin, |p| match p.reconfigure(sr, block_size as usize) {
+                Ok(()) => HostResponse::Success {
+                    message: "reconfigured".to_string(),
+                },
+                Err(e) => err("Reconfigure", e),
+            })
+        }
+        HostCommand::SetProcessMode { mode } => with(plugin, |p| match p.set_process_mode(mode) {
+            Ok(()) => HostResponse::Success {
+                message: "process mode set".to_string(),
+            },
+            Err(e) => err("SetProcessMode", e),
+        }),
         HostCommand::SetParameter { id, value } => {
             with(plugin, |p| match p.set_parameter(id, value) {
                 Ok(()) => HostResponse::Success {
