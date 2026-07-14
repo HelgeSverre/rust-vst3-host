@@ -39,7 +39,7 @@ test-plugin:
 # Run the (ignored) process-isolation capstones — needs the helper + a test plugin
 [group('test')]
 test-isolation: helper
-    cargo test -p vst3-host --features process-isolation --test integration_tests -- --ignored isolation
+    cargo test -p vst3-host --features process-isolation --test integration_tests -- --ignored isolation --test-threads=1
 
 # Launch the VST3 inspector app
 [group('run')]

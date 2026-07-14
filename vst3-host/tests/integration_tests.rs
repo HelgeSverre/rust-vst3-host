@@ -12,6 +12,21 @@ use std::thread;
 use std::time::Duration;
 use vst3_host::prelude::*;
 
+/// Load a plugin in an isolated host, retrying a few times: some C++ plugins (Dexed,
+/// HY-MPS3) intermittently abort ("Pure virtual function called!") during static init in a
+/// fresh helper process. Each attempt spawns a fresh helper, so a retry gets a clean roll.
+#[cfg(feature = "process-isolation")]
+fn load_isolated_retry(host: &mut Vst3Host, path: &str) -> Plugin {
+    let mut last_err = None;
+    for _ in 0..5 {
+        match host.load_plugin(path) {
+            Ok(p) => return p,
+            Err(e) => last_err = Some(e),
+        }
+    }
+    panic!("isolated load failed after 5 attempts: {last_err:?}");
+}
+
 /// Helper to find a test plugin
 fn find_test_plugin() -> Option<PluginInfo> {
     // Prefer the bundled Dexed (free, no license) and read it with the *lightweight*
@@ -446,9 +461,7 @@ fn test_process_isolation() {
         .build()
         .expect("Failed to build isolated host");
 
-    let mut plugin = host
-        .load_plugin(plugin_path)
-        .expect("Failed to load plugin in isolated process");
+    let mut plugin = load_isolated_retry(&mut host, plugin_path);
 
     // Accurate metadata crosses the boundary (not the old "unknown"/default placeholders).
     let info = plugin.info();
@@ -537,7 +550,7 @@ fn test_isolation_set_parameter_at() {
         .with_process_isolation(true)
         .build()
         .expect("build isolated host");
-    let mut plugin = host.load_plugin(plugin_path).expect("load isolated");
+    let mut plugin = load_isolated_retry(&mut host, plugin_path);
 
     let id = plugin.get_parameters().expect("params")[0].id;
     plugin
@@ -580,7 +593,7 @@ fn test_isolation_state_roundtrip() {
         .with_process_isolation(true)
         .build()
         .expect("build isolated host");
-    let mut plugin = host.load_plugin(plugin_path).expect("load isolated");
+    let mut plugin = load_isolated_retry(&mut host, plugin_path);
 
     let id = plugin.get_parameters().expect("params")[0].id;
 
@@ -756,7 +769,7 @@ fn test_isolation_output_midi_parity() {
     };
 
     fn drive(host: &mut Vst3Host, path: &str) -> Vec<MidiEvent> {
-        let mut plugin = host.load_plugin(path).expect("load");
+        let mut plugin = load_isolated_retry(host, path);
         plugin.start_processing().expect("start");
         for note in [60, 64, 67] {
             let _ = plugin.send_midi_note(note, 100, MidiChannel::Ch1);
@@ -813,7 +826,7 @@ fn test_isolation_crash_recovery() {
         .with_process_isolation(true)
         .build()
         .expect("build isolated host");
-    let mut plugin = host.load_plugin(plugin_path).expect("load isolated");
+    let mut plugin = load_isolated_retry(&mut host, plugin_path);
     plugin.start_processing().expect("start");
     let id = plugin.get_parameters().expect("params")[0].id;
     plugin.set_parameter(id, 0.5).expect("set");
@@ -838,8 +851,16 @@ fn test_isolation_crash_recovery() {
         "expected PluginCrashed, got {err:?}"
     );
 
-    // Explicit recovery respawns + reloads; the plugin is usable again.
-    plugin.recover().expect("recover");
+    // Explicit recovery respawns + reloads; the plugin is usable again. The reload in the
+    // fresh helper can hit the same C++-init flake as a first load, so retry it too.
+    let mut recovered = plugin.recover();
+    for _ in 0..4 {
+        if recovered.is_ok() {
+            break;
+        }
+        recovered = plugin.recover();
+    }
+    recovered.expect("recover");
     let params = plugin.get_parameters().expect("params after recover");
     assert!(!params.is_empty(), "no parameters after recovery");
     println!(
@@ -869,7 +890,7 @@ fn test_isolation_auto_recover() {
         .auto_recover_max_retries(5)
         .build()
         .expect("build isolated host");
-    let mut plugin = host.load_plugin(plugin_path).expect("load isolated");
+    let mut plugin = load_isolated_retry(&mut host, plugin_path);
     let id = plugin.get_parameters().expect("params")[0].id;
     plugin.set_parameter(id, 0.5).expect("set");
 

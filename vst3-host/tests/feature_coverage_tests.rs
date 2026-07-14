@@ -253,8 +253,17 @@ fn load_dexed_isolated() -> Option<(Vst3Host, Plugin)> {
         .with_process_isolation(true)
         .build()
         .expect("build isolated host");
-    let plugin = host.load_plugin(path).expect("load Dexed (isolated)");
-    Some((host, plugin))
+    // Dexed intermittently crashes ("Pure virtual function called!") during C++ init while
+    // *loading* in a fresh helper — the same known flake integration_tests' auto-recover
+    // test retries around. Each attempt spawns a fresh helper, so just retry a few times.
+    let mut last_err = None;
+    for _ in 0..5 {
+        match host.load_plugin(path) {
+            Ok(plugin) => return Some((host, plugin)),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    panic!("load Dexed (isolated) failed after 5 attempts: {last_err:?}");
 }
 
 /// Program selection through `IUnitInfo` against Dexed (32 cartridge programs on the root
