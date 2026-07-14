@@ -6,6 +6,39 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-14
+
+### Added
+
+- **Full `PluginInternal` parity for process-isolated plugins.** Everything the in-process
+  path supports now marshals across the IPC boundary:
+  - `Plugin::reconfigure` and `Plugin::set_process_mode` (`kRealtime`/`kOffline`), so
+    faster-than-real-time offline bouncing works out-of-process. Contributed by
+    [@ro-ag](https://github.com/ro-ag) ([#7], fixes [#6]).
+  - `bus_arrangements` / `set_bus_arrangements` (speaker-layout query and negotiation),
+    `get_units` (unit/program-list enumeration — previously silently empty),
+    `latency_samples` / `tail_samples` (previously silently `0`), and
+    `midi_cc_to_parameter` (`IMidiMapping` — previously silently `None`).
+- **Crash recovery replays the runtime config.** `Plugin::recover()` (and auto-recover)
+  reloads a respawned helper at the last `reconfigure`d sample rate / block size and
+  re-applies a non-default process mode, instead of silently reverting to the load-time
+  settings. Verified end-to-end by a capstone that kills the helper and proves the rendered
+  pitch is unchanged.
+- MIDI input example (`examples/`).
+
+### Fixed
+
+- The isolation helper sized `process` output buffers as *bus count × 2* (a stereo-per-bus
+  assumption), silently dropping channels beyond two per bus after a negotiated non-stereo
+  arrangement; it now uses the plugin's live per-bus channel count.
+- `Plugin::output_channel_count()` on an isolated plugin returned the load-time snapshot
+  forever; a successful `set_bus_arrangements` now refreshes it from the arrangement the
+  plugin actually applied.
+- The helper committed its tracked sample rate before the plugin accepted a `Reconfigure`;
+  a rejected reconfigure no longer desyncs the post-crash reload rate.
+- `Plugin::reconfigure` rejects `block_size > i32::MAX` instead of silently truncating it in
+  the internal casts.
+
 ## [0.6.1] - 2026-07-08
 
 ### Fixed
@@ -296,7 +329,8 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 - Initial release: safe VST3 hosting — discover, load, parameters, MIDI, audio playback, state
   save/restore, and process isolation.
 
-[Unreleased]: https://github.com/HelgeSverre/rust-vst3-host/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/HelgeSverre/rust-vst3-host/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.7.0
 [0.6.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.6.1
 [0.6.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.6.0
 [0.5.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.5.0
@@ -309,3 +343,5 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 [0.1.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.1.1
 [0.1.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.1.0
 [#4]: https://github.com/HelgeSverre/rust-vst3-host/issues/4
+[#6]: https://github.com/HelgeSverre/rust-vst3-host/issues/6
+[#7]: https://github.com/HelgeSverre/rust-vst3-host/pull/7
