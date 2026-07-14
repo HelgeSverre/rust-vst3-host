@@ -46,6 +46,11 @@ use vst3::{uid, Class, ComRef, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 
 const PLUGIN_NAME: &str = "VST3 Host Test Synth";
 
+/// Advertised latency/tail (samples). Nonzero on purpose — host tests assert these exact
+/// values to prove the accessors really reach the plugin (in-process and over IPC).
+const TEST_LATENCY_SAMPLES: u32 = 32;
+const TEST_TAIL_SAMPLES: u32 = 4800;
+
 /// Parameter id for the crude low-pass cutoff (normalized 0..1, 1.0 = fully open).
 const CUTOFF_PARAM_ID: u32 = 0;
 /// Parameter id for the oscillator waveform (stepped: sine / saw / super saw).
@@ -884,7 +889,9 @@ impl IAudioProcessorTrait for TestSynthProcessor {
         }
     }
     unsafe fn getLatencySamples(&self) -> u32 {
-        0
+        // Fixed, nonzero advertisement (TestSynth has no real look-ahead): lets host tests
+        // assert a real getLatencySamples round trip — a dropped call would read 0.
+        TEST_LATENCY_SAMPLES
     }
     unsafe fn setupProcessing(&self, setup: *mut ProcessSetup) -> tresult {
         if let Ok(mut s) = self.state.lock() {
@@ -1052,7 +1059,8 @@ impl IAudioProcessorTrait for TestSynthProcessor {
         kResultOk
     }
     unsafe fn getTailSamples(&self) -> u32 {
-        0
+        // Fixed, nonzero advertisement, same rationale as getLatencySamples.
+        TEST_TAIL_SAMPLES
     }
 }
 

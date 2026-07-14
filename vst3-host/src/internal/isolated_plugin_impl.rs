@@ -356,7 +356,17 @@ impl PluginInternal for IsolatedPluginImpl {
                 outputs: outputs.to_vec(),
             },
             "SetBusArrangements",
-        )
+        )?;
+        // The negotiated layout may have changed the channel count: refresh the cached
+        // total from what the helper's plugin actually applied (it may decline a request
+        // and keep its own arrangement), so output_channel_count() stays live like the
+        // in-process implementation's getBusInfo query.
+        if let Ok(HostResponse::BusArrangements { arrangements }) =
+            self.send_command(HostCommand::BusArrangements)
+        {
+            self.output_channels = arrangements.outputs.iter().map(|a| a.channel_count()).sum();
+        }
+        Ok(())
     }
 
     fn note_on(

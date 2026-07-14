@@ -418,10 +418,11 @@ impl Plugin {
                 "sample rate must be finite and positive, got {sample_rate}"
             )));
         }
-        if block_size == 0 {
-            return Err(Error::InvalidParameter(
-                "block size must be greater than 0".to_string(),
-            ));
+        if block_size == 0 || block_size > i32::MAX as usize {
+            return Err(Error::InvalidParameter(format!(
+                "block size must be in 1..={}, got {block_size}",
+                i32::MAX
+            )));
         }
 
         self.internal

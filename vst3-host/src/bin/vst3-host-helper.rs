@@ -196,16 +196,17 @@ fn handle(
         HostCommand::Reconfigure {
             sample_rate: sr,
             block_size,
-        } => {
-            // Track the new rate so a post-crash reload uses it.
-            *sample_rate = sr;
-            with(plugin, |p| match p.reconfigure(sr, block_size as usize) {
-                Ok(()) => HostResponse::Success {
+        } => with(plugin, |p| match p.reconfigure(sr, block_size as usize) {
+            Ok(()) => {
+                // Track the accepted rate so a post-crash reload uses it. Only on success:
+                // a rejected reconfigure must not desync the tracked rate from the plugin.
+                *sample_rate = sr;
+                HostResponse::Success {
                     message: "reconfigured".to_string(),
-                },
-                Err(e) => err("Reconfigure", e),
-            })
-        }
+                }
+            }
+            Err(e) => err("Reconfigure", e),
+        }),
         HostCommand::SetProcessMode { mode } => with(plugin, |p| match p.set_process_mode(mode) {
             Ok(()) => HostResponse::Success {
                 message: "process mode set".to_string(),
@@ -325,7 +326,9 @@ fn handle(
         HostCommand::Process { inputs, frames } => {
             let sr = *sample_rate;
             with(plugin, |p| {
-                let out_channels = p.info().audio_outputs.max(1) as usize * 2;
+                // Live channel count (sums getBusInfo across output buses), so a negotiated
+                // non-stereo arrangement (mono, 5.1, …) marshals all its channels back.
+                let out_channels = p.output_channel_count().max(1);
                 let mut buffers = AudioBuffers {
                     inputs,
                     outputs: vec![vec![0.0; frames as usize]; out_channels],

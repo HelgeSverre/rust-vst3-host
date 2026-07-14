@@ -192,6 +192,76 @@ fn test_isolated_reconfigure_and_process_mode() {
     );
 }
 
+/// Crash recovery replays the runtime config: after `reconfigure(96000)` +
+/// `set_process_mode(Offline)`, a killed helper must be respawned at the *new* sample rate,
+/// not the load-time 48000. Proven by pitch: TestSynth's phase increment depends on the
+/// sample rate its `setupProcessing` saw, so a reload at the wrong rate shifts the rendered
+/// frequency of the same note by the rate ratio (~2x here).
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin) and the helper binary"]
+fn test_isolated_recover_replays_reconfigured_config() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_test_synth_isolated() else {
+        return;
+    };
+
+    plugin
+        .set_process_mode(ProcessMode::Offline)
+        .expect("offline over IPC");
+    plugin
+        .reconfigure(96000.0, 4096)
+        .expect("reconfigure to 96k over IPC");
+
+    // Measure a held note's frequency at the new rate.
+    fn held_note_freq(plugin: &mut Plugin) -> f64 {
+        let (frames, sr) = (4096usize, 96000.0);
+        plugin.start_processing().expect("start");
+        let _ = plugin.note_on(MidiChannel::Ch1, 69, 100).expect("note_on");
+        let mut buffers = AudioBuffers::new(0, 2, frames, sr);
+        // Two blocks: let the attack envelope open before measuring.
+        plugin.process_audio(&mut buffers).expect("process");
+        plugin.process_audio(&mut buffers).expect("process");
+        let mut crossings = 0;
+        for w in buffers.outputs[0].windows(2) {
+            if (w[0] <= 0.0 && w[1] > 0.0) || (w[0] >= 0.0 && w[1] < 0.0) {
+                crossings += 1;
+            }
+        }
+        plugin.stop_processing().ok();
+        (crossings as f64 / 2.0) / (frames as f64 / sr)
+    }
+    let freq_before = held_note_freq(&mut plugin);
+    assert!(freq_before > 20.0, "baseline note is silent: {freq_before}");
+
+    // Kill the helper out from under the plugin, then recover (retrying the known
+    // C++-init load flake). The reload must replay the cached 96000/4096 (and Offline).
+    let pid = plugin.isolation_pid().expect("helper pid");
+    let killed = std::process::Command::new("kill")
+        .arg("-9")
+        .arg(pid.to_string())
+        .status()
+        .expect("kill helper");
+    assert!(killed.success(), "failed to kill helper {pid}");
+    let mut recovered = plugin.recover();
+    for _ in 0..4 {
+        if recovered.is_ok() {
+            break;
+        }
+        recovered = plugin.recover();
+    }
+    recovered.expect("recover");
+    assert!(plugin.recovery_count() >= 1, "recovery not counted");
+
+    let freq_after = held_note_freq(&mut plugin);
+    let ratio = freq_after / freq_before;
+    assert!(
+        (0.9..=1.1).contains(&ratio),
+        "recovered helper renders at a different rate: {freq_before:.1} Hz -> {freq_after:.1} Hz \
+         (reload did not replay the reconfigured sample rate)"
+    );
+}
+
 /// Note expression (MPE) end-to-end across the *process-isolation* boundary: the helper owns
 /// the real plugin (and allocates the NoteId), and a per-note Tuning expression marshaled over
 /// IPC still audibly bends the voice's pitch. Mirrors [`test_note_expression_bends_pitch`].
@@ -834,6 +904,19 @@ fn test_bus_arrangements_isolated() {
             .outputs[0],
         SpeakerArrangement::STEREO
     );
+
+    // Requesting mono over IPC: like the in-process original, the plugin may accept or
+    // refuse, but must not error — and the cached channel count must stay consistent with
+    // the arrangement the helper's plugin actually applied.
+    plugin
+        .set_bus_arrangements(&[], &[SpeakerArrangement::MONO])
+        .expect("mono request over IPC should not error the host");
+    let after = plugin.bus_arrangements().expect("re-query after mono");
+    assert_eq!(
+        after.outputs[0].channel_count(),
+        plugin.output_channel_count(),
+        "isolated arrangement and cached channel count must stay consistent"
+    );
 }
 
 /// Offline process mode: `set_process_mode(Offline)` is rejected while processing, accepted
@@ -1256,35 +1339,41 @@ fn test_effect_processes_audio_input() {
     );
 }
 
-/// Latency/tail accessors return the plugin's reported values without error.
+/// Latency/tail accessors return the plugin's reported values. TestSynth advertises fixed
+/// nonzero values (32 / 4800) precisely so this can assert a real round trip — a broken
+/// accessor reading the 0 fallback fails.
 #[test]
-#[ignore = "Requires the bundled test plugin"]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
 fn test_latency_and_tail_accessors() {
     let _guard = plugin_guard();
-    let Some((_host, plugin)) = load_dexed() else {
+    let Some((_host, plugin)) = load_test_synth() else {
         return;
     };
-    let latency = plugin.latency_samples();
-    let tail = plugin.tail_samples();
-    println!("Dexed latency={latency} samples, tail={tail} samples");
-    // Sanity: a synth's latency is small; we just assert the calls work and are bounded.
-    assert!(latency < 1_000_000, "implausible latency {latency}");
+    assert_eq!(plugin.latency_samples(), 32, "TestSynth advertises 32");
+    assert_eq!(plugin.tail_samples(), 4800, "TestSynth advertises 4800");
 }
 
 /// Latency/tail accessors across the *process-isolation* boundary: both round-trip over IPC
-/// instead of silently reporting 0. Mirrors [`test_latency_and_tail_accessors`].
+/// instead of silently reporting the 0 fallback. Mirrors [`test_latency_and_tail_accessors`]
+/// with the same exact-value assertions.
 #[cfg(feature = "process-isolation")]
 #[test]
-#[ignore = "Requires the bundled Dexed plugin and the helper binary"]
+#[ignore = "Requires the bundled TestSynth (just test-plugin) and the helper binary"]
 fn test_latency_and_tail_accessors_isolated() {
     let _guard = plugin_guard();
-    let Some((_host, plugin)) = load_dexed_isolated() else {
+    let Some((_host, plugin)) = load_test_synth_isolated() else {
         return;
     };
-    let latency = plugin.latency_samples();
-    let tail = plugin.tail_samples();
-    println!("Dexed (isolated) latency={latency} samples, tail={tail} samples");
-    assert!(latency < 1_000_000, "implausible latency {latency}");
+    assert_eq!(
+        plugin.latency_samples(),
+        32,
+        "isolated latency must marshal TestSynth's advertised 32, not the 0 fallback"
+    );
+    assert_eq!(
+        plugin.tail_samples(),
+        4800,
+        "isolated tail must marshal TestSynth's advertised 4800, not the 0 fallback"
+    );
 }
 
 // --- Pure-logic tests (run in CI without a plugin) ---------------------------
