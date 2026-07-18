@@ -161,15 +161,17 @@ pub(crate) struct RealtimeParameterValueQueue {
     head: AtomicUsize,
     count: AtomicUsize,
     arena: Arc<RealtimeParameterArena>,
+    overflows: Arc<AtomicUsize>,
 }
 
 impl RealtimeParameterValueQueue {
-    fn new(arena: Arc<RealtimeParameterArena>) -> Self {
+    fn new(arena: Arc<RealtimeParameterArena>, overflows: Arc<AtomicUsize>) -> Self {
         Self {
             param_id: AtomicU32::new(0),
             head: AtomicUsize::new(NONE),
             count: AtomicUsize::new(0),
             arena,
+            overflows,
         }
     }
 
@@ -180,7 +182,10 @@ impl RealtimeParameterValueQueue {
     }
 
     fn add_point(&self, sample_offset: i32, value: f64) -> Option<i32> {
-        let new_index = self.arena.push(sample_offset, value)?;
+        let Some(new_index) = self.arena.push(sample_offset, value) else {
+            self.overflows.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
         let mut previous = NONE;
         let mut current = self.head.load(Ordering::Relaxed);
         let mut logical_index = 0usize;
@@ -260,21 +265,27 @@ pub(crate) struct RealtimeParameterChanges {
     queues: Vec<ComWrapper<RealtimeParameterValueQueue>>,
     arena: Arc<RealtimeParameterArena>,
     used: AtomicUsize,
-    overflows: AtomicUsize,
+    overflows: Arc<AtomicUsize>,
 }
 
 impl RealtimeParameterChanges {
     /// Allocates every queue descriptor and point slot before live processing starts.
     pub(crate) fn new(max_distinct_parameters: usize, max_points: usize) -> Self {
         let arena = Arc::new(RealtimeParameterArena::new(max_points));
+        let overflows = Arc::new(AtomicUsize::new(0));
         let queues = (0..max_distinct_parameters)
-            .map(|_| ComWrapper::new(RealtimeParameterValueQueue::new(Arc::clone(&arena))))
+            .map(|_| {
+                ComWrapper::new(RealtimeParameterValueQueue::new(
+                    Arc::clone(&arena),
+                    Arc::clone(&overflows),
+                ))
+            })
             .collect();
         Self {
             queues,
             arena,
             used: AtomicUsize::new(0),
-            overflows: AtomicUsize::new(0),
+            overflows,
         }
     }
 
@@ -309,7 +320,6 @@ impl RealtimeParameterChanges {
             return false;
         };
         if queue.add_point(sample_offset, value).is_none() {
-            self.overflows.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         true
@@ -390,6 +400,7 @@ mod tests {
         assert_eq!(q.point_at(0).map(|p| p.sample_offset), Some(0));
         assert_eq!(q.point_at(1).map(|p| p.sample_offset), Some(64));
         assert!(!changes.enqueue(3, 9, 0.6));
+        assert_eq!(changes.overflow_count(), 1);
         changes.clear();
         assert_eq!(changes.distinct_count(), 0);
         assert!(changes.enqueue(9, 1, 0.2));
