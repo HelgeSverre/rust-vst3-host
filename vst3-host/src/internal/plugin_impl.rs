@@ -878,6 +878,15 @@ impl PluginInternal for PluginImpl {
                 // Clear output events only - input events should be preserved for processing
                 self.output_events.clear();
 
+                // Clear the output parameter queue too. VST3's ProcessData::outputParameterChanges
+                // describes changes for the *current* processing block only (see
+                // Steinberg::Vst::ProcessData / IParameterChanges docs); the reference
+                // ParameterChanges host helper exposes clearQueue() for exactly this reset.
+                // Without this, addParameterData()/addPoint() would keep appending to queues
+                // from prior blocks, mixing stale points into new ones, growing point storage
+                // unbounded, and risking a reallocation on the audio thread long after warm-up.
+                data.output_param_changes.clear_all();
+
                 // The device may request a smaller block than the configured maximum
                 // (BufferSize::Default gives variable sizes), so process exactly the
                 // number of frames the caller provided, clamped to our preallocated

@@ -1153,6 +1153,71 @@ mod parameter_changes_tests {
         assert_eq!(unsafe { pc.getParameterCount() }, 0);
     }
 
+    /// Regression test for the plugin-facing `addParameterData`/`addPoint` path used for
+    /// `ProcessData::outputParameterChanges`. Per the VST3 docs, `outputParameterChanges`
+    /// describes changes for the *current* processing block only, mirroring the reference
+    /// `ParameterChanges` host helper's `clearQueue()`. Without calling `clear_all()` before
+    /// each block (as `PluginImpl::process` now does), a plugin emitting output parameter
+    /// points for the same id every block would keep finding its own queue "already active"
+    /// (since `used` never resets) and keep appending points to it forever.
+    #[test]
+    fn output_queue_is_isolated_per_block_and_does_not_grow_when_cleared() {
+        let pc = ParameterChanges::default();
+
+        // Simulate a plugin emitting one output point per block via the same `addParameterData`
+        // activation path the real COM `IParameterChanges::addParameterData` call uses, then
+        // insert the point directly into the returned slot's queue (equivalent to what the
+        // plugin's `IParamValueQueue::addPoint` COM call would do on that same object).
+        let emit_one_point = |pc: &ParameterChanges, id: u32, offset: i32, value: f64| {
+            let mut index: i32 = -1;
+            let queue_ptr =
+                unsafe { pc.addParameterData(&id as *const u32, &mut index as *mut i32) };
+            assert!(!queue_ptr.is_null());
+            assert!(index >= 0);
+            let queues = pc.queues.lock().unwrap();
+            queues[index as usize].insert_point(offset, value);
+        };
+
+        // Block 1: plugin writes one point for parameter 42.
+        emit_one_point(&pc, 42, 0, 0.1);
+        assert_eq!(unsafe { pc.getParameterCount() }, 1);
+        {
+            let queues = pc.queues.lock().unwrap();
+            let q = queues.iter().find(|q| q.param_id() == 42).unwrap();
+            assert_eq!(*q.points.lock().unwrap(), vec![(0, 0.1)]);
+        }
+        let pool_len_after_block_1 = pc.queues.lock().unwrap().len();
+
+        // Host resets the queue for the next block, as `PluginImpl::process` now does
+        // immediately before invoking the processor.
+        pc.clear_all();
+        assert_eq!(unsafe { pc.getParameterCount() }, 0);
+
+        // Block 2: plugin writes a different point for the same parameter id.
+        emit_one_point(&pc, 42, 5, 0.9);
+        assert_eq!(
+            unsafe { pc.getParameterCount() },
+            1,
+            "clearing between blocks must not leave stale points visible or double-counted"
+        );
+        {
+            let queues = pc.queues.lock().unwrap();
+            let q = queues.iter().find(|q| q.param_id() == 42).unwrap();
+            assert_eq!(
+                *q.points.lock().unwrap(),
+                vec![(5, 0.9)],
+                "block 2 must only expose its own point, not block 1's stale value"
+            );
+        }
+
+        // The pool is reused (recycled), not grown, across blocks.
+        assert_eq!(
+            pc.queues.lock().unwrap().len(),
+            pool_len_after_block_1,
+            "clearing between blocks must reuse pooled queues rather than growing the pool"
+        );
+    }
+
     #[test]
     fn enqueue_with_nan_value_orders_by_offset_without_panicking() {
         // The queue is ordered by `sample_offset` (an i32 — total order), never by the f64
