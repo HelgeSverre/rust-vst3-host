@@ -230,12 +230,26 @@ impl Plugin {
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))
             .and_then(|internal| internal.prepare_hard_realtime(capacities));
         match result {
-            Ok(()) => Ok(RealtimePlugin {
-                plugin: self,
-                capacities,
-                final_parameters,
-                faulted: false,
-            }),
+            Ok(()) => {
+                // Starting is part of the off-thread transaction. If activation/setup fails,
+                // remove the prepared structures and return the same ordinary owner rather than
+                // exposing a half-started realtime value to callers.
+                if let Err(error) = self.start_processing() {
+                    if let Some(internal) = self.internal.as_mut() {
+                        let _ = internal.leave_hard_realtime();
+                    }
+                    return Err(RealtimeTransitionFailure {
+                        plugin: Box::new(self),
+                        error,
+                    });
+                }
+                Ok(RealtimePlugin {
+                    plugin: self,
+                    capacities,
+                    final_parameters,
+                    faulted: false,
+                })
+            }
             Err(error) => Err(RealtimeTransitionFailure {
                 plugin: Box::new(self),
                 error,
@@ -245,9 +259,15 @@ impl Plugin {
 }
 
 impl RealtimePlugin {
-    /// Starts the plugin after the off-thread transition has prepared all fixed storage.
+    /// Ensures processing is started after the off-thread transition.
+    ///
+    /// [`Plugin::try_into_realtime`] starts the processor transactionally before returning, so
+    /// this is normally a no-op. It remains available for an off-thread retry after an explicit
+    /// [`Self::stop`].
     pub fn start(&mut self) -> Result<()> {
-        self.plugin.start_processing()?;
+        if !self.plugin.is_processing {
+            self.plugin.start_processing()?;
+        }
         self.faulted = false;
         Ok(())
     }
