@@ -761,6 +761,38 @@ pub(crate) trait PluginInternal: Send {
             "bus-aware audio processing is not supported for this plugin".to_string(),
         ))
     }
+    /// Preallocates and installs the exclusive hard-realtime process structures.
+    fn prepare_hard_realtime(
+        &mut self,
+        _capacities: crate::hard_realtime::RealtimeCapacities,
+    ) -> Result<()> {
+        Err(Error::Other(
+            "hard-realtime mode is unavailable for this plugin backend".to_string(),
+        ))
+    }
+    /// Processes one block through the prepared hard-realtime structures.
+    fn process_hard_realtime(
+        &mut self,
+        _buffers: &mut AudioBuffers,
+        _midi: &[crate::hard_realtime::RealtimeMidiEvent],
+        _parameters: &[crate::hard_realtime::RealtimeParameterChange],
+    ) -> std::result::Result<
+        crate::hard_realtime::RealtimeProcessReport,
+        crate::hard_realtime::RealtimeProcessError,
+    > {
+        Err(crate::hard_realtime::RealtimeProcessError::UnsupportedBackend)
+    }
+    /// Removes hard-realtime structures after processing has stopped.
+    fn leave_hard_realtime(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Synchronizes the ordinary controller after live processor-only automation.
+    fn sync_controller_after_realtime(
+        &mut self,
+        _final_parameters: &[(u32, f64)],
+    ) -> crate::hard_realtime::ControllerSyncStatus {
+        crate::hard_realtime::ControllerSyncStatus::Unsupported
+    }
     /// Re-run `setupProcessing` for a new sample rate / block size. Defaults to unsupported
     /// for implementations that don't support it.
     fn reconfigure(&mut self, _sample_rate: f64, _block_size: usize) -> Result<()> {

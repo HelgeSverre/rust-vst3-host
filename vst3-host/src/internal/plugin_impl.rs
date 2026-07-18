@@ -3,6 +3,10 @@
 use crate::{
     audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
     error::{Error, Result},
+    hard_realtime::{
+        ControllerSyncStatus, RealtimeCapacities, RealtimeMidiEvent, RealtimeParameterChange,
+        RealtimeProcessError, RealtimeProcessReport,
+    },
     midi::{MidiChannel, MidiEvent, PluginEvent},
     parameters::{Parameter, ParameterChange},
     plugin::{
@@ -33,6 +37,8 @@ use super::{
         MAX_QUEUED_EVENTS,
     },
     module_loader::{load_module, VstModule},
+    realtime_com::{RealtimeEventList, RealtimeParameterChanges},
+    realtime_guard::ProcessThreadGuard,
 };
 
 /// Cap on the buffered output MIDI a plugin emits, so a host that never polls can't grow it
@@ -67,7 +73,7 @@ const MAX_MIDI_MAPPING_BUSES: usize = 32;
 /// parameter is the one worth applying.
 const MAX_DEFERRED_CONTROLLER_SYNC: usize = 4096;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MidiMappingCache {
     buses: usize,
     assignments: Vec<Option<u32>>,
@@ -195,6 +201,11 @@ pub struct PluginImpl {
 
     // Host data structures
     process_data: Option<Box<HostProcessData>>,
+    /// Separately allocated process data and fixed COM collections used only while the same
+    /// plugin instance is sealed behind `RealtimePlugin`. Keeping this beside, rather than in
+    /// place of, `process_data` preserves all ordinary editor/automation structures for the
+    /// reversible off-thread handoff back to configuration mode.
+    realtime_state: Option<Box<RealtimeState>>,
     component_handler: Option<ComWrapper<ComponentHandler>>,
     connection: Option<ConnectionPair>,
 
@@ -331,6 +342,38 @@ struct AppliedSetup {
     /// actually written into `ProcessSetup`.
     process_mode: i32,
     symbolic_sample_size: i32,
+}
+
+/// Fixed process-side state for one exclusively owned hard-realtime lifecycle.
+///
+/// The COM wrappers are constructed before live processing and remain at stable heap addresses.
+/// `ProcessData` retains their interface pointers until the caller pauses audio and tears this
+/// value down. Only the one thread holding `&mut RealtimePlugin` may access these collections.
+struct RealtimeState {
+    data: Box<HostProcessData>,
+    input_events: ComWrapper<RealtimeEventList>,
+    output_events: ComWrapper<RealtimeEventList>,
+    input_parameters: ComWrapper<RealtimeParameterChanges>,
+    output_parameters: ComWrapper<RealtimeParameterChanges>,
+    capacities: RealtimeCapacities,
+    /// Immutable controller-to-parameter table captured before entering exclusive processing.
+    /// Controller COM calls are forbidden on the realtime thread, so mappings remain fixed until
+    /// the caller leaves realtime mode and services any deferred restart request.
+    midi_mapping: MidiMappingCache,
+    /// Root-unit program-change mapping resolved off-thread because querying `IUnitInfo` from
+    /// the process callback is outside the live contract. `None` means program messages are
+    /// ignored individually while all other channel messages continue to be delivered.
+    root_program_change: Option<ProgramChangeMapping>,
+}
+
+impl RealtimeState {
+    /// Reset every plugin-facing fixed collection after a block while retaining its allocation.
+    fn clear_process_collections(&self) {
+        self.input_events.clear();
+        self.output_events.clear();
+        self.input_parameters.clear();
+        self.output_parameters.clear();
+    }
 }
 
 /// Per-bus channel pointers into the (audio-thread-owned) audio buffers.
@@ -965,6 +1008,15 @@ impl PluginImpl {
                 data.process_context.tempo = bpm;
             }
         }
+        if let Some(ref mut state) = self.realtime_state {
+            state.data.transport_tempo = bpm;
+            if process_context_needs(
+                state.data.process_context_requirements,
+                IProcessContextRequirements_::Flags_::kNeedTempo as u32,
+            ) {
+                state.data.process_context.tempo = bpm;
+            }
+        }
     }
 
     /// Update the transport time signature for the **next** processed block, even while
@@ -982,6 +1034,15 @@ impl PluginImpl {
                 data.process_context.timeSigDenominator = denominator;
             }
         }
+        if let Some(ref mut state) = self.realtime_state {
+            if process_context_needs(
+                state.data.process_context_requirements,
+                IProcessContextRequirements_::Flags_::kNeedTimeSignature as u32,
+            ) {
+                state.data.process_context.timeSigNumerator = numerator;
+                state.data.process_context.timeSigDenominator = denominator;
+            }
+        }
     }
 
     /// Toggle the transport playing state (`kPlaying`) for the **next** processed block, even
@@ -991,6 +1052,10 @@ impl PluginImpl {
         if let Some(ref mut data) = self.process_data {
             data.process_context.state =
                 process_context_state(data.process_context_requirements, playing);
+        }
+        if let Some(ref mut state) = self.realtime_state {
+            state.data.process_context.state =
+                process_context_state(state.data.process_context_requirements, playing);
         }
     }
 
@@ -1506,6 +1571,7 @@ impl PluginImpl {
                 dirty_caches: DirtyCaches::default(),
                 unit_cache: Mutex::new(None),
                 process_data: None,
+                realtime_state: None,
                 component_handler: Some(component_handler),
                 connection: initialized.take_connection(),
                 pending_param_changes: Vec::with_capacity(MAX_PENDING_PARAM_CHANGES),
@@ -2521,6 +2587,277 @@ impl PluginInternal for PluginImpl {
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
         self.validate_bus_buffers(buffers)?;
         self.process_buffer_view(&mut CallerAudioBuffers::Buses(buffers))
+    }
+
+    fn prepare_hard_realtime(&mut self, capacities: RealtimeCapacities) -> Result<()> {
+        if self.realtime_state.is_some() {
+            return Err(Error::Other(
+                "hard-realtime processing structures are already prepared".to_string(),
+            ));
+        }
+
+        // Build a second complete ProcessData graph off-thread. `create_process_data` installs
+        // its result in the ordinary slot, so temporarily remove and then restore that slot. On
+        // every error path the original ordinary graph is put back unchanged.
+        let ordinary_data = self.process_data.take();
+        let create_result = self.create_process_data();
+        let prepared_data = self.process_data.take();
+        self.process_data = ordinary_data;
+        create_result?;
+        let mut data = prepared_data.ok_or_else(|| {
+            Error::Other("hard-realtime process data was not initialized".to_string())
+        })?;
+
+        let input_events = ComWrapper::new(RealtimeEventList::new(capacities.max_input_events));
+        let output_events = ComWrapper::new(RealtimeEventList::new(capacities.max_output_events));
+        let input_parameters = ComWrapper::new(RealtimeParameterChanges::new(
+            capacities.max_distinct_parameters,
+            capacities.max_parameter_changes,
+        ));
+        let output_parameters = ComWrapper::new(RealtimeParameterChanges::new(
+            capacities.max_distinct_parameters,
+            capacities.max_parameter_changes,
+        ));
+
+        // Interface pointers refer to COM allocations owned by the wrappers below; moving the
+        // wrappers into `RealtimeState` does not move those allocations.
+        data.process_data.inputEvents = input_events
+            .as_com_ref::<IEventList>()
+            .map(|value| value.as_ptr())
+            .unwrap_or(ptr::null_mut());
+        data.process_data.outputEvents = output_events
+            .as_com_ref::<IEventList>()
+            .map(|value| value.as_ptr())
+            .unwrap_or(ptr::null_mut());
+        data.process_data.inputParameterChanges = input_parameters
+            .as_com_ref::<IParameterChanges>()
+            .map(|value| value.as_ptr())
+            .unwrap_or(ptr::null_mut());
+        data.process_data.outputParameterChanges = output_parameters
+            .as_com_ref::<IParameterChanges>()
+            .map(|value| value.as_ptr())
+            .unwrap_or(ptr::null_mut());
+
+        // MIDI mapping and program metadata are controller-derived. Snapshot both while still on
+        // the control thread so the realtime callback performs only immutable table lookups.
+        let midi_mapping = self.midi_mapping_cache.clone();
+        let root_program_change = self.cached_program_change(0);
+        self.realtime_state = Some(Box::new(RealtimeState {
+            data,
+            input_events,
+            output_events,
+            input_parameters,
+            output_parameters,
+            capacities,
+            midi_mapping,
+            root_program_change,
+        }));
+        Ok(())
+    }
+
+    fn process_hard_realtime(
+        &mut self,
+        buffers: &mut AudioBuffers,
+        midi: &[RealtimeMidiEvent],
+        parameters: &[RealtimeParameterChange],
+    ) -> std::result::Result<RealtimeProcessReport, RealtimeProcessError> {
+        if !self.is_active || !self.is_processing {
+            return Err(RealtimeProcessError::NotProcessing);
+        }
+        let state = self
+            .realtime_state
+            .as_mut()
+            .ok_or(RealtimeProcessError::UnsupportedBackend)?;
+        let frames = buffers.block_size;
+        if frames == 0 || frames > state.capacities.max_block_frames {
+            return Err(RealtimeProcessError::InvalidAudioBlock);
+        }
+
+        let counts = preflight_realtime_inputs(
+            midi,
+            parameters,
+            frames,
+            &state.midi_mapping,
+            state.root_program_change,
+            state.capacities,
+        )?;
+        let route = |scheduled: &RealtimeMidiEvent| {
+            route_realtime_midi(
+                scheduled.event,
+                realtime_sample_offset(scheduled.sample_offset, frames),
+                &state.midi_mapping,
+                state.root_program_change,
+            )
+        };
+
+        state.clear_process_collections();
+        let output_event_overflows_before = state.output_events.overflow_count();
+        let output_parameter_overflows_before = state.output_parameters.overflow_count();
+
+        for scheduled in midi {
+            match route(scheduled) {
+                RealtimeMidiRoute::Event(event) => {
+                    if !state.input_events.push(event) {
+                        state.clear_process_collections();
+                        return Err(RealtimeProcessError::InputEventCapacity);
+                    }
+                }
+                RealtimeMidiRoute::Parameter { id, offset, value } => {
+                    if !state.input_parameters.enqueue(id, offset, value) {
+                        state.clear_process_collections();
+                        return Err(RealtimeProcessError::ParameterPointCapacity);
+                    }
+                }
+                RealtimeMidiRoute::Ignored => {}
+            }
+        }
+        for parameter in parameters {
+            if !parameter.value.is_finite() {
+                state.clear_process_collections();
+                return Err(RealtimeProcessError::InvalidParameterValue);
+            }
+            let offset = realtime_sample_offset(parameter.sample_offset, frames);
+            if !state.input_parameters.enqueue(
+                parameter.id,
+                offset,
+                parameter.value.clamp(0.0, 1.0),
+            ) {
+                state.clear_process_collections();
+                return Err(RealtimeProcessError::ParameterPointCapacity);
+            }
+        }
+
+        let data = &mut state.data;
+        data.process_data.numSamples = frames as i32;
+        data.sample_buffers
+            .copy_inputs_from(&buffers.inputs, 0, frames);
+        data.sample_buffers.clear_outputs();
+        data.sample_buffers.update_input_silence_flags(
+            &mut data.input_bus_buffers,
+            &self.bus_activation.audio_inputs,
+            frames,
+        );
+        prepare_output_silence_flags(
+            &mut data.output_bus_buffers,
+            &self.bus_activation.audio_outputs,
+        );
+
+        // The guard is active only while third-party code can synchronously call back into host
+        // COM objects. All host validation and collection preparation above remains ordinary
+        // Rust code with Copy-only errors, and every collection is cleared after the call.
+        let process_result = {
+            let _denormal = crate::internal::denormal::DenormalGuard::new();
+            let _process_guard = ProcessThreadGuard::enter();
+            self._host_app.enter_data_exchange_process();
+            let result = unsafe { self.processor.process(&mut data.process_data) };
+            self._host_app.leave_data_exchange_process();
+            result
+        };
+        advance_process_context(
+            &mut data.process_context,
+            data.process_context_requirements,
+            data.transport_tempo,
+            frames as i64,
+        );
+        if process_result != kResultOk {
+            state.clear_process_collections();
+            return Err(RealtimeProcessError::ProcessorFailed(process_result));
+        }
+
+        data.sample_buffers.update_output_silence_flags(
+            &mut data.output_bus_buffers,
+            &self.bus_activation.audio_outputs,
+            frames,
+        );
+        data.sample_buffers.copy_outputs_to(
+            &mut buffers.outputs,
+            0,
+            frames,
+            &data.output_bus_buffers,
+            &self.bus_activation.audio_outputs,
+        );
+        let report = RealtimeProcessReport {
+            input_events: counts.input_events,
+            parameter_changes: counts.parameter_points,
+            distinct_parameters: counts.distinct_parameters,
+            output_event_overflows: state
+                .output_events
+                .overflow_count()
+                .saturating_sub(output_event_overflows_before),
+            output_parameter_overflows: state
+                .output_parameters
+                .overflow_count()
+                .saturating_sub(output_parameter_overflows_before),
+        };
+        state.clear_process_collections();
+        Ok(report)
+    }
+
+    fn leave_hard_realtime(&mut self) -> Result<()> {
+        // Called only during the caller-paused reverse transition. Dropping fixed Vec/COM
+        // allocations here is intentionally non-realtime and leaves ordinary structures intact.
+        self.realtime_state.take();
+        Ok(())
+    }
+
+    fn sync_controller_after_realtime(
+        &mut self,
+        final_parameters: &[(u32, f64)],
+    ) -> ControllerSyncStatus {
+        let Some(controller) = self.controller.as_ref() else {
+            return ControllerSyncStatus::Unsupported;
+        };
+
+        if self.single_component {
+            // The processor is also the controller, so its live state is already authoritative.
+            // Replaying the entry snapshot here would roll back mapped MIDI and could let a
+            // program parameter fan out over later automation.
+            return ControllerSyncStatus::SingleComponent;
+        }
+
+        // A separate controller receives the processor's current state, but the component must
+        // not receive those bytes again: it is already the source and reapplying them would
+        // reset live DSP state. Stream creation, copying, and controller calls are all off-thread.
+        let state_synchronized = unsafe {
+            let stream = create_memory_stream_with_metadata(None, StreamStateType::Project);
+            stream
+                .to_com_ptr::<IBStream>()
+                .filter(|stream_ptr| {
+                    let result = self.component.getState(stream_ptr.as_ptr());
+                    result == kResultOk || result == kResultTrue
+                })
+                .map(|_| stream.to_vec())
+                .and_then(|bytes| {
+                    let controller_stream = create_memory_stream_from_with_metadata(
+                        bytes,
+                        None,
+                        StreamStateType::Project,
+                    );
+                    controller_stream
+                        .to_com_ptr::<IBStream>()
+                        .map(|stream_ptr| {
+                            let result = controller.setComponentState(stream_ptr.as_ptr());
+                            result == kResultOk || result == kResultTrue
+                        })
+                })
+                .unwrap_or(false)
+        };
+        if state_synchronized {
+            // The component stream is the complete post-processing state, including explicit
+            // automation, mapped MIDI, and program fan-out. Replaying the entry snapshot would
+            // overwrite values that changed only inside the processor during realtime tenure.
+            ControllerSyncStatus::StateAndParameters
+        } else {
+            // Some processors cannot serialize component state. Preserve the explicit parameter
+            // changes the public realtime API observed; mapped MIDI cannot be reconstructed here
+            // without controller access on the process thread.
+            for &(id, value) in final_parameters {
+                unsafe {
+                    controller.setParamNormalized(id, value);
+                }
+            }
+            ControllerSyncStatus::ParametersOnly
+        }
     }
 
     fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
@@ -4324,6 +4661,205 @@ impl PluginInternal for PluginImpl {
     }
 }
 
+/// Pre-resolved, allocation-free routing result for one realtime MIDI convenience event.
+enum RealtimeMidiRoute {
+    Event(Event),
+    Parameter { id: u32, offset: i32, value: f64 },
+    Ignored,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RealtimeInputCounts {
+    input_events: usize,
+    parameter_points: usize,
+    distinct_parameters: usize,
+}
+
+fn realtime_sample_offset(requested: usize, frames: usize) -> i32 {
+    requested
+        .min(frames.saturating_sub(1))
+        .min(i32::MAX as usize) as i32
+}
+
+/// Count the actual VST3 inputs after MIDI mapping and reject any fixed-capacity overflow.
+///
+/// The scans are deliberately quadratic in the number of points rather than using a temporary
+/// set: caller-provided block slices are bounded, and avoiding allocation is the stronger realtime
+/// invariant. Duplicate parameter ids consume point capacity but only one queue slot.
+fn preflight_realtime_inputs(
+    midi: &[RealtimeMidiEvent],
+    parameters: &[RealtimeParameterChange],
+    frames: usize,
+    midi_mapping: &MidiMappingCache,
+    root_program_change: Option<ProgramChangeMapping>,
+    capacities: RealtimeCapacities,
+) -> std::result::Result<RealtimeInputCounts, RealtimeProcessError> {
+    let route = |scheduled: &RealtimeMidiEvent| {
+        route_realtime_midi(
+            scheduled.event,
+            realtime_sample_offset(scheduled.sample_offset, frames),
+            midi_mapping,
+            root_program_change,
+        )
+    };
+    let mapped_parameter_points = midi
+        .iter()
+        .filter(|scheduled| matches!(route(scheduled), RealtimeMidiRoute::Parameter { .. }))
+        .count();
+    let input_events = midi
+        .iter()
+        .filter(|scheduled| matches!(route(scheduled), RealtimeMidiRoute::Event(_)))
+        .count();
+    if input_events > capacities.max_input_events {
+        return Err(RealtimeProcessError::InputEventCapacity);
+    }
+    let parameter_points = parameters.len().saturating_add(mapped_parameter_points);
+    if parameter_points > capacities.max_parameter_changes {
+        return Err(RealtimeProcessError::ParameterPointCapacity);
+    }
+
+    let mut distinct_parameters = 0usize;
+    for (index, parameter) in parameters.iter().enumerate() {
+        if !parameters[..index]
+            .iter()
+            .any(|seen| seen.id == parameter.id)
+        {
+            distinct_parameters += 1;
+        }
+    }
+    for (index, scheduled) in midi.iter().enumerate() {
+        let RealtimeMidiRoute::Parameter { id, .. } = route(scheduled) else {
+            continue;
+        };
+        if !parameters.iter().any(|change| change.id == id)
+            && !midi[..index].iter().any(|earlier| {
+                matches!(route(earlier), RealtimeMidiRoute::Parameter { id: earlier_id, .. } if earlier_id == id)
+            })
+        {
+            distinct_parameters += 1;
+        }
+    }
+    if distinct_parameters > capacities.max_distinct_parameters {
+        return Err(RealtimeProcessError::DistinctParameterCapacity);
+    }
+
+    Ok(RealtimeInputCounts {
+        input_events,
+        parameter_points,
+        distinct_parameters,
+    })
+}
+
+/// Route one already-validated MIDI message without controller access, allocation, or logging.
+///
+/// VST3 represents notes and poly-pressure as events. Channel controllers, pitch bend, channel
+/// pressure, and program changes are parameter automation looked up in controller-derived tables
+/// captured before realtime processing. An absent or out-of-range mapping is a successful no-op,
+/// matching the ordinary v0.9 MIDI path.
+#[allow(non_upper_case_globals, clippy::unnecessary_cast)]
+fn route_realtime_midi(
+    event: MidiEvent,
+    sample_offset: i32,
+    midi_mapping: &MidiMappingCache,
+    root_program_change: Option<ProgramChangeMapping>,
+) -> RealtimeMidiRoute {
+    let mut vst_event: Event = unsafe { std::mem::zeroed() };
+    vst_event.busIndex = 0;
+    vst_event.sampleOffset = sample_offset;
+    vst_event.ppqPosition = 0.0;
+    vst_event.flags = Event_::EventFlags_::kIsLive as u16;
+    match event {
+        MidiEvent::NoteOn {
+            channel,
+            note,
+            velocity,
+        } => {
+            write_midi_note_on(&mut vst_event, channel, note, velocity);
+        }
+        MidiEvent::NoteOff {
+            channel,
+            note,
+            velocity,
+        } => {
+            write_note_off_event(&mut vst_event, channel, note, velocity);
+        }
+        MidiEvent::ControlChange {
+            channel,
+            controller,
+            value,
+        } => {
+            let Some(id) = midi_mapping.get(0, channel.as_index() as i16, u16::from(controller))
+            else {
+                return RealtimeMidiRoute::Ignored;
+            };
+            return RealtimeMidiRoute::Parameter {
+                id,
+                offset: sample_offset,
+                value: f64::from(value) / 127.0,
+            };
+        }
+        MidiEvent::PitchBend { channel, value } => {
+            let Some(id) = midi_mapping.get(
+                0,
+                channel.as_index() as i16,
+                ControllerNumbers_::kPitchBend as u16,
+            ) else {
+                return RealtimeMidiRoute::Ignored;
+            };
+            return RealtimeMidiRoute::Parameter {
+                id,
+                offset: sample_offset,
+                value: f64::from(value) / 16_383.0,
+            };
+        }
+        MidiEvent::ChannelAftertouch { channel, pressure } => {
+            let Some(id) = midi_mapping.get(
+                0,
+                channel.as_index() as i16,
+                ControllerNumbers_::kAfterTouch as u16,
+            ) else {
+                return RealtimeMidiRoute::Ignored;
+            };
+            return RealtimeMidiRoute::Parameter {
+                id,
+                offset: sample_offset,
+                value: f64::from(pressure) / 127.0,
+            };
+        }
+        MidiEvent::PolyAftertouch {
+            channel,
+            note,
+            pressure,
+        } => {
+            vst_event.r#type = kPolyPressureEvent as u16;
+            vst_event.__field0.polyPressure.channel = channel.as_index() as i16;
+            vst_event.__field0.polyPressure.pitch = note as i16;
+            vst_event.__field0.polyPressure.pressure = pressure as f32 / 127.0;
+            vst_event.__field0.polyPressure.noteId = -1;
+        }
+        MidiEvent::ProgramChange { program, .. } => {
+            let Some(mapping) = root_program_change else {
+                return RealtimeMidiRoute::Ignored;
+            };
+            let selected = i32::from(program);
+            if selected >= mapping.program_count {
+                return RealtimeMidiRoute::Ignored;
+            }
+            let last_program = mapping.program_count.saturating_sub(1);
+            return RealtimeMidiRoute::Parameter {
+                id: mapping.param_id,
+                offset: sample_offset,
+                value: if last_program > 0 {
+                    f64::from(selected) / f64::from(last_program)
+                } else {
+                    0.0
+                },
+            };
+        }
+    }
+    RealtimeMidiRoute::Event(vst_event)
+}
+
 /// Convert a raw VST3 `Event` (as a plugin emits into its output event list) into a safe
 /// [`MidiEvent`]. Returns `None` for event types this library doesn't model.
 #[cfg(test)]
@@ -5319,6 +5855,212 @@ mod output_midi_tests {
                 note: 60,
                 velocity: 64
             })
+        );
+    }
+}
+
+#[cfg(test)]
+mod hard_realtime_routing_tests {
+    use super::*;
+
+    fn mapping(entries: &[(MidiChannel, u16, u32)]) -> MidiMappingCache {
+        let mut cache = MidiMappingCache {
+            buses: 1,
+            assignments: vec![None; MIDI_CHANNEL_COUNT * MIDI_CONTROLLER_COUNT],
+        };
+        for &(channel, controller, parameter) in entries {
+            let index = cache
+                .index(0, channel.as_index() as i16, controller)
+                .expect("test mapping index");
+            cache.assignments[index] = Some(parameter);
+        }
+        cache
+    }
+
+    fn scheduled(event: MidiEvent) -> RealtimeMidiEvent {
+        RealtimeMidiEvent {
+            event,
+            sample_offset: 17,
+        }
+    }
+
+    fn capacities(events: usize, points: usize, distinct: usize) -> RealtimeCapacities {
+        RealtimeCapacities {
+            max_block_frames: 64,
+            max_input_events: events,
+            max_output_events: 1,
+            max_parameter_changes: points,
+            max_distinct_parameters: distinct,
+        }
+    }
+
+    #[test]
+    fn channel_controllers_use_snapshotted_parameter_mappings() {
+        let cache = mapping(&[
+            (MidiChannel::Ch2, 1, 101),
+            (MidiChannel::Ch2, ControllerNumbers_::kPitchBend as u16, 102),
+            (
+                MidiChannel::Ch2,
+                ControllerNumbers_::kAfterTouch as u16,
+                103,
+            ),
+        ]);
+        let cases = [
+            (
+                MidiEvent::ControlChange {
+                    channel: MidiChannel::Ch2,
+                    controller: 1,
+                    value: 64,
+                },
+                101,
+                64.0 / 127.0,
+            ),
+            (
+                MidiEvent::PitchBend {
+                    channel: MidiChannel::Ch2,
+                    value: 8192,
+                },
+                102,
+                8192.0 / 16_383.0,
+            ),
+            (
+                MidiEvent::ChannelAftertouch {
+                    channel: MidiChannel::Ch2,
+                    pressure: 96,
+                },
+                103,
+                96.0 / 127.0,
+            ),
+        ];
+        for (event, expected_id, expected_value) in cases {
+            match route_realtime_midi(event, 17, &cache, None) {
+                RealtimeMidiRoute::Parameter { id, offset, value } => {
+                    assert_eq!(id, expected_id);
+                    assert_eq!(offset, 17);
+                    assert!((value - expected_value).abs() < f64::EPSILON);
+                }
+                _ => panic!("mapped controller was not routed as parameter automation"),
+            }
+        }
+    }
+
+    #[test]
+    fn unmapped_controllers_and_programs_are_noops() {
+        let cache = mapping(&[]);
+        assert!(matches!(
+            route_realtime_midi(
+                MidiEvent::ControlChange {
+                    channel: MidiChannel::Ch1,
+                    controller: 1,
+                    value: 127,
+                },
+                0,
+                &cache,
+                None,
+            ),
+            RealtimeMidiRoute::Ignored
+        ));
+        assert!(matches!(
+            route_realtime_midi(
+                MidiEvent::ProgramChange {
+                    channel: MidiChannel::Ch1,
+                    program: 8,
+                },
+                0,
+                &cache,
+                Some(ProgramChangeMapping {
+                    unit_id: 0,
+                    param_id: 300,
+                    program_count: 4,
+                }),
+            ),
+            RealtimeMidiRoute::Ignored
+        ));
+    }
+
+    #[test]
+    fn program_change_and_note_routes_match_vst3_semantics() {
+        let cache = mapping(&[]);
+        match route_realtime_midi(
+            MidiEvent::ProgramChange {
+                channel: MidiChannel::Ch16,
+                program: 2,
+            },
+            9,
+            &cache,
+            Some(ProgramChangeMapping {
+                unit_id: 0,
+                param_id: 300,
+                program_count: 5,
+            }),
+        ) {
+            RealtimeMidiRoute::Parameter { id, offset, value } => {
+                assert_eq!((id, offset), (300, 9));
+                assert_eq!(value, 0.5);
+            }
+            _ => panic!("program change was not translated to its cached parameter"),
+        }
+
+        match route_realtime_midi(
+            MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 0,
+            },
+            3,
+            &cache,
+            None,
+        ) {
+            RealtimeMidiRoute::Event(event) => unsafe {
+                assert_eq!(event.r#type, kNoteOffEvent as u16);
+                assert_eq!(event.__field0.noteOff.pitch, 60);
+                assert_eq!(event.sampleOffset, 3);
+            },
+            _ => panic!("velocity-zero note-on was not routed as note-off"),
+        }
+    }
+
+    #[test]
+    fn mapped_and_explicit_points_use_their_actual_capacity_classes() {
+        let cache = mapping(&[(MidiChannel::Ch1, 1, 10)]);
+        let midi = [
+            scheduled(MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 100,
+            }),
+            scheduled(MidiEvent::ControlChange {
+                channel: MidiChannel::Ch1,
+                controller: 1,
+                value: 64,
+            }),
+        ];
+        let explicit = [RealtimeParameterChange {
+            id: 10,
+            value: 0.75,
+            sample_offset: 20,
+        }];
+        assert_eq!(
+            preflight_realtime_inputs(&midi, &explicit, 64, &cache, None, capacities(1, 2, 1)),
+            Ok(RealtimeInputCounts {
+                input_events: 1,
+                parameter_points: 2,
+                distinct_parameters: 1,
+            })
+        );
+        assert_eq!(
+            preflight_realtime_inputs(&midi, &explicit, 64, &cache, None, capacities(1, 1, 1)),
+            Err(RealtimeProcessError::ParameterPointCapacity)
+        );
+
+        let other = [RealtimeParameterChange {
+            id: 11,
+            value: 0.25,
+            sample_offset: 0,
+        }];
+        assert_eq!(
+            preflight_realtime_inputs(&midi, &other, 64, &cache, None, capacities(1, 2, 1)),
+            Err(RealtimeProcessError::DistinctParameterCapacity)
         );
     }
 }

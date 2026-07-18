@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use vst3_host::{
     audio::AudioBuffers,
+    hard_realtime::{
+        ControllerSyncStatus, RealtimeCapacities, RealtimeMidiEvent, RealtimeParameterChange,
+    },
     midi::{MidiChannel, MidiEvent},
     realtime::RealtimePluginRunner,
     Vst3Host,
@@ -169,5 +172,174 @@ fn realtime_runner_steady_state_is_allocation_free() {
     assert_eq!(
         n, 0,
         "runner steady-state process() should not allocate/realloc/free; saw {n} over 200 blocks"
+    );
+}
+
+/// The exclusive hard-realtime lifecycle keeps the same TestSynth instance, translates its
+/// controller-derived MIDI mappings through fixed parameter storage, supports an off-thread
+/// stop/restart, and performs no host allocation, reallocation, or deallocation while processing
+/// repeated mixed audio/MIDI/parameter blocks. The fixture must be built before this ignored test;
+/// a missing bundle is treated as a local skip so the ordinary test suite remains portable.
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn exclusive_hard_realtime_lifecycle_is_allocation_free() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_plugins/TestSynth.vst3"
+    );
+    if !std::path::Path::new(path).exists() {
+        println!("TestSynth.vst3 not found, skipping");
+        return;
+    }
+
+    let mut host = Vst3Host::builder()
+        .sample_rate(48_000.0)
+        .block_size(512)
+        .build()
+        .expect("build host");
+    let plugin = host.load_plugin(path).expect("load TestSynth");
+    let original_uid = plugin.info().uid.clone();
+
+    // A failed off-thread preparation must return ownership of the exact ordinary instance.
+    let invalid = RealtimeCapacities {
+        max_block_frames: 0,
+        max_input_events: 16,
+        max_output_events: 16,
+        max_parameter_changes: 32,
+        max_distinct_parameters: 16,
+    };
+    let failure = match plugin.try_into_realtime(invalid) {
+        Err(failure) => failure,
+        Ok(_) => panic!("a zero-sized realtime block must be rejected"),
+    };
+    let (plugin, _) = failure.into_parts();
+    assert_eq!(plugin.info().uid, original_uid);
+
+    let capacities = RealtimeCapacities {
+        max_block_frames: 512,
+        max_input_events: 16,
+        max_output_events: 16,
+        max_parameter_changes: 32,
+        max_distinct_parameters: 16,
+    };
+    let mut realtime = match plugin.try_into_realtime(capacities) {
+        Ok(realtime) => realtime,
+        Err(failure) => panic!(
+            "prepare and transactionally start TestSynth: {}",
+            failure.error()
+        ),
+    };
+    let mut buffers = AudioBuffers::new(0, 2, 512, 48_000.0);
+    let channel = MidiChannel::Ch1;
+    let make_midi = |step: usize| {
+        [
+            RealtimeMidiEvent {
+                event: MidiEvent::NoteOn {
+                    channel,
+                    note: 60,
+                    velocity: 100,
+                },
+                sample_offset: 0,
+            },
+            RealtimeMidiEvent {
+                event: MidiEvent::ControlChange {
+                    channel,
+                    controller: 74,
+                    value: (step % 128) as u8,
+                },
+                sample_offset: 32,
+            },
+            RealtimeMidiEvent {
+                event: MidiEvent::PitchBend {
+                    channel,
+                    value: ((step * 97) % 16_384) as u16,
+                },
+                sample_offset: 64,
+            },
+            RealtimeMidiEvent {
+                event: MidiEvent::ChannelAftertouch {
+                    channel,
+                    pressure: ((step * 3) % 128) as u8,
+                },
+                sample_offset: 96,
+            },
+            RealtimeMidiEvent {
+                event: MidiEvent::ProgramChange {
+                    channel,
+                    program: (step % 4) as u8,
+                },
+                sample_offset: 128,
+            },
+            RealtimeMidiEvent {
+                event: MidiEvent::NoteOff {
+                    channel,
+                    note: 60,
+                    velocity: 0,
+                },
+                sample_offset: 400,
+            },
+        ]
+    };
+    let make_parameter = |step: usize| RealtimeParameterChange {
+        id: 4,
+        value: (step % 101) as f64 / 100.0,
+        sample_offset: 200,
+    };
+
+    // Warm every route, including IDataExchange, before measuring. TestSynth maps CC74,
+    // pitch bend, channel aftertouch, and root-unit program changes to four parameter ids.
+    for step in 0..16 {
+        let report = realtime
+            .process(&mut buffers, &make_midi(step), &[make_parameter(step)])
+            .expect("warm hard-realtime process graph");
+        assert_eq!(report.input_events, 2);
+        assert_eq!(report.parameter_changes, 5);
+        assert_eq!(report.distinct_parameters, 5);
+    }
+    realtime.stop().expect("stop off-thread");
+    realtime.start().expect("restart off-thread");
+
+    // Keep the armed loop free of formatting, panics, and owned error values. Every input lives
+    // on the stack, and the API returns only copyable counters/errors.
+    let mut process_failures = 0usize;
+    let mut last_resonance = 0.0;
+    ALLOCS.store(0, Ordering::Relaxed);
+    ON.store(true, Ordering::Relaxed);
+    for step in 0..200 {
+        let parameter = make_parameter(step);
+        last_resonance = parameter.value;
+        if realtime
+            .process(&mut buffers, &make_midi(step), &[parameter])
+            .is_err()
+        {
+            process_failures += 1;
+        }
+    }
+    ON.store(false, Ordering::Relaxed);
+
+    let allocation_operations = ALLOCS.load(Ordering::Relaxed);
+    assert_eq!(process_failures, 0, "all measured blocks must process");
+    assert_eq!(
+        allocation_operations, 0,
+        "exclusive hard-realtime process() allocated, reallocated, or freed {allocation_operations} times"
+    );
+
+    let (plugin, exit) = match realtime.try_into_plugin() {
+        Ok(restored) => restored,
+        Err(failure) => panic!(
+            "restore the same ordinary plugin off-thread: {}",
+            failure.error()
+        ),
+    };
+    assert_eq!(plugin.info().uid, original_uid);
+    assert!(!plugin.is_processing());
+    assert_ne!(exit.controller_sync, ControllerSyncStatus::Unsupported);
+    let restored_resonance = plugin
+        .get_parameter(4)
+        .expect("read synchronized TestSynth resonance");
+    assert!(
+        (restored_resonance - last_resonance).abs() < 1e-6,
+        "restored controller value {restored_resonance} did not match {last_resonance}"
     );
 }

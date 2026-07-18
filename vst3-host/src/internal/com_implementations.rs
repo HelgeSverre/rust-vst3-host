@@ -49,12 +49,18 @@ impl Default for HostApplication {
 }
 
 impl HostApplication {
+    /// Drains accumulated progress notifications for control-thread polling.
+    ///
+    /// The replacement retains the fixed callback-side capacity, so the next ordinary progress
+    /// callback does not allocate merely because the previous batch was collected.
     pub fn take_progress_notifications(&self) -> Vec<crate::plugin::HostNotification> {
         let mut state = self
             .progress
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        state.notifications.drain(..).collect()
+        let mut notifications = Vec::with_capacity(MAX_HOST_NOTIFICATIONS);
+        std::mem::swap(&mut notifications, &mut state.notifications);
+        notifications
     }
 
     pub fn configure_data_exchange(
@@ -197,6 +203,15 @@ impl IHostApplicationTrait for HostApplication {
         iid: *mut TUID,
         obj: *mut *mut std::ffi::c_void,
     ) -> tresult {
+        // Host-created messages and attribute maps allocate and use mutexes. Steinberg specifies
+        // this callback as a UI-thread service; a plugin that requests it directly from process()
+        // is rejected so the host side of the sealed realtime path remains allocation/lock-free.
+        if crate::internal::realtime_guard::is_active() {
+            if !obj.is_null() {
+                *obj = ptr::null_mut();
+            }
+            return kResultFalse;
+        }
         // Vend the host-created objects plugins ask for (the SDK's HostApplication does
         // this): IMessage and IAttributeList, used to pass data between a plugin's
         // component and controller halves. Anything else fails cleanly.
@@ -237,6 +252,10 @@ impl IProgressTrait for HostApplication {
     ) -> tresult {
         if out_id.is_null() {
             return kInvalidArgument;
+        }
+        if crate::internal::realtime_guard::is_active() {
+            *out_id = 0;
+            return kResultFalse;
         }
         let description = if optional_description.is_null() {
             None
@@ -289,6 +308,9 @@ impl IProgressTrait for HostApplication {
     }
 
     unsafe fn update(&self, id: IProgress_::ID, norm_value: ParamValue) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         let Some(value) = crate::plugin::ProgressValue::new(norm_value) else {
             return kInvalidArgument;
         };
@@ -306,6 +328,9 @@ impl IProgressTrait for HostApplication {
     }
 
     unsafe fn finish(&self, id: IProgress_::ID) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         let mut state = self
             .progress
             .lock()
@@ -419,6 +444,12 @@ impl IConnectionPointTrait for ConnectionProxy {
 
     unsafe fn notify(&self, message: *mut IMessage) -> tresult {
         if message.is_null() {
+            return kResultFalse;
+        }
+        if crate::internal::realtime_guard::is_active() {
+            // Preserve v0.9's diagnostic counter without invoking its logging path from the
+            // realtime callback.
+            self.dropped.fetch_add(1, Ordering::Relaxed);
             return kResultFalse;
         }
         if thread::current().id() != self.control_thread {
@@ -598,10 +629,16 @@ impl Class for HostAttributeList {
 
 impl IAttributeListTrait for HostAttributeList {
     unsafe fn setInt(&self, id: *const std::os::raw::c_char, value: i64) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         self.put(attr_key(id), AttrValue::Int(value));
         kResultOk
     }
     unsafe fn getInt(&self, id: *const std::os::raw::c_char, value: *mut i64) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         match self.get_value(&attr_key(id)) {
             Some(AttrValue::Int(v)) if !value.is_null() => {
                 *value = v;
@@ -611,10 +648,16 @@ impl IAttributeListTrait for HostAttributeList {
         }
     }
     unsafe fn setFloat(&self, id: *const std::os::raw::c_char, value: f64) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         self.put(attr_key(id), AttrValue::Float(value));
         kResultOk
     }
     unsafe fn getFloat(&self, id: *const std::os::raw::c_char, value: *mut f64) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         match self.get_value(&attr_key(id)) {
             Some(AttrValue::Float(v)) if !value.is_null() => {
                 *value = v;
@@ -624,6 +667,9 @@ impl IAttributeListTrait for HostAttributeList {
         }
     }
     unsafe fn setString(&self, id: *const std::os::raw::c_char, string: *const u16) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         if string.is_null() {
             return kResultFalse;
         }
@@ -642,6 +688,9 @@ impl IAttributeListTrait for HostAttributeList {
         string: *mut u16,
         size_in_bytes: u32,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         match self.get_value(&attr_key(id)) {
             Some(AttrValue::Str(v)) if !string.is_null() => {
                 // Copy up to capacity-1 chars, then null-terminate.
@@ -662,6 +711,9 @@ impl IAttributeListTrait for HostAttributeList {
         data: *const std::ffi::c_void,
         size_in_bytes: u32,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         if data.is_null() {
             return kResultFalse;
         }
@@ -675,6 +727,9 @@ impl IAttributeListTrait for HostAttributeList {
         data: *mut *const std::ffi::c_void,
         size_in_bytes: *mut u32,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         // Note: returns a pointer into the stored buffer; valid until the entry is
         // replaced. VST3 plugins read it synchronously during init, which is safe here.
         if data.is_null() || size_in_bytes.is_null() {
@@ -724,6 +779,9 @@ impl Class for HostMessage {
 
 impl IMessageTrait for HostMessage {
     unsafe fn getMessageID(&self) -> FIDString {
+        if crate::internal::realtime_guard::is_active() {
+            return ptr::null();
+        }
         // Pointer to the stored id (valid until replaced); null if unset.
         if let Ok(g) = self.id.lock() {
             if let Some(ref s) = *g {
@@ -733,6 +791,9 @@ impl IMessageTrait for HostMessage {
         ptr::null()
     }
     unsafe fn setMessageID(&self, id: FIDString) {
+        if crate::internal::realtime_guard::is_active() {
+            return;
+        }
         if id.is_null() {
             return;
         }
@@ -742,6 +803,9 @@ impl IMessageTrait for HostMessage {
         }
     }
     unsafe fn getAttributes(&self) -> *mut IAttributeList {
+        if crate::internal::realtime_guard::is_active() {
+            return ptr::null_mut();
+        }
         // Borrowed pointer to the message's own attribute list (kept alive by `self`).
         self.attributes
             .to_com_ptr::<IAttributeList>()
@@ -1024,6 +1088,12 @@ impl IBStreamTrait for MemoryStream {
         num_bytes: i32,
         num_bytes_read: *mut i32,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            if !num_bytes_read.is_null() {
+                *num_bytes_read = 0;
+            }
+            return kResultFalse;
+        }
         if buffer.is_null() || num_bytes < 0 {
             return kResultFalse;
         }
@@ -1041,6 +1111,12 @@ impl IBStreamTrait for MemoryStream {
         num_bytes: i32,
         num_bytes_written: *mut i32,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            if !num_bytes_written.is_null() {
+                *num_bytes_written = 0;
+            }
+            return kResultFalse;
+        }
         if buffer.is_null() || num_bytes < 0 {
             return kResultFalse;
         }
@@ -1061,6 +1137,9 @@ impl IBStreamTrait for MemoryStream {
     }
 
     unsafe fn seek(&self, pos: i64, mode: i32, result: *mut i64) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         let Some(new) = self.seek_to(pos, mode as u32) else {
             return kInvalidArgument;
         };
@@ -1071,6 +1150,9 @@ impl IBStreamTrait for MemoryStream {
     }
 
     unsafe fn tell(&self, pos: *mut i64) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         if pos.is_null() {
             return kResultFalse;
         }
@@ -1081,6 +1163,12 @@ impl IBStreamTrait for MemoryStream {
 
 impl IStreamAttributesTrait for MemoryStream {
     unsafe fn getFileName(&self, name: *mut String128) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            if !name.is_null() {
+                (*name).fill(0);
+            }
+            return kResultFalse;
+        }
         if name.is_null() {
             return kInvalidArgument;
         }
@@ -1095,6 +1183,9 @@ impl IStreamAttributesTrait for MemoryStream {
     }
 
     unsafe fn getAttributes(&self) -> *mut IAttributeList {
+        if crate::internal::realtime_guard::is_active() {
+            return ptr::null_mut();
+        }
         self.attributes
             .as_com_ref::<IAttributeList>()
             .map(|attributes| attributes.as_ptr())
@@ -1237,6 +1328,9 @@ impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
         handler: *mut vst3::Steinberg::Linux::IEventHandler,
         fd: vst3::Steinberg::Linux::FileDescriptor,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         let Some(handler) = vst3::ComRef::from_raw(handler) else {
             return kInvalidArgument;
         };
@@ -1253,6 +1347,9 @@ impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
         &self,
         handler: *mut vst3::Steinberg::Linux::IEventHandler,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         match self.run_loop.lock() {
             Ok(mut reg) => {
                 reg.handlers.retain(|(h, _)| h.as_ptr() != handler);
@@ -1267,6 +1364,9 @@ impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
         handler: *mut vst3::Steinberg::Linux::ITimerHandler,
         milliseconds: vst3::Steinberg::Linux::TimerInterval,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         let Some(handler) = vst3::ComRef::from_raw(handler) else {
             return kInvalidArgument;
         };
@@ -1288,6 +1388,9 @@ impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
         &self,
         handler: *mut vst3::Steinberg::Linux::ITimerHandler,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         match self.run_loop.lock() {
             Ok(mut reg) => {
                 reg.timers.retain(|t| t.handler.as_ptr() != handler);
@@ -1300,6 +1403,9 @@ impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
 
 impl IPlugFrameTrait for HostPlugFrame {
     unsafe fn resizeView(&self, view: *mut IPlugView, new_size: *mut ViewRect) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         let Some(view) = ComRef::<IPlugView>::from_raw(view) else {
             return kInvalidArgument;
         };
@@ -1474,6 +1580,9 @@ impl Class for HostContextMenu {
 
 impl IContextMenuTrait for HostContextMenu {
     unsafe fn getItemCount(&self) -> i32 {
+        if crate::internal::realtime_guard::is_active() {
+            return 0;
+        }
         self.items
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -1487,6 +1596,12 @@ impl IContextMenuTrait for HostContextMenu {
         item: *mut IContextMenuItem,
         target: *mut *mut IContextMenuTarget,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            if !target.is_null() {
+                *target = ptr::null_mut();
+            }
+            return kResultFalse;
+        }
         if index < 0 || item.is_null() || target.is_null() {
             return kInvalidArgument;
         }
@@ -1512,6 +1627,9 @@ impl IContextMenuTrait for HostContextMenu {
         item: *const IContextMenuItem,
         target: *mut IContextMenuTarget,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         if item.is_null() {
             return kInvalidArgument;
         }
@@ -1536,6 +1654,9 @@ impl IContextMenuTrait for HostContextMenu {
         item: *const IContextMenuItem,
         target: *mut IContextMenuTarget,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         if item.is_null() {
             return kInvalidArgument;
         }
@@ -1751,6 +1872,9 @@ impl Class for ComponentHandler {
 
 impl IComponentHandlerTrait for ComponentHandler {
     unsafe fn beginEdit(&self, id: u32) -> i32 {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultOk;
+        }
         log::debug!("Host: Begin edit for parameter {}", id);
         self.push_edit(crate::plugin::ParameterEdit {
             id,
@@ -1761,6 +1885,9 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 
     unsafe fn performEdit(&self, id: u32, value_normalized: f64) -> i32 {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultOk;
+        }
         log::debug!(
             "Host: Perform edit for parameter {} = {}",
             id,
@@ -1782,6 +1909,9 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 
     unsafe fn endEdit(&self, id: u32) -> i32 {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultOk;
+        }
         log::debug!("Host: End edit for parameter {}", id);
         self.push_edit(crate::plugin::ParameterEdit {
             id,
@@ -1792,7 +1922,9 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 
     unsafe fn restartComponent(&self, flags: i32) -> i32 {
-        log::debug!("Host: Restart component requested with flags: {flags:#x}");
+        if !crate::internal::realtime_guard::is_active() {
+            log::debug!("Host: Restart component requested with flags: {flags:#x}");
+        }
         // Recorded for the host to poll (`Plugin::take_restart_flags`), not acted on here: the
         // host decides what a restart means for it. See `RestartFlags` for which flags this
         // library handles on the host's behalf (none, currently) and which need host action.
@@ -1807,6 +1939,9 @@ impl IComponentHandler3Trait for ComponentHandler {
         plug_view: *mut IPlugView,
         parameter_id: *const u32,
     ) -> *mut IContextMenu {
+        if crate::internal::realtime_guard::is_active() {
+            return ptr::null_mut();
+        }
         if plug_view.is_null() {
             return ptr::null_mut();
         }
@@ -1827,6 +1962,9 @@ impl IComponentHandler3Trait for ComponentHandler {
 
 impl IComponentHandler2Trait for ComponentHandler {
     unsafe fn setDirty(&self, state: u8) -> i32 {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultOk;
+        }
         log::debug!("Host: Plugin marked state as dirty (state: {})", state);
         if self.push_notification(crate::plugin::HostNotification::DirtyChanged(state != 0)) {
             kResultOk
@@ -1836,6 +1974,9 @@ impl IComponentHandler2Trait for ComponentHandler {
     }
 
     unsafe fn requestOpenEditor(&self, name: *const std::os::raw::c_char) -> i32 {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         log::debug!("Host: Plugin requested editor open");
         let name = if name.is_null() {
             None
@@ -1853,6 +1994,9 @@ impl IComponentHandler2Trait for ComponentHandler {
     // the gesture stream; nothing records the interleaving. See the `ComponentHandler` type
     // comment for what a host can and cannot conclude from them.
     unsafe fn startGroupEdit(&self) -> i32 {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultOk;
+        }
         log::debug!("Host: Plugin started group edit");
         if self.push_notification(crate::plugin::HostNotification::GroupEditStarted) {
             kResultOk
@@ -1862,6 +2006,9 @@ impl IComponentHandler2Trait for ComponentHandler {
     }
 
     unsafe fn finishGroupEdit(&self) -> i32 {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultOk;
+        }
         log::debug!("Host: Plugin finished group edit");
         if self.push_notification(crate::plugin::HostNotification::GroupEditFinished) {
             kResultOk
@@ -1873,6 +2020,9 @@ impl IComponentHandler2Trait for ComponentHandler {
 
 impl IUnitHandlerTrait for ComponentHandler {
     unsafe fn notifyUnitSelection(&self, unit_id: i32) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         if self.push_notification(crate::plugin::HostNotification::UnitSelectionChanged { unit_id })
         {
             kResultOk
@@ -1882,6 +2032,9 @@ impl IUnitHandlerTrait for ComponentHandler {
     }
 
     unsafe fn notifyProgramListChange(&self, list_id: i32, program_index: i32) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         if self.push_notification(crate::plugin::HostNotification::ProgramListChanged {
             list_id,
             program_index: (program_index >= 0).then_some(program_index),
@@ -1895,6 +2048,9 @@ impl IUnitHandlerTrait for ComponentHandler {
 
 impl IUnitHandler2Trait for ComponentHandler {
     unsafe fn notifyUnitByBusChange(&self) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         if self.push_notification(crate::plugin::HostNotification::UnitByBusChanged) {
             kResultOk
         } else {
@@ -2747,6 +2903,37 @@ mod host_attr_tests {
         assert_eq!(list.get_value("b"), Some(AttrValue::Bin(vec![1, 2, 3])));
         assert_eq!(list.get_value("missing"), None);
     }
+
+    #[test]
+    fn host_object_creation_is_rejected_only_inside_guarded_processing() {
+        let host = HostApplication::default();
+        let mut cid = IMessage::IID;
+        let mut iid = IMessage::IID;
+        let mut object = ptr::null_mut();
+        let created = unsafe {
+            host.createInstance(
+                cid.as_mut_ptr() as *mut TUID,
+                iid.as_mut_ptr() as *mut TUID,
+                &mut object,
+            )
+        };
+        assert_eq!(created, kResultTrue);
+        assert!(!object.is_null());
+        // SAFETY: `createInstance` transferred one owned IMessage reference to the test.
+        drop(unsafe { vst3::ComPtr::<IMessage>::from_raw(object.cast::<IMessage>()) });
+
+        let _guard = crate::internal::realtime_guard::ProcessThreadGuard::enter();
+        object = std::ptr::dangling_mut::<std::ffi::c_void>();
+        let rejected = unsafe {
+            host.createInstance(
+                cid.as_mut_ptr() as *mut TUID,
+                iid.as_mut_ptr() as *mut TUID,
+                &mut object,
+            )
+        };
+        assert_eq!(rejected, kResultFalse);
+        assert!(object.is_null());
+    }
 }
 
 #[cfg(test)]
@@ -2895,6 +3082,27 @@ mod component_handler_tests {
             handler.take_host_notifications().len(),
             MAX_HOST_NOTIFICATIONS
         );
+    }
+
+    /// Guarded callbacks must not enter the mutex-backed editor/notification queues, while the
+    /// atomic restart accumulator remains available for later control-thread servicing.
+    #[test]
+    fn guarded_component_callbacks_do_not_lock_or_allocate() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let _guard = crate::internal::realtime_guard::ProcessThreadGuard::enter();
+        unsafe {
+            assert_eq!(handler.beginEdit(5), kResultOk);
+            assert_eq!(handler.performEdit(5, 0.5), kResultOk);
+            assert_eq!(handler.endEdit(5), kResultOk);
+            assert_eq!(handler.setDirty(1), kResultOk);
+            assert_eq!(handler.requestOpenEditor(c"editor".as_ptr()), kResultFalse);
+            assert_eq!(handler.notifyUnitSelection(3), kResultFalse);
+            assert_eq!(handler.restartComponent(1), kResultOk);
+        }
+        drop(_guard);
+        assert!(handler.take_parameter_edits().is_empty());
+        assert!(handler.take_host_notifications().is_empty());
+        assert!(!handler.take_restart_flags().is_empty());
     }
 
     #[test]
@@ -3193,6 +3401,32 @@ mod host_application_tests {
         );
     }
 
+    /// Progress descriptions allocate and the progress registry is mutex-backed, so every
+    /// progress callback is refused while the processor guard is active and records nothing.
+    #[test]
+    fn guarded_progress_callbacks_are_refused_without_side_effects() {
+        let host = create_host_application();
+        let progress = host.to_com_ptr::<IProgress>().unwrap();
+        let description: Vec<u16> = "Realtime work\0".encode_utf16().collect();
+        let mut id = u64::MAX;
+        let guard = crate::internal::realtime_guard::ProcessThreadGuard::enter();
+        unsafe {
+            assert_eq!(
+                progress.start(
+                    IProgress_::ProgressType_::UIBackgroundTask,
+                    description.as_ptr(),
+                    &mut id,
+                ),
+                kResultFalse
+            );
+            assert_eq!(id, 0);
+            assert_eq!(progress.update(1, 0.5), kResultFalse);
+            assert_eq!(progress.finish(1), kResultFalse);
+        }
+        drop(guard);
+        assert!(host.take_progress_notifications().is_empty());
+    }
+
     #[test]
     fn progress_reports_backpressure_instead_of_false_success() {
         let host = create_host_application();
@@ -3309,6 +3543,19 @@ mod connection_proxy_tests {
         assert_eq!(results, vec![kResultFalse; 3]);
         assert_eq!(destination.notifications.load(Ordering::Relaxed), 0);
         assert_eq!(proxy.dropped_message_count(), 3);
+    }
+
+    /// A process-thread notification is counted for v0.9 diagnostics but bypasses both the
+    /// destination mutex and the rate-limited logging path.
+    #[test]
+    fn guarded_connection_notify_is_counted_without_forwarding() {
+        let (proxy, destination) = proxy_with_destination();
+        let message = create_host_message().to_com_ptr::<IMessage>().unwrap();
+        let guard = crate::internal::realtime_guard::ProcessThreadGuard::enter();
+        assert_eq!(unsafe { proxy.notify(message.as_ptr()) }, kResultFalse);
+        drop(guard);
+        assert_eq!(destination.notifications.load(Ordering::Relaxed), 0);
+        assert_eq!(proxy.dropped_message_count(), 1);
     }
 
     /// Only the thread gate increments the counter: a forwarded message and a malformed one
@@ -3761,6 +4008,24 @@ mod parameter_changes_tests {
         assert!(points[1].1.is_nan());
         assert!(points[2].1.is_nan());
     }
+
+    #[test]
+    fn output_parameter_points_do_not_leak_across_process_blocks() {
+        // Regression for issue #8: a plugin may write one output point every block. The host
+        // clears the active output set at the next block boundary while retaining its one pooled
+        // queue, so neither logical point count nor heap storage grows with elapsed blocks.
+        let output = ParameterChanges::default();
+        for block in 0..128 {
+            output.clear_all();
+            output.enqueue(42, 0, f64::from(block) / 127.0);
+            assert_eq!(unsafe { output.getParameterCount() }, 1);
+            let queues = output.queues.lock().unwrap();
+            assert_eq!(queues.len(), 1);
+            assert_eq!(queues[0].points.lock().unwrap().len(), 1);
+        }
+        output.clear_all();
+        assert_eq!(unsafe { output.getParameterCount() }, 0);
+    }
 }
 
 #[cfg(test)]
@@ -3777,6 +4042,29 @@ mod memory_stream_tests {
         // Rewind (mode 0 = SEEK_SET) and read it all back.
         assert_eq!(s.seek_to(0, 0), Some(0));
         assert_eq!(s.read_at_cursor(4), vec![1, 2, 3, 4]);
+    }
+
+    /// A plugin retaining a state stream past its control-thread call cannot make the realtime
+    /// callback lock, allocate, seek, or expose its mutex-backed attribute list.
+    #[test]
+    fn guarded_stream_callbacks_are_refused_without_moving_the_cursor() {
+        let stream = MemoryStream::new(vec![1, 2, 3]);
+        let mut byte = 0u8;
+        let mut count = -1;
+        let mut position = -1;
+        let guard = crate::internal::realtime_guard::ProcessThreadGuard::enter();
+        unsafe {
+            assert_eq!(
+                stream.read(&mut byte as *mut u8 as *mut std::ffi::c_void, 1, &mut count,),
+                kResultFalse
+            );
+            assert_eq!(count, 0);
+            assert_eq!(stream.seek(1, 0, &mut position), kResultFalse);
+            assert_eq!(stream.tell(&mut position), kResultFalse);
+            assert!(stream.getAttributes().is_null());
+        }
+        drop(guard);
+        assert_eq!(stream.position(), 0);
     }
 
     #[test]
