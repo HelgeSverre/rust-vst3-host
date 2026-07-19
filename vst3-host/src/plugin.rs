@@ -302,6 +302,10 @@ pub(crate) trait PluginInternal: Send {
     fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()>;
     fn close_editor(&mut self) -> Result<()>;
     fn get_editor_size(&self) -> Result<(i32, i32)>;
+    /// Service the Linux `IRunLoop` registrations the plugin's editor made
+    /// (fire due timers, dispatch ready file descriptors). No-op by default
+    /// (non-Linux, or process isolation where the editor isn't bridged).
+    fn service_run_loop(&mut self) {}
     fn get_parameter_changes(&self) -> Vec<(u32, f64)>;
     /// Drain the ordered parameter-edit gesture log (begin/change/end) the plugin's editor
     /// reported since the last call. Defaults to empty for implementations that don't capture
@@ -1014,6 +1018,18 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .open_editor(parent.0)
+    }
+
+    /// Drive the Linux `IRunLoop` services (timers and file-descriptor
+    /// events) that the plugin's editor registered with the host frame.
+    /// VSTGUI-based editors paint and respond ONLY when this runs - call it
+    /// on the UI thread every frame (e.g. 30-60 Hz) while an editor is open.
+    /// A no-op when nothing is registered, on non-Linux, or under process
+    /// isolation.
+    pub fn service_run_loop(&mut self) {
+        if let Some(internal) = self.internal.as_mut() {
+            internal.service_run_loop();
+        }
     }
 
     /// Close the plugin editor window
