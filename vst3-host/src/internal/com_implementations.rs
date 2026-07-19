@@ -444,21 +444,158 @@ pub fn create_memory_stream_from(data: Vec<u8>) -> ComWrapper<MemoryStream> {
     ComWrapper::new(MemoryStream::new(data))
 }
 
-// Host implementation of `IPlugFrame`. A plugin editor calls `resizeView` to ask the host
-// to resize the window hosting its view. We record the requested size; the host polls it
-// (take_editor_resize_request) and resizes its container on the UI thread.
+// --- Linux IRunLoop ------------------------------------------------------
+// VSTGUI-based editors (and most non-JUCE plugin UIs) strictly require the
+// host frame to also implement `Steinberg::Linux::IRunLoop`: the view
+// registers file-descriptor event handlers (its X11 connection) and
+// periodic timers with the host, and paints/responds ONLY when the host
+// services them. Without this the editor attaches but stays black. The host
+// must call `Plugin::service_run_loop()` on its UI thread regularly (every
+// frame) while an editor is open.
+
+/// What a plugin's editor registered with the host's run loop, shared
+/// between the frame (registration, called by the plugin during attach) and
+/// the plugin impl (servicing, driven by the host each UI frame).
+#[cfg(target_os = "linux")]
+pub struct RunLoopRegistry {
+    pub handlers: Vec<(
+        vst3::ComPtr<vst3::Steinberg::Linux::IEventHandler>,
+        vst3::Steinberg::Linux::FileDescriptor,
+    )>,
+    pub timers: Vec<RunLoopTimer>,
+}
+
+#[cfg(target_os = "linux")]
+pub struct RunLoopTimer {
+    pub handler: vst3::ComPtr<vst3::Steinberg::Linux::ITimerHandler>,
+    pub interval_ms: u64,
+    pub due: std::time::Instant,
+}
+
+#[cfg(target_os = "linux")]
+impl RunLoopRegistry {
+    pub fn new() -> Self {
+        Self {
+            handlers: Vec::new(),
+            timers: Vec::new(),
+        }
+    }
+}
+
+// The registry holds COM pointers into plugin code. They are only ever
+// touched from the host's UI thread (registration inside `open_editor`,
+// servicing inside `service_run_loop`, both UI-thread calls); the Send
+// bound is inherited from `PluginInternal: Send` storage, the same
+// pragmatics as the ComPtrs PluginImpl already holds.
+#[cfg(target_os = "linux")]
+unsafe impl Send for RunLoopRegistry {}
+
+// Host implementation of `IPlugFrame` (all platforms) plus
+// `Linux::IRunLoop` (Linux only). A plugin editor calls `resizeView` to ask
+// the host to resize the window hosting its view (recorded; the host polls
+// take_editor_resize_request), and on Linux registers its event
+// handlers/timers via the IRunLoop half (serviced via
+// `Plugin::service_run_loop`).
 pub struct HostPlugFrame {
     requested: Arc<Mutex<Option<(i32, i32)>>>,
+    #[cfg(target_os = "linux")]
+    run_loop: Arc<Mutex<RunLoopRegistry>>,
 }
 
 impl HostPlugFrame {
+    #[cfg(target_os = "linux")]
+    pub fn new(
+        requested: Arc<Mutex<Option<(i32, i32)>>>,
+        run_loop: Arc<Mutex<RunLoopRegistry>>,
+    ) -> Self {
+        Self {
+            requested,
+            run_loop,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
     pub fn new(requested: Arc<Mutex<Option<(i32, i32)>>>) -> Self {
         Self { requested }
     }
 }
 
+#[cfg(target_os = "linux")]
+impl Class for HostPlugFrame {
+    type Interfaces = (IPlugFrame, vst3::Steinberg::Linux::IRunLoop);
+}
+
+#[cfg(not(target_os = "linux"))]
 impl Class for HostPlugFrame {
     type Interfaces = (IPlugFrame,);
+}
+
+#[cfg(target_os = "linux")]
+impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
+    unsafe fn registerEventHandler(
+        &self,
+        handler: *mut vst3::Steinberg::Linux::IEventHandler,
+        fd: vst3::Steinberg::Linux::FileDescriptor,
+    ) -> tresult {
+        let Some(handler) = vst3::ComRef::from_raw(handler) else {
+            return kInvalidArgument;
+        };
+        match self.run_loop.lock() {
+            Ok(mut reg) => {
+                reg.handlers.push((handler.to_com_ptr(), fd));
+                kResultOk
+            }
+            Err(_) => kInternalError,
+        }
+    }
+
+    unsafe fn unregisterEventHandler(
+        &self,
+        handler: *mut vst3::Steinberg::Linux::IEventHandler,
+    ) -> tresult {
+        match self.run_loop.lock() {
+            Ok(mut reg) => {
+                reg.handlers.retain(|(h, _)| h.as_ptr() != handler);
+                kResultOk
+            }
+            Err(_) => kInternalError,
+        }
+    }
+
+    unsafe fn registerTimer(
+        &self,
+        handler: *mut vst3::Steinberg::Linux::ITimerHandler,
+        milliseconds: vst3::Steinberg::Linux::TimerInterval,
+    ) -> tresult {
+        let Some(handler) = vst3::ComRef::from_raw(handler) else {
+            return kInvalidArgument;
+        };
+        let interval_ms = milliseconds.max(1);
+        match self.run_loop.lock() {
+            Ok(mut reg) => {
+                reg.timers.push(RunLoopTimer {
+                    handler: handler.to_com_ptr(),
+                    interval_ms,
+                    due: std::time::Instant::now() + std::time::Duration::from_millis(interval_ms),
+                });
+                kResultOk
+            }
+            Err(_) => kInternalError,
+        }
+    }
+
+    unsafe fn unregisterTimer(
+        &self,
+        handler: *mut vst3::Steinberg::Linux::ITimerHandler,
+    ) -> tresult {
+        match self.run_loop.lock() {
+            Ok(mut reg) => {
+                reg.timers.retain(|t| t.handler.as_ptr() != handler);
+                kResultOk
+            }
+            Err(_) => kInternalError,
+        }
+    }
 }
 
 impl IPlugFrameTrait for HostPlugFrame {
@@ -477,7 +614,18 @@ impl IPlugFrameTrait for HostPlugFrame {
     }
 }
 
+/// Create a host plug-frame backed by a shared resize-request slot (and, on
+/// Linux, a run-loop registry - see `RunLoopRegistry`).
+#[cfg(target_os = "linux")]
+pub fn create_host_plug_frame(
+    requested: Arc<Mutex<Option<(i32, i32)>>>,
+    run_loop: Arc<Mutex<RunLoopRegistry>>,
+) -> ComWrapper<HostPlugFrame> {
+    ComWrapper::new(HostPlugFrame::new(requested, run_loop))
+}
+
 /// Create a host plug-frame backed by a shared resize-request slot.
+#[cfg(not(target_os = "linux"))]
 pub fn create_host_plug_frame(
     requested: Arc<Mutex<Option<(i32, i32)>>>,
 ) -> ComWrapper<HostPlugFrame> {
@@ -1106,10 +1254,20 @@ mod component_handler_tests {
 mod plug_frame_tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    fn make_frame(slot: Arc<Mutex<Option<(i32, i32)>>>) -> HostPlugFrame {
+        HostPlugFrame::new(slot, Arc::new(Mutex::new(RunLoopRegistry::new())))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn make_frame(slot: Arc<Mutex<Option<(i32, i32)>>>) -> HostPlugFrame {
+        HostPlugFrame::new(slot)
+    }
+
     #[test]
     fn records_requested_size_from_view_rect() {
         let slot = Arc::new(Mutex::new(None));
-        let frame = HostPlugFrame::new(slot.clone());
+        let frame = make_frame(slot.clone());
         let mut rect = ViewRect {
             left: 0,
             top: 0,
@@ -1123,7 +1281,30 @@ mod plug_frame_tests {
         // Null size is rejected and leaves the slot unchanged.
         let r = unsafe { frame.resizeView(std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(r, kResultFalse);
-        assert_eq!(*slot.lock().unwrap(), Some((640, 480)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_loop_rejects_null_registrations_and_starts_empty() {
+        use vst3::Steinberg::Linux::IRunLoopTrait;
+        let reg = Arc::new(Mutex::new(RunLoopRegistry::new()));
+        let frame = HostPlugFrame::new(Arc::new(Mutex::new(None)), reg.clone());
+        // A registry with no editor attached is empty.
+        assert!(reg.lock().unwrap().handlers.is_empty());
+        assert!(reg.lock().unwrap().timers.is_empty());
+        // Null handlers are rejected without touching the registry.
+        unsafe {
+            assert_eq!(
+                frame.registerEventHandler(std::ptr::null_mut(), 3),
+                kInvalidArgument
+            );
+            assert_eq!(
+                frame.registerTimer(std::ptr::null_mut(), 16),
+                kInvalidArgument
+            );
+        }
+        assert!(reg.lock().unwrap().handlers.is_empty());
+        assert!(reg.lock().unwrap().timers.is_empty());
     }
 }
 

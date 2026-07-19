@@ -16,6 +16,8 @@ use vst3::Steinberg::Vst::MediaTypes_::*;
 use vst3::Steinberg::{IPlugView, IPlugViewTrait};
 use vst3::{ComPtr, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 
+#[cfg(target_os = "linux")]
+use super::com_implementations::RunLoopRegistry;
 use super::{
     com_implementations::{
         create_event_list, create_host_application, create_host_plug_frame, create_memory_stream,
@@ -93,6 +95,10 @@ pub struct PluginImpl {
     // writes requested sizes into (drained via take_editor_resize_request).
     plug_frame: ComWrapper<HostPlugFrame>,
     editor_resize: Arc<Mutex<Option<(i32, i32)>>>,
+    // Linux IRunLoop registrations from the plugin's editor (fd handlers +
+    // timers), serviced on the host UI thread via `service_run_loop`.
+    #[cfg(target_os = "linux")]
+    run_loop: Arc<Mutex<RunLoopRegistry>>,
 
     // Host application context passed to initialize() — kept alive for the plugin's
     // lifetime because the plugin may retain a reference to it.
@@ -321,8 +327,14 @@ impl PluginImpl {
                 false
             };
 
-            // Editor resize plumbing (an IPlugFrame the view can call into).
+            // Editor resize plumbing (an IPlugFrame the view can call into),
+            // plus the Linux IRunLoop registry VSTGUI-based editors need.
             let editor_resize = Arc::new(Mutex::new(None));
+            #[cfg(target_os = "linux")]
+            let run_loop = Arc::new(Mutex::new(RunLoopRegistry::new()));
+            #[cfg(target_os = "linux")]
+            let plug_frame = create_host_plug_frame(editor_resize.clone(), run_loop.clone());
+            #[cfg(not(target_os = "linux"))]
             let plug_frame = create_host_plug_frame(editor_resize.clone());
 
             // Create event lists
@@ -389,6 +401,8 @@ impl PluginImpl {
                 plugin_view: None,
                 plug_frame,
                 editor_resize,
+                #[cfg(target_os = "linux")]
+                run_loop,
                 _host_app: host_app,
                 _module: module,
             })
@@ -1450,6 +1464,54 @@ impl PluginInternal for PluginImpl {
             }
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn service_run_loop(&mut self) {
+        use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};
+
+        // Fire due timers. Snapshot the handlers, then invoke with the lock
+        // RELEASED: a callback may re-enter registerTimer/unregisterTimer
+        // (VSTGUI does), which takes the same lock.
+        let now = std::time::Instant::now();
+        let mut due = Vec::new();
+        if let Ok(mut reg) = self.run_loop.lock() {
+            for timer in reg.timers.iter_mut() {
+                if now >= timer.due {
+                    timer.due = now + std::time::Duration::from_millis(timer.interval_ms);
+                    due.push(timer.handler.clone());
+                }
+            }
+        }
+        for handler in due {
+            unsafe { handler.onTimer() };
+        }
+
+        // Poll registered fds (zero timeout - never blocks the UI thread)
+        // and notify ready ones. Same snapshot-then-invoke pattern.
+        let handlers: Vec<_> = match self.run_loop.lock() {
+            Ok(reg) => reg.handlers.clone(),
+            Err(_) => return,
+        };
+        if handlers.is_empty() {
+            return;
+        }
+        let mut fds: Vec<libc::pollfd> = handlers
+            .iter()
+            .map(|&(_, fd)| libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) };
+        if ready > 0 {
+            for (pfd, (handler, fd)) in fds.iter().zip(handlers.iter()) {
+                if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
+                    unsafe { handler.onFDIsSet(*fd) };
+                }
+            }
+        }
     }
 
     fn get_editor_size(&self) -> Result<(i32, i32)> {

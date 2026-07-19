@@ -6,7 +6,18 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-07-14
+### Added
+
+- **Linux `IRunLoop` host service, so VSTGUI-based plugin editors work.** The host frame
+  (`HostPlugFrame`) now also implements `Steinberg::Linux::IRunLoop`: the plugin's editor
+  registers its file-descriptor event handlers (its X11 connection) and periodic timers with
+  the host, which are serviced by a new `Plugin::service_run_loop()` — call it on the UI
+  thread every frame (~30–60 Hz) while an editor is open. Without this, VSTGUI-based editors
+  (and most non-JUCE UIs) attach but never paint or respond; JUCE-based editors were
+  unaffected because they drive their own event loop. Verified end-to-end against sfizz
+  (VSTGUI): the editor paints, its knobs and file dialog respond, and audio renders. Timers
+  and fd handlers are serviced snapshot-then-invoke so a callback can safely re-register from
+  inside itself (VSTGUI does). No-op on non-Linux and under process isolation.
 
 ### Added
 
