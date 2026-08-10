@@ -56,6 +56,7 @@
 
 pub mod audio;
 pub mod error;
+pub mod hard_realtime;
 pub mod host;
 pub mod midi;
 pub mod parameters;
@@ -94,6 +95,11 @@ pub use discovery::{
 #[cfg(feature = "egui-widgets")]
 pub use embed::{EditorRect, EmbeddedEditor};
 pub use error::{Error, Result};
+pub use hard_realtime::{
+    ControllerSyncStatus, RealtimeCapacities, RealtimeExitFailure, RealtimeExitReport,
+    RealtimeMidiEvent, RealtimeParameterChange, RealtimePlugin, RealtimeProcessError,
+    RealtimeProcessReport, RealtimeTransitionFailure,
+};
 pub use host::{DiscoveryProgress, ProbeResult, Vst3Host, Vst3HostBuilder};
 pub use midi::{
     cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId, OutputEvent,
@@ -132,6 +138,10 @@ pub mod prelude {
         // `Result<T>` alias in a glob prelude shadows `std::result::Result` and breaks
         // any `Result<T, E>` written by consumers. Use `vst3_host::Result` explicitly.
         error::Error,
+        hard_realtime::{
+            RealtimeCapacities, RealtimeMidiEvent, RealtimeParameterChange, RealtimePlugin,
+            RealtimeProcessError, RealtimeProcessReport,
+        },
         host::{DiscoveryProgress, Vst3Host, Vst3HostBuilder},
         midi::{
             cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId,

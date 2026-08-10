@@ -963,6 +963,9 @@ fn encode_state(params: &[f64; PARAM_COUNT as usize]) -> Vec<u8> {
 }
 
 /// Read + validate a state blob from a stream, returning the stored parameter values.
+// Keep `chunks_exact` while the crate's Rust 1.85 minimum predates stable `slice::as_chunks`;
+// newer Clippy versions otherwise reject the compatibility spelling under `-D warnings`.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 unsafe fn read_state_params(stream: *mut IBStream) -> Option<Vec<f64>> {
     let header = stream_read_exact(stream, 8)?;
     if u32::from_le_bytes(header[0..4].try_into().ok()?) != STATE_MAGIC {

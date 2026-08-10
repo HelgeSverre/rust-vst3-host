@@ -252,6 +252,11 @@ impl DataExchangeState {
         (queue.id == id).then_some(queue)
     }
 
+    /// Atomically reserves queue storage without exceeding the process-wide fixed byte budget.
+    ///
+    /// `fetch_update` is retained for the crate's Rust 1.85 minimum; newer nightly compilers have
+    /// renamed it to `try_update`, which is not available at that minimum supported version.
+    #[allow(deprecated)]
     fn reserve_bytes(&self, bytes: usize) -> bool {
         self.allocated_bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
