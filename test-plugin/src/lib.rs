@@ -2473,8 +2473,53 @@ extern "system" fn ExitDll() -> bool {
 // in for Android too lets the plugin cross-compile and load on-device (verified on arm64-v8a).
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[no_mangle]
-extern "system" fn ModuleEntry(_handle: *mut c_void) -> bool {
-    true
+extern "system" fn ModuleEntry(handle: *mut c_void) -> bool {
+    // On Linux, refuse to load unless the host passed the handle `dlopen` returned for this
+    // module, as the SDK's `bool ModuleEntry (void* sharedLibraryHandle)` does: a host that
+    // calls ModuleEntry without it then fails here rather than in a plugin that uses it.
+    #[cfg(target_os = "linux")]
+    let accepted = own_dlopen_handle() == Some(handle);
+    #[cfg(target_os = "android")]
+    let accepted = {
+        let _ = handle;
+        true
+    };
+    accepted
+}
+
+/// The handle `dlopen` returns for this module. Compared, never dereferenced, so a wrong value
+/// from the host cannot crash the check.
+#[cfg(target_os = "linux")]
+fn own_dlopen_handle() -> Option<*mut c_void> {
+    use std::ffi::c_char;
+    #[repr(C)]
+    struct DlInfo {
+        dli_fname: *const c_char,
+        dli_fbase: *mut c_void,
+        dli_sname: *const c_char,
+        dli_saddr: *mut c_void,
+    }
+    const RTLD_LAZY: i32 = 0x0001;
+    const RTLD_NOLOAD: i32 = 0x0004;
+    #[link(name = "dl")]
+    extern "C" {
+        fn dladdr(address: *const c_void, info: *mut DlInfo) -> i32;
+        fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
+        fn dlclose(handle: *mut c_void) -> i32;
+    }
+    unsafe {
+        let mut info = std::mem::zeroed::<DlInfo>();
+        if dladdr(ModuleEntry as *const c_void, &mut info) == 0 || info.dli_fname.is_null() {
+            return None;
+        }
+        // RTLD_NOLOAD finds the module already loaded; it still counts a reference.
+        let handle = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
+        if handle.is_null() {
+            return None;
+        }
+        dlclose(handle);
+        Some(handle)
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
