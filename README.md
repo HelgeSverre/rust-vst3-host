@@ -85,6 +85,21 @@ Start with the [documentation index](docs/README.md). It's organized by what you
 
 Common tasks are wrapped in a [`justfile`](justfile): `just build`, `just test`, `just play`, `just lint`.
 
+Tests render audio into memory or use mock backends. `just selftest` also renders offline;
+it does not open an audio device. The two hardware playback tests require both `--ignored`
+and `VST3_HOST_TEST_AUDIO_OUTPUT=1`. Without that explicit opt-in they return before
+loading a plugin or opening the default output device, including during broad `--ignored`
+runs. To deliberately run an **audible** hardware check:
+
+```sh
+VST3_HOST_TEST_AUDIO_OUTPUT=1 cargo test -p vst3-host --all-features --test integration_tests test_audio_processing -- --ignored --exact
+```
+
+Hardware checks can play notes, change the device sample rate, and click on stream
+startup/shutdown. Use a muted or disconnected output when running them. Arbitrary native
+plugins loaded by discovery tests can also have their own side effects.
+
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

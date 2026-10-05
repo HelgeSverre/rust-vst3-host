@@ -61,7 +61,7 @@ trance PLUGIN_PATH="test_plugins/TestSynth.vst3": test-plugin
 trance-gui PLUGIN_PATH="test_plugins/TestSynth.vst3": test-plugin
     cargo run -p vst3-host --example trance_timeline_gui -- "{{ PLUGIN_PATH }}"
 
-# Run headless inspector self-test
+# Run silent, offline inspector self-test
 [group('test')]
 selftest PLUGIN_PATH=PLUGIN:
     cargo run -p vst3-inspector --bin vst3-inspector -- --selftest "{{ PLUGIN_PATH }}"

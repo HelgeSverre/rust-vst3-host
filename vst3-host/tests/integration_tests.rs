@@ -46,6 +46,18 @@ fn load_isolated_retry(host: &mut Vst3Host, path: &str) -> Plugin {
     panic!("isolated load failed after 5 attempts: {last_err:?}");
 }
 
+/// Hardware tests must remain silent even when a developer runs every ignored test.
+/// A separate explicit opt-in is required before loading a plugin or opening a device.
+fn hardware_audio_enabled() -> bool {
+    let enabled = std::env::var("VST3_HOST_TEST_AUDIO_OUTPUT").as_deref() == Ok("1");
+    if !enabled {
+        eprintln!(
+            "Skipping hardware playback: set VST3_HOST_TEST_AUDIO_OUTPUT=1 to allow audible output"
+        );
+    }
+    enabled
+}
+
 /// Helper to find a test plugin
 fn find_test_plugin() -> Option<PluginInfo> {
     // Prefer the bundled Dexed (free, no license) and read it with the *lightweight*
@@ -241,8 +253,11 @@ fn test_midi_processing() {
 }
 
 #[test]
-#[ignore = "Requires VST3 plugins to be installed and audio hardware"]
+#[ignore = "Audible hardware test; requires VST3_HOST_TEST_AUDIO_OUTPUT=1"]
 fn test_audio_processing() {
+    if !hardware_audio_enabled() {
+        return;
+    }
     let _plugin_guard = plugin_guard();
     let Some(plugin_info) = find_test_plugin() else {
         println!("No VST3 plugins found, skipping test");
@@ -1151,8 +1166,11 @@ fn test_realtime_runner_applies_commands_and_renders() {
 
 /// M3: the lock-free cpal play_realtime path runs end-to-end (needs an output device).
 #[test]
-#[ignore = "Requires audio hardware and the bundled test plugin"]
+#[ignore = "Audible hardware test; requires VST3_HOST_TEST_AUDIO_OUTPUT=1"]
 fn test_play_realtime_smoke() {
+    if !hardware_audio_enabled() {
+        return;
+    }
     let _plugin_guard = plugin_guard();
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
     if !std::path::Path::new(path).exists() {

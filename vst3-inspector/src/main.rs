@@ -221,8 +221,8 @@ struct ParameterInfo {
 }
 
 /// Headless self-test: drive the `vst3-host` library end to end (discover → introspect
-/// → load → parameters → play) and report. Lets the inspector's library integration be
-/// verified without launching the GUI. Returns a process exit code.
+/// → load → parameters → offline render) and report. Lets the inspector's library integration
+/// be verified without launching the GUI or opening an audio device. Returns a process exit code.
 fn run_selftest(path: &str) -> i32 {
     use vst3_host::{midi::MidiChannel, Vst3Host};
 
@@ -261,7 +261,7 @@ fn run_selftest(path: &str) -> i32 {
     // Only a plugin that accepts MIDI can answer the held note below with sound.
     let expects_audio = detail.info.has_midi_input;
 
-    // 3. Load + parameters + play + observe audio.
+    // 3. Load + parameters + offline render.
     let mut host = match Vst3Host::builder()
         .sample_rate(48000.0)
         .block_size(512)
@@ -273,7 +273,7 @@ fn run_selftest(path: &str) -> i32 {
             return 1;
         }
     };
-    let plugin = match host.load_plugin(path) {
+    let mut plugin = match host.load_plugin(path) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("FAIL: load {path}: {e}");
@@ -316,41 +316,41 @@ fn run_selftest(path: &str) -> i32 {
         }
     }
 
-    let audio = match host.play(plugin) {
-        Ok(a) => a,
+    // Render into memory: opening a device can change its sample rate, and stopping a
+    // stream while a note is sounding can click. Neither belongs in a headless self-test.
+    const SILENCE_THRESHOLD: f32 = 1e-4;
+    let rendered = (|| -> vst3_host::Result<f32> {
+        let mut buffers = plugin.create_bus_audio_buffers(512)?;
+        plugin.start_processing()?;
+        plugin.send_midi_note(60, 110, MidiChannel::Ch1)?;
+        let mut peak = 0.0f32;
+        // Half a second of samples, independent of wall-clock scheduling or hardware.
+        for _ in 0..47 {
+            plugin.process_bus_audio(&mut buffers)?;
+            for sample in buffers
+                .outputs
+                .iter()
+                .flat_map(|bus| bus.channels.iter().flatten())
+            {
+                if !sample.is_finite() {
+                    return Err(vst3_host::Error::Other("non-finite audio sample".into()));
+                }
+                peak = peak.max(sample.abs());
+            }
+        }
+        plugin.send_midi_note_off(60, MidiChannel::Ch1)?;
+        plugin.process_bus_audio(&mut buffers)?;
+        plugin.stop_processing()?;
+        Ok(peak)
+    })();
+    let peak = match rendered {
+        Ok(peak) => peak,
         Err(e) => {
-            eprintln!("FAIL: play: {e}");
+            eprintln!("FAIL: offline render: {e}");
             return 1;
         }
     };
-    audio.send_midi(vst3_host::midi::MidiEvent::NoteOn {
-        channel: MidiChannel::Ch1,
-        note: 60,
-        velocity: 110,
-    });
-    // Below this the plugin rendered nothing audible. For a plugin that accepts MIDI, the held
-    // note must produce sound: silence means the audio path is broken (the playback callback
-    // swallows `process_audio` errors), which must not pass as a success. An effect fed no input
-    // has nothing to render, so it is only reported.
-    const SILENCE_THRESHOLD: f32 = 1e-4;
-
-    let mut peak = 0.0f32;
-    // Bounded wait (~500 ms), cut short as soon as the note is clearly sounding.
-    for _ in 0..20 {
-        std::thread::sleep(std::time::Duration::from_millis(25));
-        for c in &audio.output_levels().channels {
-            peak = peak.max(c.peak);
-        }
-        if peak > SILENCE_THRESHOLD {
-            break;
-        }
-    }
-    audio.send_midi(vst3_host::midi::MidiEvent::NoteOff {
-        channel: MidiChannel::Ch1,
-        note: 60,
-        velocity: 0,
-    });
-    println!("play: max output peak {peak:.4}");
+    println!("offline render: max output peak {peak:.4}");
     if peak <= SILENCE_THRESHOLD {
         if expects_audio {
             eprintln!(
@@ -359,7 +359,7 @@ fn run_selftest(path: &str) -> i32 {
             );
             return 1;
         }
-        println!("play: plugin takes no MIDI input, so silence is expected here");
+        println!("offline render: plugin takes no MIDI input, so silence is expected here");
     }
     println!("SELFTEST OK");
     0
