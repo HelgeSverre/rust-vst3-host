@@ -30,6 +30,12 @@ helper:
 test:
     cargo test --workspace --all-features
 
+# Run both audible playback tests through the default host audio device
+[group('test')]
+test-audio:
+    VST3_HOST_TEST_AUDIO_OUTPUT=1 cargo test -p vst3-host --all-features --test integration_tests test_audio_processing -- --ignored --exact --nocapture
+    VST3_HOST_TEST_AUDIO_OUTPUT=1 cargo test -p vst3-host --all-features --test integration_tests test_play_realtime_smoke -- --ignored --exact --nocapture
+
 # Build and bundle TestSynth
 [group('build')]
 test-plugin:
