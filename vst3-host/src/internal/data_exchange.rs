@@ -253,13 +253,25 @@ impl DataExchangeState {
     }
 
     fn reserve_bytes(&self, bytes: usize) -> bool {
-        self.allocated_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(bytes)
-                    .filter(|next| *next <= MAX_TOTAL_QUEUE_BYTES)
-            })
-            .is_ok()
+        // compare_exchange_weak works on the Rust 1.85 MSRV; try_update does not.
+        let mut current = self.allocated_bytes.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current
+                .checked_add(bytes)
+                .filter(|next| *next <= MAX_TOTAL_QUEUE_BYTES)
+            else {
+                return false;
+            };
+            match self.allocated_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     pub unsafe fn open_queue(
@@ -575,6 +587,35 @@ impl Drop for DataExchangeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_reservations_respect_the_total_budget_and_reject_overflow() {
+        let state = DataExchangeState::new();
+        let barrier = std::sync::Barrier::new(16);
+        let successes = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    let state = &state;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        state.reserve_bytes(MAX_TOTAL_QUEUE_BYTES / 8)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>()
+        });
+        assert_eq!(successes, 8);
+        assert_eq!(
+            state.allocated_bytes.load(Ordering::Acquire),
+            MAX_TOTAL_QUEUE_BYTES
+        );
+        assert!(!state.reserve_bytes(1));
+        assert!(!state.reserve_bytes(usize::MAX));
+    }
 
     #[test]
     fn exchange_queue_exhausts_and_recycles_without_allocating() {
