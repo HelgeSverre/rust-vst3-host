@@ -16,9 +16,9 @@ use std::io::Read;
 use vst3_host::{midi::MidiChannel, Vst3Host, WindowHandle};
 
 fn main() -> vst3_host::Result<()> {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "test_plugins/Dexed.vst3".to_string());
+    let path = std::env::args().nth(1).unwrap_or_else(|| {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3").to_string()
+    });
 
     let mut host = Vst3Host::builder()
         .with_process_isolation(true)

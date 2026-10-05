@@ -35,7 +35,10 @@ use vst3_host::{
     Vst3Host,
 };
 
-const DEFAULT_PLUGIN: &str = "test_plugins/TestSynth.vst3";
+const DEFAULT_PLUGIN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../test_plugins/TestSynth.vst3"
+);
 
 /// The embedded riff collection the RIFF SELECT LCD cycles through.
 const RIFFS: &[(&str, &[u8])] = &[

@@ -12,9 +12,9 @@ use vst3_host::{midi::MidiChannel, AudioBuffers, Vst3Host};
 fn main() -> vst3_host::Result<()> {
     env_logger::init();
 
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "test_plugins/Dexed.vst3".to_string());
+    let path = std::env::args().nth(1).unwrap_or_else(|| {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3").to_string()
+    });
 
     println!("Loading {path} in an ISOLATED process...");
     let mut host = Vst3Host::builder()

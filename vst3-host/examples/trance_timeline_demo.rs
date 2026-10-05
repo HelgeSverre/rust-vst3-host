@@ -3,12 +3,12 @@
 //! small trance FX chain (3-band EQ → tempo-synced ping-pong delay → Dattorro plate reverb, all
 //! in `examples/dsp/`) to a WAV, and (on macOS) play it.
 //!
-//!   cargo run --example trance_timeline_demo                 # defaults to Jup-8000 if present
+//!   cargo run --example trance_timeline_demo                 # defaults to TestSynth (build with just test-plugin)
 //!   cargo run --example trance_timeline_demo -- "/path/to/Synth.vst3"
 //!   VST3_PLUGIN="/path/to/Synth.vst3" cargo run --example trance_timeline_demo
 //!   RIFF=nu-nrg cargo run --example trance_timeline_demo     # pick the embedded riff
 //!
-//! Showcases 0.5.0 program/preset selection + the timeline engine driving a real `.mid`. Two
+//! Showcases 0.5.0 program/preset selection + the timeline engine driving a real `.mid`. Three
 //! riffs are embedded so the example is self-contained; you only supply a VST3 synth. The filter
 //! sweep targets a "Cutoff"/"Filter Type" parameter if the synth exposes one (it degrades
 //! gracefully otherwise).
@@ -32,8 +32,11 @@ const RIFFS: &[(&str, &[u8])] = &[
     ("nu-nrg", include_bytes!("assets/nu-nrg-riff.mid")),
     ("anthem", include_bytes!("assets/helgewave-anthem.mid")),
 ];
-/// Default synth if none is passed; override with an arg or `VST3_PLUGIN`.
-const DEFAULT_PLUGIN: &str = "/Library/Audio/Plug-Ins/VST3/Jup-8000 V.vst3";
+/// Build the default synth with `just test-plugin`; override with an arg or `VST3_PLUGIN`.
+const DEFAULT_PLUGIN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../test_plugins/TestSynth.vst3"
+);
 
 /// Parse the SMF into `(beat, MidiEvent)` note events plus the file's tempo (BPM).
 /// Drum channel (MIDI ch 10 / index 9) is skipped; other channels are preserved (the
@@ -116,7 +119,7 @@ fn main() -> vst3_host::Result<()> {
         .or_else(|| std::env::var("VST3_PLUGIN").ok())
         .unwrap_or_else(|| DEFAULT_PLUGIN.to_string());
     if !std::path::Path::new(&plugin_path).exists() {
-        eprintln!("Synth not found: {plugin_path}");
+        eprintln!("Synth not found: {plugin_path}. Build TestSynth with `just test-plugin`.");
         eprintln!("Pass a VST3 synth path: cargo run --example trance_timeline_demo -- \"/path/to/Synth.vst3\"");
         eprintln!("(or set VST3_PLUGIN). Any polyphonic VST3 synth works; a \"Cutoff\" param enables the filter sweep.");
         return Ok(());
