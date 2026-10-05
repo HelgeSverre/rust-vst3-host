@@ -3232,6 +3232,37 @@ impl PluginInternal for PluginImpl {
         }
     }
 
+    fn is_editor_open(&self) -> bool {
+        self.plugin_view.is_some()
+    }
+
+    fn attached_editor_size(&self) -> Result<Option<(i32, i32)>> {
+        let Some(view) = self.plugin_view.as_ref() else {
+            return Ok(None);
+        };
+
+        unsafe {
+            let mut view_rect = ViewRect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if view.getSize(&mut view_rect) != kResultOk {
+                return Err(Error::Other(
+                    "Failed to query attached editor size".to_string(),
+                ));
+            }
+            view_rect_size(&view_rect).map(Some)
+        }
+    }
+
+    fn attached_editor_can_resize(&self) -> Option<bool> {
+        self.plugin_view
+            .as_ref()
+            .map(|view| unsafe { view.canResize() == kResultTrue })
+    }
+
     fn editor_can_resize(&self) -> bool {
         unsafe {
             if let Some(view) = self.plugin_view.as_ref() {

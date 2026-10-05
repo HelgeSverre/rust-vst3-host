@@ -2749,6 +2749,9 @@ fn test_testsynth_editor_resize_is_clamped_by_the_view() {
         (480, 320),
         "the view's initial getSize"
     );
+    assert!(!plugin.is_editor_open());
+    assert_eq!(plugin.attached_editor_size().expect("attached size"), None);
+    assert_eq!(plugin.attached_editor_can_resize(), None);
 
     // TestSynth's view records the parent handle and never dereferences it, so a pointer to
     // this local is a legal handle for it — and it keeps the test off the process main thread,
@@ -2759,6 +2762,13 @@ fn test_testsynth_editor_resize_is_clamped_by_the_view() {
     // as a window.
     let handle = unsafe { WindowHandle::from_raw(&mut parent as *mut u8 as *mut std::ffi::c_void) };
     plugin.open_editor(handle).expect("open editor");
+
+    assert!(plugin.is_editor_open());
+    assert_eq!(
+        plugin.attached_editor_size().expect("attached size"),
+        Some(EDITOR_SELF_RESIZE)
+    );
+    assert_eq!(plugin.attached_editor_can_resize(), Some(true));
 
     assert_eq!(
         probe_code(&plugin, EDITOR_ATTACHED_PARAM_ID, 1.0),
@@ -2794,6 +2804,9 @@ fn test_testsynth_editor_resize_is_clamped_by_the_view() {
     assert_eq!(editor_on_size(&plugin), EDITOR_MIN_SIZE);
 
     plugin.close_editor().expect("close editor");
+    assert!(!plugin.is_editor_open());
+    assert_eq!(plugin.attached_editor_size().expect("attached size"), None);
+    assert_eq!(plugin.attached_editor_can_resize(), None);
     assert_eq!(
         probe_code(&plugin, EDITOR_ATTACHED_PARAM_ID, 1.0),
         0,

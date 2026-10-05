@@ -902,6 +902,18 @@ pub(crate) trait PluginInternal: Send {
     fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()>;
     fn close_editor(&mut self) -> Result<()>;
     fn get_editor_size(&self) -> Result<(i32, i32)>;
+    /// Whether an in-process editor view is currently attached to a host window.
+    fn is_editor_open(&self) -> bool {
+        false
+    }
+    /// Query the attached editor's size without creating a view.
+    fn attached_editor_size(&self) -> Result<Option<(i32, i32)>> {
+        Ok(None)
+    }
+    /// Query the attached editor's resize support without creating a view.
+    fn attached_editor_can_resize(&self) -> Option<bool> {
+        None
+    }
     /// Whether the editor accepts host-driven size changes.
     fn editor_can_resize(&self) -> bool {
         false
@@ -2016,7 +2028,10 @@ impl Plugin {
             .close_editor()
     }
 
-    /// Get the preferred editor size
+    /// Get the preferred editor size.
+    ///
+    /// When no editor is open, this may create and immediately release a temporary view. For a
+    /// query guaranteed not to instantiate a view, use [`Self::attached_editor_size`].
     pub fn get_editor_size(&self) -> Result<(i32, i32)> {
         self.internal
             .as_ref()
@@ -2024,11 +2039,45 @@ impl Plugin {
             .get_editor_size()
     }
 
+    /// Whether an in-process editor view is currently attached to a host window.
+    ///
+    /// This only inspects the in-process view and never asks the plugin to create one.
+    /// Returns `false` under process isolation; helper-owned windows are not inspected.
+    pub fn is_editor_open(&self) -> bool {
+        self.internal
+            .as_ref()
+            .is_some_and(|internal| internal.is_editor_open())
+    }
+
+    /// Get the attached editor's current size without creating a temporary view.
+    ///
+    /// Returns `Ok(None)` when no editor is attached. Unlike [`Self::get_editor_size`], this is
+    /// guaranteed not to call `IEditController::createView`.
+    /// Returns `Ok(None)` under process isolation; helper-owned windows are not inspected.
+    pub fn attached_editor_size(&self) -> Result<Option<(i32, i32)>> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .attached_editor_size()
+    }
+
+    /// Whether the attached editor accepts host-driven resize requests.
+    ///
+    /// Returns `None` when no editor is attached. Unlike [`Self::editor_can_resize`], this is
+    /// guaranteed not to call `IEditController::createView`.
+    /// Returns `None` under process isolation; helper-owned windows are not inspected.
+    pub fn attached_editor_can_resize(&self) -> Option<bool> {
+        self.internal
+            .as_ref()
+            .and_then(|internal| internal.attached_editor_can_resize())
+    }
+
     /// Whether the plugin editor accepts host-driven resize requests.
     ///
     /// With an editor open this reads the live view. With no editor open it has to *create* a
-    /// throwaway view to ask, which costs on the order of milliseconds (~4.6 ms for Dexed) —
-    /// cache the answer rather than calling it per UI frame.
+    /// throwaway view to ask. View creation can take seconds for some plugins, so cache the
+    /// answer rather than calling it per UI frame, or use [`Self::attached_editor_can_resize`]
+    /// when only an already-open editor should be inspected.
     pub fn editor_can_resize(&self) -> bool {
         self.internal
             .as_ref()

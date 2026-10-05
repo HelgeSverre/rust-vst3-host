@@ -120,6 +120,13 @@ Only the in-process editor path reports resize requests.
   (child `HWND`) and Linux/X11 (child window) implementations, but those embedding paths are
   not covered by the standalone-editor CI smoke tests; treat them as experimental. Wayland
   and other unsupported window handles return an error.
+- **Pre-open queries can be expensive.** `get_editor_size` and `editor_can_resize` must create
+  and immediately release a temporary view when no editor is attached. Some plugin views take
+  seconds to construct. To avoid doing that, create the parent with a provisional size, call
+  `open_editor`, then use `attached_editor_size` and `attached_editor_can_resize`. These return
+  `None` when there is no attached view and never call `IEditController::createView`.
+  These queries inspect in-process views only: under process isolation they return `None`,
+  and `is_editor_open` returns `false`, even if the helper has an editor window open.
 - **`get_editor_size` is a hint.** Some plugins report a size before the editor is open;
   fall back to a default (e.g. `400x300`) and let `take_editor_resize_request` correct it.
 
