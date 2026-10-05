@@ -134,6 +134,8 @@ where
 }
 
 /// Open `port` and forward every parseable incoming message into a running [`AudioHandle`].
+/// Controller messages also queue MIDI learn notifications. Call
+/// [`AudioHandle::service_host_requests`] from the control thread each UI tick.
 ///
 /// A convenience over [`connect`]: each received [`MidiEvent`] is pushed into the plugin's
 /// command ring (via the handle's [`MidiSink`]), so notes/CC played on the device reach the
@@ -146,7 +148,7 @@ where
 pub fn bind_to_handle(port: &MidiInputPort, handle: &AudioHandle) -> Result<MidiInputConnection> {
     let sink: MidiSink = handle.midi_sink();
     connect(port, move |event| {
-        sink.send_midi(event);
+        sink.send_live_midi(event);
     })
 }
 

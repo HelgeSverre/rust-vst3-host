@@ -262,6 +262,91 @@ impl IsolatedPluginImpl {
 }
 
 impl PluginInternal for IsolatedPluginImpl {
+    fn midi_controller_assignments(
+        &self,
+        direction: crate::audio::BusDirection,
+    ) -> Result<Vec<crate::midi::MidiControllerAssignment>> {
+        match self.send_command(HostCommand::MidiControllerAssignments { direction })? {
+            HostResponse::MidiControllerAssignments { assignments } => Ok(assignments),
+            HostResponse::Error { message } => Err(Error::Other(message)),
+            _ => Err(Error::Other(
+                "unexpected MidiControllerAssignments response".into(),
+            )),
+        }
+    }
+    fn send_midi_controller_at(
+        &mut self,
+        bus: i32,
+        channel: crate::midi::MidiChannel,
+        controller: crate::midi::MidiController,
+        value: f64,
+        sample_offset: i32,
+    ) -> Result<()> {
+        self.expect_success(
+            HostCommand::SendMidiControllerAt {
+                bus,
+                channel,
+                controller,
+                value,
+                sample_offset,
+            },
+            "SendMidiControllerAt",
+        )
+    }
+    fn notify_live_midi_controller(
+        &mut self,
+        bus: i32,
+        channel: crate::midi::MidiChannel,
+        controller: crate::midi::MidiController,
+    ) -> Result<bool> {
+        match self.send_command(HostCommand::NotifyLiveMidiController {
+            bus,
+            channel,
+            controller,
+        })? {
+            HostResponse::NotifyLiveMidiController { accepted } => Ok(accepted),
+            HostResponse::Error { message } => Err(Error::Other(message)),
+            _ => Err(Error::Other(
+                "unexpected NotifyLiveMidiController response".into(),
+            )),
+        }
+    }
+    fn send_live_midi_event(&mut self, event: crate::midi::MidiEvent) -> Result<()> {
+        self.expect_success(
+            HostCommand::SendLiveMidiEvent { event },
+            "SendLiveMidiEvent",
+        )
+    }
+    fn keyswitches(
+        &self,
+        bus: i32,
+        channel: crate::midi::MidiChannel,
+    ) -> Result<Vec<crate::midi::KeyswitchInfo>> {
+        match self.send_command(HostCommand::Keyswitches { bus, channel })? {
+            HostResponse::Keyswitches { keyswitches } => Ok(keyswitches),
+            HostResponse::Error { message } => Err(Error::Other(message)),
+            _ => Err(Error::Other("unexpected Keyswitches response".into())),
+        }
+    }
+
+    fn set_transport_position(&mut self, position: crate::plugin::TransportPosition) -> Result<()> {
+        self.expect_success(
+            HostCommand::SetTransportPosition { position },
+            "SetTransportPosition",
+        )
+    }
+    fn transport_position(&self) -> Result<crate::plugin::TransportPosition> {
+        self.poll(
+            HostCommand::TransportPosition,
+            "TransportPosition",
+            |response| match response {
+                HostResponse::TransportPosition { position } => Some(position),
+                _ => None,
+            },
+        )
+        .ok_or_else(|| Error::Other("TransportPosition: unavailable".into()))
+    }
+
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
         self.expect_success(HostCommand::SetParameter { id, value }, "SetParameter")
     }

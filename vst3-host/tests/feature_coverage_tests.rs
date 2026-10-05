@@ -2813,3 +2813,133 @@ fn test_testsynth_editor_resize_is_clamped_by_the_view() {
         "closing the editor must call IPlugView::removed"
     );
 }
+
+fn verify_sdk_compatibility_apis(plugin: &mut Plugin) {
+    use vst3_host::{
+        audio::BusDirection,
+        midi::MidiController,
+        plugin::{HostNotification, TransportPosition},
+        transport::Timeline,
+    };
+    let mappings = plugin
+        .midi_controller_assignments(BusDirection::Input)
+        .expect("mappings");
+    let controller = MidiController::Registered { bank: 1, index: 2 };
+    let mapped: Vec<_> = mappings
+        .iter()
+        .filter(|m| m.controller == controller)
+        .collect();
+    assert_eq!(mapped.len(), 2, "one controller maps to two parameters");
+    assert_eq!(
+        plugin
+            .midi_controller_assignments(BusDirection::Output)
+            .unwrap()
+            .len(),
+        1
+    );
+    plugin
+        .send_midi_controller_at(0, MidiChannel::Ch1, controller, 0.25, 0)
+        .unwrap();
+    for assignment in mapped {
+        assert_eq!(plugin.get_parameter(assignment.parameter_id).unwrap(), 0.25);
+    }
+
+    let keys = plugin
+        .keyswitches(0, MidiChannel::Ch1)
+        .expect("keyswitch metadata");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].title, "Legato");
+    assert_eq!(
+        (keys[0].key_min, keys[0].key_max, keys[0].remapped_key),
+        (24, 25, None)
+    );
+    assert_eq!(plugin.get_units().unwrap()[0].name, "Root");
+    assert_eq!(plugin.midi_cc_to_parameter(0, 0, 99), None);
+    // Ordinary MIDI must not learn.
+    let event = MidiEvent::ControlChange {
+        channel: MidiChannel::Ch1,
+        controller: 99,
+        value: 64,
+    };
+    plugin.send_midi_event(event).unwrap();
+    assert!(plugin.service_host_requests().unwrap().is_empty());
+    plugin.send_live_midi_event(event).unwrap();
+    let flags = plugin.service_host_requests().unwrap();
+    assert!(flags.param_titles_changed());
+    assert!(plugin.midi_cc_to_parameter(0, 0, 99).is_some());
+    assert_eq!(
+        plugin.get_units().unwrap()[0].name,
+        "Learned Root",
+        "unit cache must refresh"
+    );
+    let notifications = plugin.take_host_notifications();
+    assert!(notifications
+        .iter()
+        .any(|n| matches!(n, HostNotification::ProgressStarted { .. })));
+    assert!(notifications
+        .iter()
+        .any(|n| matches!(n, HostNotification::ProgressFinished { .. })));
+    assert!(notifications.iter().any(|n| matches!(
+        n,
+        HostNotification::BusActivationRequested {
+            bus_index: 0,
+            active: true,
+            ..
+        }
+    )));
+
+    plugin
+        .set_transport_position(TransportPosition {
+            samples: 480_000,
+            quarter_notes: 20.0,
+        })
+        .unwrap();
+    plugin.set_tempo(60.0).unwrap();
+    plugin.set_playing(true).unwrap();
+    plugin.start_processing().unwrap();
+    let mut buffers = AudioBuffers::new(0, 2, 480, 48_000.0);
+    plugin.process_audio(&mut buffers).unwrap();
+    let position = plugin.transport_position().unwrap();
+    assert_eq!(position.samples, 480_480);
+    assert!((position.quarter_notes - 20.01).abs() < 1e-9);
+    assert_eq!(plugin.latency_samples(), 32);
+    assert_eq!(plugin.tail_samples(), 4800);
+    plugin.set_playing(false).unwrap();
+    plugin.process_audio(&mut buffers).unwrap();
+    assert_eq!(plugin.transport_position().unwrap(), position);
+    plugin.stop_processing().unwrap();
+    plugin.reconfigure(44_100.0, 256).unwrap();
+    assert_eq!(plugin.transport_position().unwrap(), position);
+    plugin.reconfigure(48_000.0, 512).unwrap();
+    plugin.start_processing().unwrap();
+    assert_eq!(plugin.transport_position().unwrap(), position);
+    let mut timeline = Timeline::new(48_000.0, 120.0);
+    timeline.seek_frame(96_000);
+    plugin.set_playing(true).unwrap();
+    timeline.drive_block(plugin, &mut buffers).unwrap();
+    let position = plugin.transport_position().unwrap();
+    assert_eq!(position.samples, 96_480);
+    assert!((position.quarter_notes - 4.02).abs() < 1e-9);
+    plugin.stop_processing().unwrap();
+}
+
+#[test]
+#[ignore = "Requires bundled TestSynth (just test-plugin)"]
+fn test_testsynth_sdk_compatibility_apis() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_test_synth() else {
+        return;
+    };
+    verify_sdk_compatibility_apis(&mut plugin);
+}
+
+#[cfg(feature = "process-isolation")]
+#[test]
+#[ignore = "Requires bundled TestSynth and helper binary"]
+fn test_isolated_testsynth_sdk_compatibility_apis() {
+    let _guard = plugin_guard();
+    let Some((_host, mut plugin)) = load_test_synth_isolated() else {
+        return;
+    };
+    verify_sdk_compatibility_apis(&mut plugin);
+}

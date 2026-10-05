@@ -238,6 +238,14 @@ impl Timeline {
     /// would slip the timeline clock against the plugin's transport by the difference every block.
     pub fn drive_block(&mut self, plugin: &mut Plugin, buffers: &mut AudioBuffers) -> Result<()> {
         let frames = rendered_frames(buffers);
+        let samples = i64::try_from(self.sample_clock).map_err(|_| {
+            crate::Error::InvalidParameter("timeline position exceeds VST3 sample range".into())
+        })?;
+        plugin.set_tempo(self.bpm)?;
+        plugin.set_transport_position(crate::plugin::TransportPosition {
+            samples,
+            quarter_notes: self.frame_to_beat(self.sample_clock),
+        })?;
         let events = self.advance_block(frames);
         for (event, offset) in events.midi {
             plugin.send_midi_event_at(event, offset)?;

@@ -1021,3 +1021,86 @@ mod tests {
         assert_eq!(MidiChannel::from_index(16), None);
     }
 }
+
+/// Controller address understood by VST3 MIDI mapping and learning interfaces.
+/// MIDI 1 numbers include aftertouch (128), pitch bend (129), and program change (130).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MidiController {
+    /// MIDI 1 CC or extended controller number (0..=130).
+    Midi1(u16),
+    /// MIDI 2 registered controller (MIDI 1 RPN); bank/index are 7-bit values.
+    Registered {
+        /// Controller bank.
+        bank: u8,
+        /// Controller index.
+        index: u8,
+    },
+    /// MIDI 2 assignable controller (MIDI 1 NRPN); bank/index are 7-bit values.
+    Assignable {
+        /// Controller bank.
+        bank: u8,
+        /// Controller index.
+        index: u8,
+    },
+}
+
+impl MidiController {
+    pub(crate) fn is_valid(self) -> bool {
+        match self {
+            Self::Midi1(cc) => cc <= 130,
+            Self::Registered { bank, index } | Self::Assignable { bank, index } => {
+                bank < 128 && index < 128
+            }
+        }
+    }
+}
+
+/// One controller-to-parameter assignment. A controller may have multiple assignments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MidiControllerAssignment {
+    /// Event bus index.
+    pub bus: i32,
+    /// MIDI channel.
+    pub channel: MidiChannel,
+    /// Controller address.
+    pub controller: MidiController,
+    /// Target parameter id.
+    pub parameter_id: u32,
+}
+
+/// A plugin's advertised articulation/keyswitch, copied from IKeyswitchController.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyswitchInfo {
+    /// SDK keyswitch type id (unknown types are preserved).
+    pub type_id: u32,
+    /// Display name.
+    pub title: String,
+    /// Abbreviated display name.
+    pub short_title: String,
+    /// First MIDI key in the inclusive range.
+    pub key_min: i32,
+    /// Last MIDI key in the inclusive range.
+    pub key_max: i32,
+    /// Remapped key, or None when the plugin reports no remapping.
+    pub remapped_key: Option<i32>,
+    /// Owning plugin unit.
+    pub unit_id: i32,
+    /// SDK flags, preserved for future extensions.
+    pub flags: i32,
+}
+
+impl MidiEvent {
+    pub(crate) fn controller_address(self) -> Option<(MidiChannel, MidiController)> {
+        match self {
+            Self::ControlChange {
+                channel,
+                controller,
+                ..
+            } => Some((channel, MidiController::Midi1(controller as u16))),
+            Self::ChannelAftertouch { channel, .. } => Some((channel, MidiController::Midi1(128))),
+            Self::PitchBend { channel, .. } => Some((channel, MidiController::Midi1(129))),
+            Self::ProgramChange { channel, .. } => Some((channel, MidiController::Midi1(130))),
+            _ => None,
+        }
+    }
+}

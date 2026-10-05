@@ -27,6 +27,11 @@ a second VST3 implementation that could drift out of sync. The command and respo
 [`HostResponse`](https://docs.rs/vst3-host/latest/vst3_host/process_isolation/enum.HostResponse.html))
 live in the library and are shared by both sides.
 
+On macOS, the main AppKit thread handles loading, controller calls, lifecycle changes,
+and native editor callbacks. The stdin worker executes audio processing and forwards
+other requests to that main loop. On other platforms commands run on the main stdin
+thread and native editor windows remain unsupported.
+
 ## Crash and hang containment
 
 Responses are read on a background thread and delivered over a channel, so a call can wait
@@ -85,7 +90,8 @@ Parameters, audio, plugin state (`save_state`/`load_state`), **MIDI the plugin e
 (`bus_arrangements` / `set_bus_arrangements`), **units and program lists** (`get_units`), and
 **latency / tail / MIDI-CC mapping** (`latency_samples`, `tail_samples`,
 `midi_cc_to_parameter`) all marshal across the boundary, so an isolated `Plugin` behaves like
-an in-process one for those.
+an in-process one for those. Transport position, MIDI Mapping 2/Learn 2, keyswitch
+metadata, and bus activation notifications use the same protocol as well.
 
 ## Recovery
 

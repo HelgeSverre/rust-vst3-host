@@ -96,8 +96,8 @@ pub use embed::{EditorRect, EmbeddedEditor};
 pub use error::{Error, Result};
 pub use host::{DiscoveryProgress, ProbeResult, Vst3Host, Vst3HostBuilder};
 pub use midi::{
-    cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId, OutputEvent,
-    PluginEvent, PluginEventData,
+    cc, KeyswitchInfo, MidiChannel, MidiController, MidiControllerAssignment, MidiEvent,
+    NoteExpressionInfo, NoteExpressionType, NoteId, OutputEvent, PluginEvent, PluginEventData,
 };
 #[cfg(feature = "midi-input")]
 pub use midi_input::{
@@ -113,7 +113,8 @@ pub use playback::{
 pub use plugin::{
     AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, OutputMidiConsumer,
     ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode,
-    ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, WindowHandle,
+    ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, TransportPosition,
+    WindowHandle,
 };
 pub use realtime::{RealtimePluginRunner, RtControl};
 pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};

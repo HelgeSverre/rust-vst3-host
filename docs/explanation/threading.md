@@ -1,8 +1,9 @@
 # Threading model
 
-Which thread each operation belongs on, and why. The library does **not** enforce these
-rules — it can't portably tell what thread you're on — so getting them right is your
-responsibility as the host. Breaking them usually shows up as a crash or hang inside the
+Which thread each operation belongs on, and why. The library checks the captured loading
+thread for selected controller operations, including MIDI learn and keyswitch queries.
+It cannot portably identify your application's main thread, so loading on that thread
+and respecting the remaining thread contracts is your responsibility as the host. Breaking them usually shows up as a crash or hang inside the
 plugin, not as a Rust panic.
 
 ## The two threads that matter
@@ -64,8 +65,8 @@ of a plugin-provided COM object plus a pump you are not required to run.
 control thread reaches the plugin through `AudioHandle::lock()`, which takes the **same**
 mutex. So while playing:
 
-- Sending MIDI and changing parameters from any thread is safe — the mutex serializes them
-  against the audio callback, and the change lands on the next block.
+- Use the side channels to send MIDI and parameter changes from another thread. Taking
+  the mutex prevents concurrent processing but does not move controller calls to the UI thread.
 - You don't have to take that lock for the common cases, though. `AudioHandle` ships
   built-in **lock-free side channels** — `send_midi` / `set_parameter` / `midi_panic` in,
   `output_levels` / `drain_output_midi` / `drain_parameter_changes` out, plus `try_lock` for
@@ -81,7 +82,7 @@ A plugin talks back to the host through two queues, and you drain both from your
 
 - `take_parameter_edits` — the editor's `begin`/`change`/`end` gestures, in order.
 - `take_host_notifications` — control-plane requests: "my state is dirty", "please open my
-  editor", group-edit brackets, unit/program-list changes, progress reports, context menus.
+  editor", group-edit brackets, unit/program-list changes, progress reports, context menus, bus activation requests.
 
 **Drain `take_host_notifications` regularly.** Unlike the other queues, a full one is
 reported back to the plugin (`kResultFalse`), so a host that never polls eventually makes the
@@ -99,9 +100,23 @@ inside the **helper process**, not yours. Your `Plugin` handle just serializes J
 over a pipe, guarded by an internal mutex, so you can call it from any thread — but only one
 call is in flight at a time, and `process_audio` still pays the IPC round-trip per block.
 
-## Why there's no assertion
+## Why there is no global main-thread assertion
 
 A portable "are we on the main thread?" check doesn't exist in safe Rust, and a wrong guess
 would either crash or falsely reject a valid setup. Rather than ship a misleading
-`debug_assert`, the library documents the contract and leaves enforcement to the host, which
-knows its own thread layout.
+`debug_assert`, the library checks the captured loading thread where possible and leaves
+identifying the application main thread to the host.
+
+On macOS, the isolation helper loads and controls the plugin on its AppKit main thread;
+only audio processing runs on the stdin worker. Controller calls and native editor
+callbacks therefore share the same thread.
+
+For live input, `midi_input::bind_to_handle` uses `AudioHandle::send_live_midi`.
+Call `AudioHandle::service_host_requests` on the loading/UI thread each tick to deliver
+queued learn notifications and refresh changed mappings. The learn queue holds 256
+controller notifications and replaces the oldest on overflow. Sequenced `send_midi`
+calls do not trigger learn. Service calls briefly hold the audio mutex.
+
+A `HostNotification::BusActivationRequested` is a routing request. Inspect it and use
+`Plugin::set_bus_active` under that API's stopped-processing requirements when accepting;
+queueing the notification does not change the audio layout.

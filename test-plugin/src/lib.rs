@@ -894,6 +894,7 @@ unsafe fn render_voices(
 }
 
 struct TestSynthProcessor {
+    active: AtomicBool,
     state: Mutex<SynthState>,
     data_exchange_handler: Mutex<Option<vst3::ComPtr<IDataExchangeHandler>>>,
     data_exchange_handler_ptr: AtomicPtr<IDataExchangeHandler>,
@@ -911,6 +912,7 @@ impl TestSynthProcessor {
 
     fn new() -> Self {
         Self {
+            active: AtomicBool::new(false),
             state: Mutex::new(SynthState {
                 sample_rate: 48_000.0,
                 voices: Vec::new(),
@@ -1323,6 +1325,7 @@ impl IComponentTrait for TestSynthProcessor {
         kResultOk
     }
     unsafe fn setActive(&self, state: TBool) -> tresult {
+        self.active.store(state != 0, Ordering::Release);
         if state == 0 {
             let queue = self
                 .data_exchange_queue
@@ -1413,7 +1416,11 @@ impl IAudioProcessorTrait for TestSynthProcessor {
     unsafe fn getLatencySamples(&self) -> u32 {
         // Fixed, nonzero advertisement (TestSynth has no real look-ahead): lets host tests
         // assert a real getLatencySamples round trip — a dropped call would read 0.
-        TEST_LATENCY_SAMPLES
+        if self.active.load(Ordering::Acquire) {
+            u32::MAX
+        } else {
+            TEST_LATENCY_SAMPLES
+        }
     }
     unsafe fn setupProcessing(&self, setup: *mut ProcessSetup) -> tresult {
         if let Ok(mut s) = self.state.lock() {
@@ -1471,7 +1478,11 @@ impl IAudioProcessorTrait for TestSynthProcessor {
     }
     unsafe fn getTailSamples(&self) -> u32 {
         // Fixed, nonzero advertisement, same rationale as getLatencySamples.
-        TEST_TAIL_SAMPLES
+        if self.active.load(Ordering::Acquire) {
+            u32::MAX
+        } else {
+            TEST_TAIL_SAMPLES
+        }
     }
 }
 
@@ -1652,6 +1663,8 @@ impl IPlugViewContentScaleSupportTrait for TestPlugView {
 }
 
 struct TestSynthController {
+    handler: Mutex<Option<vst3::ComPtr<IComponentHandler>>>,
+    learned: std::sync::atomic::AtomicBool,
     values: Mutex<[f64; PARAM_COUNT as usize]>,
     /// Deliberately controller-only persistence probe. Component state does not contain this.
     edit_revision: Mutex<u32>,
@@ -1665,6 +1678,9 @@ impl Class for TestSynthController {
         INoteExpressionController,
         IUnitInfo,
         IMidiMapping,
+        IMidiMapping2,
+        IMidiLearn,
+        IKeyswitchController,
         IRemapParamID,
         IDataExchangeReceiver,
     );
@@ -1699,6 +1715,8 @@ impl TestSynthController {
 
     fn new() -> Self {
         Self {
+            handler: Mutex::new(None),
+            learned: std::sync::atomic::AtomicBool::new(false),
             values: Mutex::new(PARAM_DEFAULTS),
             edit_revision: Mutex::new(0),
             editor: Arc::new(EditorProbe::default()),
@@ -1722,9 +1740,24 @@ const CONTROLLER_PARAM_COUNT: i32 = PARAM_COUNT + PROBE_PARAMS.len() as i32;
 
 impl IPluginBaseTrait for TestSynthController {
     unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
+        #[cfg(target_os = "macos")]
+        {
+            extern "C" {
+                fn pthread_main_np() -> i32;
+            }
+            if std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_stem().map(|s| s == "vst3-host-helper"))
+                .unwrap_or(false)
+                && pthread_main_np() == 0
+            {
+                return kResultFalse;
+            }
+        }
         kResultOk
     }
     unsafe fn terminate(&self) -> tresult {
+        *self.handler.lock().unwrap_or_else(|p| p.into_inner()) = None;
         kResultOk
     }
 }
@@ -1875,7 +1908,9 @@ impl IEditControllerTrait for TestSynthController {
         *revision = revision.wrapping_add(1);
         kResultOk
     }
-    unsafe fn setComponentHandler(&self, _h: *mut IComponentHandler) -> tresult {
+    unsafe fn setComponentHandler(&self, h: *mut IComponentHandler) -> tresult {
+        *self.handler.lock().unwrap_or_else(|p| p.into_inner()) =
+            ComRef::from_raw(h).map(|h| h.to_com_ptr());
         kResultOk
     }
     unsafe fn createView(&self, name: *const c_char) -> *mut IPlugView {
@@ -1954,7 +1989,14 @@ impl IUnitInfoTrait for TestSynthController {
         let info = &mut *info;
         info.id = 0; // kRootUnitId
         info.parentUnitId = -1; // kNoParentUnitId
-        copy_wstring("Root", &mut info.name);
+        copy_wstring(
+            if self.learned.load(Ordering::Acquire) {
+                "Learned Root"
+            } else {
+                "Root"
+            },
+            &mut info.name,
+        );
         info.programListId = PROGRAM_LIST_ID;
         kResultOk
     }
@@ -2040,6 +2082,7 @@ impl IMidiMappingTrait for TestSynthController {
             return kResultFalse;
         }
         let mapped = match midi_cc as u32 {
+            99 if self.learned.load(Ordering::Acquire) => CUTOFF_PARAM_ID,
             1 => FILTER_ENV_AMOUNT_PARAM_ID,
             71 => RESONANCE_PARAM_ID,
             72 => AMP_RELEASE_PARAM_ID,
@@ -2050,6 +2093,164 @@ impl IMidiMappingTrait for TestSynthController {
             _ => return kResultFalse,
         };
         *id = mapped;
+        kResultOk
+    }
+}
+
+// Released SDK layout, intentionally independent of vst3 0.3's prerelease struct.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ReleasedMidi2Assignment {
+    id: u32,
+    bus: i32,
+    channel: u8,
+    bank_and_kind: u8,
+    index: u8,
+}
+
+impl TestSynthController {
+    fn midi1_assignments(&self) -> Vec<Midi1ControllerParamIDAssignment> {
+        let mut out = Vec::new();
+        for channel in 0..16 {
+            for cc in 0..=130 {
+                let mut id = 0;
+                if unsafe { self.getMidiControllerAssignment(0, channel, cc, &mut id) } == kResultOk
+                {
+                    out.push(Midi1ControllerParamIDAssignment {
+                        pId: id,
+                        busIndex: 0,
+                        channel: channel as u8,
+                        controller: cc,
+                    });
+                }
+            }
+        }
+        out
+    }
+}
+impl IMidiMapping2Trait for TestSynthController {
+    unsafe fn getNumMidi1ControllerAssignments(&self, direction: BusDirections) -> u32 {
+        if direction == BusDirections_::kInput {
+            self.midi1_assignments().len() as u32
+        } else {
+            0
+        }
+    }
+    unsafe fn getMidi1ControllerAssignments(
+        &self,
+        direction: BusDirections,
+        list: *const Midi1ControllerParamIDAssignmentList,
+    ) -> tresult {
+        let entries = if direction == BusDirections_::kInput {
+            self.midi1_assignments()
+        } else {
+            Vec::new()
+        };
+        let Some(list) = list.as_ref() else {
+            return kInvalidArgument;
+        };
+        if list.count as usize != entries.len() || list.map.is_null() {
+            return kInvalidArgument;
+        }
+        std::ptr::copy_nonoverlapping(entries.as_ptr(), list.map, entries.len());
+        kResultOk
+    }
+    unsafe fn getNumMidi2ControllerAssignments(&self, direction: BusDirections) -> u32 {
+        if direction == BusDirections_::kInput {
+            2
+        } else {
+            1
+        }
+    }
+    unsafe fn getMidi2ControllerAssignments(
+        &self,
+        direction: BusDirections,
+        list: *const Midi2ControllerParamIDAssignmentList,
+    ) -> tresult {
+        let Some(list) = list.as_ref() else {
+            return kInvalidArgument;
+        };
+        let count = self.getNumMidi2ControllerAssignments(direction);
+        if list.count != count || list.map.is_null() {
+            return kInvalidArgument;
+        }
+        let map = list.map.cast::<ReleasedMidi2Assignment>();
+        *map = ReleasedMidi2Assignment {
+            id: CUTOFF_PARAM_ID,
+            bus: 0,
+            channel: 0,
+            bank_and_kind: 0x81,
+            index: 2,
+        };
+        if count == 2 {
+            *map.add(1) = ReleasedMidi2Assignment {
+                id: RESONANCE_PARAM_ID,
+                ..*map
+            };
+        }
+        kResultOk
+    }
+}
+impl IMidiLearnTrait for TestSynthController {
+    unsafe fn onLiveMIDIControllerInput(&self, bus: i32, channel: i16, cc: i16) -> tresult {
+        if bus != 0 || channel != 0 || cc != 99 {
+            return kResultFalse;
+        }
+        self.learned.store(true, Ordering::Release);
+        if let Some(handler) = self
+            .handler
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            handler.restartComponent(
+                RestartFlags_::kMidiCCAssignmentChanged | RestartFlags_::kParamTitlesChanged,
+            );
+            if let Some(progress) = handler.cast::<IProgress>() {
+                let mut id = 0;
+                if progress.start(
+                    IProgress_::ProgressType_::UIBackgroundTask,
+                    std::ptr::null(),
+                    &mut id,
+                ) == kResultOk
+                {
+                    progress.update(id, 0.5);
+                    progress.finish(id);
+                }
+            }
+            if let Some(activation) = handler.cast::<IComponentHandlerBusActivation>() {
+                activation.requestBusActivation(0, 1, 0, 1);
+            }
+        }
+        kResultOk
+    }
+}
+impl IKeyswitchControllerTrait for TestSynthController {
+    unsafe fn getKeyswitchCount(&self, bus: i32, channel: i16) -> i32 {
+        if bus == 0 && (0..16).contains(&channel) {
+            1
+        } else {
+            0
+        }
+    }
+    unsafe fn getKeyswitchInfo(
+        &self,
+        bus: i32,
+        channel: i16,
+        index: i32,
+        info: *mut KeyswitchInfo,
+    ) -> tresult {
+        if self.getKeyswitchCount(bus, channel) == 0 || index != 0 || info.is_null() {
+            return kInvalidArgument;
+        }
+        *info = std::mem::zeroed();
+        (*info).typeId = 0;
+        (*info).keyswitchMin = 24;
+        (*info).keyswitchMax = 25;
+        (*info).keyRemapped = -1;
+        (*info).unitId = 0;
+        copy_wstring("Legato", &mut (*info).title);
+        copy_wstring("Leg", &mut (*info).shortTitle);
         kResultOk
     }
 }

@@ -478,6 +478,18 @@ pub struct DataExchangeBlock {
 /// currently in a grouped gesture", not as a delimiter around specific parameter edits.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HostNotification {
+    /// The plugin requests a routing change. The host decides whether to apply it with
+    /// `Plugin::set_bus_active`; draining this notification does not change bus state.
+    BusActivationRequested {
+        /// Audio or events.
+        media_type: crate::audio::MediaType,
+        /// Input or output.
+        direction: crate::audio::BusDirection,
+        /// Zero-based bus index.
+        bus_index: i32,
+        /// Requested activation state.
+        active: bool,
+    },
     /// The plugin changed whether its state needs saving.
     DirtyChanged(bool),
     /// The plugin asked the host to open an editor, optionally by view name.
@@ -723,8 +735,60 @@ pub struct Plugin {
     pub(crate) internal: Option<Box<dyn PluginInternal>>,
 }
 
+/// Project position supplied to a plugin, independent of the current tempo.
+/// Negative positions support preroll. `quarter_notes` must be finite.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TransportPosition {
+    /// Project sample position at the start of the next block.
+    pub samples: i64,
+    /// Musical position in quarter notes at the start of the next block.
+    pub quarter_notes: f64,
+}
+
 // Internal trait for hiding implementation details
 pub(crate) trait PluginInternal: Send {
+    fn midi_controller_assignments(
+        &self,
+        _direction: crate::audio::BusDirection,
+    ) -> Result<Vec<crate::midi::MidiControllerAssignment>> {
+        Ok(Vec::new())
+    }
+    fn send_midi_controller_at(
+        &mut self,
+        _bus: i32,
+        _channel: MidiChannel,
+        _controller: crate::midi::MidiController,
+        _value: f64,
+        _offset: i32,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn notify_live_midi_controller(
+        &mut self,
+        _bus: i32,
+        _channel: MidiChannel,
+        _controller: crate::midi::MidiController,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+    fn send_live_midi_event(&mut self, event: MidiEvent) -> Result<()> {
+        self.send_midi_event(event)
+    }
+    fn keyswitches(
+        &self,
+        _bus: i32,
+        _channel: MidiChannel,
+    ) -> Result<Vec<crate::midi::KeyswitchInfo>> {
+        Ok(Vec::new())
+    }
+
+    fn set_transport_position(&mut self, _position: TransportPosition) -> Result<()> {
+        Ok(())
+    }
+    fn transport_position(&self) -> Result<TransportPosition> {
+        Ok(TransportPosition::default())
+    }
+
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
     /// Schedule a parameter change at a sample offset within the next process block.
     /// Defaults to a block-start change (ignores the offset) for implementations that don't
@@ -1306,6 +1370,108 @@ impl Plugin {
         }
 
         Ok(())
+    }
+
+    /// Return all cached controller assignments, including one-to-many mappings.
+    /// Mapping 2 is preferred; legacy mappings are available for input only.
+    /// Call `service_host_requests` on the control thread to refresh changed mappings.
+    pub fn midi_controller_assignments(
+        &self,
+        direction: crate::audio::BusDirection,
+    ) -> Result<Vec<crate::midi::MidiControllerAssignment>> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .midi_controller_assignments(direction)
+    }
+
+    /// Send a normalized controller value to every mapped parameter, without triggering learn.
+    /// Unmapped controllers are ignored. MIDI 2 UMP byte parsing is not performed here.
+    pub fn send_midi_controller_at(
+        &mut self,
+        bus: i32,
+        channel: MidiChannel,
+        controller: crate::midi::MidiController,
+        value: f64,
+        sample_offset: i32,
+    ) -> Result<()> {
+        if bus < 0 || !controller.is_valid() || !(0.0..=1.0).contains(&value) {
+            return Err(Error::InvalidParameter(
+                "invalid controller address or normalized value".into(),
+            ));
+        }
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .send_midi_controller_at(bus, channel, controller, value, sample_offset.max(0))
+    }
+
+    /// Notify MIDI learn on the plugin's control thread. Returns false if unsupported or
+    /// declined. Learning changes are applied by the next `service_host_requests` call.
+    pub fn notify_live_midi_controller(
+        &mut self,
+        bus: i32,
+        channel: MidiChannel,
+        controller: crate::midi::MidiController,
+    ) -> Result<bool> {
+        if bus < 0 || !controller.is_valid() {
+            return Err(Error::InvalidParameter("invalid controller address".into()));
+        }
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .notify_live_midi_controller(bus, channel, controller)
+    }
+
+    /// Deliver a live MIDI event and queue any controller-learn notification.
+    /// Call `service_host_requests` on the control thread each UI tick to service learning.
+    /// Sequenced events should use `send_midi_event_at` instead.
+    pub fn send_live_midi_event(&mut self, event: MidiEvent) -> Result<()> {
+        validate_midi_event(&event)?;
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .send_live_midi_event(event)
+    }
+
+    /// Query keyswitch/articulation metadata on the control thread. Returns an empty list
+    /// when the plugin does not support IKeyswitchController.
+    pub fn keyswitches(
+        &self,
+        bus: i32,
+        channel: MidiChannel,
+    ) -> Result<Vec<crate::midi::KeyswitchInfo>> {
+        if bus < 0 {
+            return Err(Error::InvalidParameter(
+                "event bus must be nonnegative".into(),
+            ));
+        }
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .keyswitches(bus, channel)
+    }
+
+    /// Seek the next processing block without changing tempo or playing state.
+    /// This is allocation-free in-process and available through isolation as well.
+    pub fn set_transport_position(&mut self, position: TransportPosition) -> Result<()> {
+        if !position.quarter_notes.is_finite() {
+            return Err(Error::InvalidParameter(
+                "transport musical position must be finite".into(),
+            ));
+        }
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .set_transport_position(position)
+    }
+
+    /// Project position at the start of the next processing block.
+    pub fn transport_position(&self) -> Result<TransportPosition> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .transport_position()
     }
 
     /// Set a parameter value at a specific sample offset within the next process block.

@@ -59,3 +59,29 @@ reach for each.
 `use vst3_host::prelude::*;` re-exports the common types. Note it does **not** export
 `Result` — that would shadow `std::result::Result` and break `Result<T, E>` in your code.
 Refer to the crate's result type explicitly as `vst3_host::Result`.
+
+## Transport and controller metadata
+
+`TransportPosition { samples, quarter_notes }` describes the start of the next block.
+Use `Plugin::set_transport_position` to seek, including signed preroll positions;
+`AudioHandle` and `RtControl` expose queued setters. `transport_position` reports the
+next block position. Tempo changes preserve accumulated beats, stopped transport freezes
+project position, and `Timeline::drive_block` supplies its own tempo and seek position.
+Only populated process-context fields are advertised as valid.
+
+`Plugin::midi_controller_assignments(direction)` returns owned mappings, preferring
+VST3 Mapping 2 and falling back to Mapping 1. `MidiController` represents MIDI 1 numbers
+or registered/assignable bank/index addresses. `send_midi_controller_at` applies a
+normalized value to every matching parameter at the supplied block offset.
+Output assignments are metadata; this does not add UMP device parsing or automatic
+parameter-to-device feedback.
+
+`notify_live_midi_controller` delivers an immediate UI-thread learn notification,
+preferring Learn 2 with a MIDI 1 fallback. `send_live_midi_event` queues DSP input and
+bounded deferred learning; call `service_host_requests` on the loading thread.
+`keyswitches(bus, channel)` returns owned `KeyswitchInfo` metadata, or an empty list
+when the optional interface is absent. These APIs also work with process isolation.
+
+`latency_samples` and `tail_samples` read cached values collected during setup and
+restart servicing while the component is inactive. Poll and service restart requests
+to keep those values current.

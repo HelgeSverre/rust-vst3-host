@@ -11,13 +11,10 @@
 //!
 //! ## Threading (macOS)
 //!
-//! A plugin editor needs a native UI run loop on the **main thread** to be interactive.
-//! So on macOS the main thread runs an `NSApplication` event pump and stdin/command
-//! processing moves to a worker thread; the plugin is shared behind an
-//! `Arc<Mutex<Option<Plugin>>>`. `CreateGui`/`CloseGui` are forwarded from the worker to
-//! the main thread (which owns the `NSWindow`) over a channel. Audio/control commands run
-//! exactly as before, just on the worker thread. On other platforms the helper stays a
-//! single-threaded stdin loop and GUI is not yet supported.
+//! The main thread owns controller, lifecycle and native editor operations. A worker
+//! reads commands and executes audio processing, forwarding all other commands to the
+//! main event loop. This keeps controller calls serialized with native UI callbacks.
+//! Other platforms process commands on the main stdin thread (GUI is unsupported).
 
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
@@ -62,7 +59,7 @@ fn main() {
                 eprintln!("Shutting down helper process");
                 break;
             }
-            let response = handle(command, &plugin, &mut sample_rate, None);
+            let response = handle(command, &plugin, &mut sample_rate);
             respond(&mut protocol, &response);
         }
     }
@@ -107,21 +104,15 @@ fn err<E: std::fmt::Display>(prefix: &str, e: E) -> HostResponse {
     }
 }
 
-/// A GUI request the worker forwards to the main thread (which owns the window).
+/// A controller/lifecycle request to execute on the UI thread.
 #[cfg(target_os = "macos")]
-struct GuiRequest {
-    open: bool,
+struct MainRequest {
+    command: HostCommand,
     reply: std::sync::mpsc::Sender<HostResponse>,
 }
 
-/// Handle a command against the shared plugin. GUI commands are delegated to `gui` (the
-/// main-thread channel) when present; without it they report "not supported".
-fn handle(
-    command: HostCommand,
-    plugin: &SharedPlugin,
-    sample_rate: &mut f64,
-    #[allow(unused_variables)] gui: Option<&GuiChannel>,
-) -> HostResponse {
+/// Handle non-GUI commands against the shared plugin. The macOS main loop handles GUI commands.
+fn handle(command: HostCommand, plugin: &SharedPlugin, sample_rate: &mut f64) -> HostResponse {
     // Convenience: run a closure against the loaded plugin or report "no plugin".
     fn with<F: FnOnce(&mut Plugin) -> HostResponse>(p: &SharedPlugin, f: F) -> HostResponse {
         let mut guard = match p.lock() {
@@ -141,6 +132,62 @@ fn handle(
     }
 
     match command {
+        HostCommand::MidiControllerAssignments { direction } => {
+            with(plugin, |p| match p.midi_controller_assignments(direction) {
+                Ok(assignments) => HostResponse::MidiControllerAssignments { assignments },
+                Err(e) => err("MidiControllerAssignments", e),
+            })
+        }
+        HostCommand::SendMidiControllerAt {
+            bus,
+            channel,
+            controller,
+            value,
+            sample_offset,
+        } => with(plugin, |p| {
+            match p.send_midi_controller_at(bus, channel, controller, value, sample_offset) {
+                Ok(()) => HostResponse::Success {
+                    message: "send_midi_controller_at".into(),
+                },
+                Err(e) => err("SendMidiControllerAt", e),
+            }
+        }),
+        HostCommand::NotifyLiveMidiController {
+            bus,
+            channel,
+            controller,
+        } => with(plugin, |p| {
+            match p.notify_live_midi_controller(bus, channel, controller) {
+                Ok(accepted) => HostResponse::NotifyLiveMidiController { accepted },
+                Err(e) => err("NotifyLiveMidiController", e),
+            }
+        }),
+        HostCommand::SendLiveMidiEvent { event } => {
+            with(plugin, |p| match p.send_live_midi_event(event) {
+                Ok(()) => HostResponse::Success {
+                    message: "send_live_midi_event".into(),
+                },
+                Err(e) => err("SendLiveMidiEvent", e),
+            })
+        }
+        HostCommand::Keyswitches { bus, channel } => {
+            with(plugin, |p| match p.keyswitches(bus, channel) {
+                Ok(keyswitches) => HostResponse::Keyswitches { keyswitches },
+                Err(e) => err("Keyswitches", e),
+            })
+        }
+        HostCommand::SetTransportPosition { position } => {
+            with(plugin, |p| match p.set_transport_position(position) {
+                Ok(()) => HostResponse::Success {
+                    message: "transport positioned".into(),
+                },
+                Err(e) => err("SetTransportPosition", e),
+            })
+        }
+        HostCommand::TransportPosition => with(plugin, |p| match p.transport_position() {
+            Ok(position) => HostResponse::TransportPosition { position },
+            Err(e) => err("TransportPosition", e),
+        }),
         HostCommand::LoadPlugin {
             path,
             sample_rate: sr,
@@ -629,52 +676,12 @@ fn handle(
             Ok(flags) => HostResponse::RestartFlags { bits: flags.bits() },
             Err(error) => err("ServiceHostRequests", error),
         }),
-        HostCommand::CreateGui => gui_request(gui, true),
-        HostCommand::CloseGui => gui_request(gui, false),
+        HostCommand::CreateGui | HostCommand::CloseGui => HostResponse::Error {
+            message: "GUI commands require the macOS main-thread dispatcher".into(),
+        },
         HostCommand::Shutdown => HostResponse::Success {
             message: "shutting down".to_string(),
         },
-    }
-}
-
-/// The worker's handle to the main thread's GUI loop (macOS only).
-#[cfg(target_os = "macos")]
-struct GuiChannel(std::sync::mpsc::Sender<GuiRequest>);
-#[cfg(not(target_os = "macos"))]
-struct GuiChannel;
-
-/// Forward a GUI open/close to the main thread and wait for its reply.
-fn gui_request(gui: Option<&GuiChannel>, open: bool) -> HostResponse {
-    #[cfg(target_os = "macos")]
-    {
-        let Some(GuiChannel(tx)) = gui else {
-            return HostResponse::Error {
-                message: "GUI loop unavailable".to_string(),
-            };
-        };
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        if tx
-            .send(GuiRequest {
-                open,
-                reply: reply_tx,
-            })
-            .is_err()
-        {
-            return HostResponse::Error {
-                message: "GUI loop is gone".to_string(),
-            };
-        }
-        reply_rx.recv().unwrap_or(HostResponse::Error {
-            message: "GUI loop did not reply".to_string(),
-        })
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (gui, open);
-        HostResponse::Error {
-            message: "Plugin GUI is not supported across process isolation on this platform"
-                .to_string(),
-        }
     }
 }
 
@@ -694,16 +701,15 @@ mod macos {
     /// this (main) thread. The already-claimed protocol channel moves to the worker, which is
     /// the only thread that writes responses.
     pub fn run(plugin: SharedPlugin, mut protocol: ProtocolChannel) {
-        let (gui_tx, gui_rx) = mpsc::channel::<GuiRequest>();
+        let (control_tx, control_rx) = mpsc::sync_channel::<MainRequest>(1);
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
 
-        // Worker: read stdin and process commands; GUI verbs are delegated to the main loop.
-        {
+        // Worker: read stdin, process audio, and delegate controls to the main loop.
+        let worker = {
             let plugin = plugin.clone();
             std::thread::spawn(move || {
                 let stdin = io::stdin();
                 let mut sample_rate = 44100.0;
-                let gui = GuiChannel(gui_tx);
                 for line in stdin.lock().lines() {
                     let Some(command) = parse_line(line, &mut protocol) else {
                         continue;
@@ -713,22 +719,47 @@ mod macos {
                         let _ = shutdown_tx.send(());
                         break;
                     }
-                    let response = handle(command, &plugin, &mut sample_rate, Some(&gui));
+                    let requested_sample_rate = match &command {
+                        HostCommand::LoadPlugin { sample_rate, .. }
+                        | HostCommand::Reconfigure { sample_rate, .. } => Some(*sample_rate),
+                        _ => None,
+                    };
+                    let response = if matches!(
+                        command,
+                        HostCommand::Process { .. } | HostCommand::ProcessBuses { .. }
+                    ) {
+                        handle(command, &plugin, &mut sample_rate)
+                    } else {
+                        let (reply, response) = mpsc::channel();
+                        if control_tx.send(MainRequest { command, reply }).is_err() {
+                            break;
+                        }
+                        match response.recv() {
+                            Ok(response) => response,
+                            Err(_) => break,
+                        }
+                    };
+                    if !matches!(response, HostResponse::Error { .. }) {
+                        if let Some(sr) = requested_sample_rate {
+                            sample_rate = sr;
+                        }
+                    }
                     respond(&mut protocol, &response);
                 }
                 // stdin closed → ask the main loop to exit too.
                 let _ = shutdown_tx.send(());
-            });
-        }
+            })
+        };
 
-        run_event_loop(&plugin, &gui_rx, &shutdown_rx);
+        run_event_loop(&plugin, &control_rx, &shutdown_rx);
+        let _ = worker.join();
     }
 
     /// The main-thread native event pump. Interleaves AppKit event dispatch with polling
-    /// the GUI-request and shutdown channels.
+    /// the control-request and shutdown channels.
     fn run_event_loop(
         plugin: &SharedPlugin,
-        gui_rx: &mpsc::Receiver<GuiRequest>,
+        control_rx: &mpsc::Receiver<MainRequest>,
         shutdown_rx: &mpsc::Receiver<()>,
     ) {
         let mtm = MainThreadMarker::new().expect("helper UI loop must run on the main thread");
@@ -738,25 +769,38 @@ mod macos {
         app.finishLaunching();
 
         let mut window: Option<Retained<NSWindow>> = None;
+        let mut sample_rate = 44100.0;
 
         loop {
             if shutdown_rx.try_recv().is_ok() {
                 break;
             }
 
-            while let Ok(req) = gui_rx.try_recv() {
-                let response = if req.open {
-                    match open_editor_window(plugin, mtm, &app) {
+            // Bounded dispatch leaves time for native events. UI/controller calls and native
+            // editor callbacks now share this thread; the worker only enters process().
+            for _ in 0..32 {
+                let Ok(req) = control_rx.try_recv() else {
+                    break;
+                };
+                let response = match req.command {
+                    HostCommand::CreateGui => match open_editor_window(plugin, mtm, &app) {
                         Ok((w, width, height)) => {
                             window = Some(w);
                             HostResponse::GuiCreated { width, height }
                         }
                         Err(e) => HostResponse::Error { message: e },
+                    },
+                    HostCommand::CloseGui => {
+                        close_editor_window(plugin, window.take());
+                        HostResponse::Success {
+                            message: "editor closed".into(),
+                        }
                     }
-                } else {
-                    close_editor_window(plugin, window.take());
-                    HostResponse::Success {
-                        message: "editor closed".to_string(),
+                    command => {
+                        if matches!(command, HostCommand::LoadPlugin { .. }) {
+                            close_editor_window(plugin, window.take());
+                        }
+                        handle(command, plugin, &mut sample_rate)
                     }
                 };
                 let _ = req.reply.send(response);

@@ -433,6 +433,53 @@ fn clamped_bus_count<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i32, 
 /// can never drift apart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HostCommand {
+    /// Query cached MIDI controller assignments.
+    MidiControllerAssignments {
+        /// Input or output mapping direction.
+        direction: crate::audio::BusDirection,
+    },
+    /// Queue a normalized value for all parameters mapped to a controller.
+    SendMidiControllerAt {
+        /// Zero-based event bus index.
+        bus: i32,
+        /// MIDI channel.
+        channel: crate::midi::MidiChannel,
+        /// MIDI controller address.
+        controller: crate::midi::MidiController,
+        /// Normalized value in 0..=1.
+        value: f64,
+        /// Offset within the next audio block.
+        sample_offset: i32,
+    },
+    /// Deliver a live controller notification for MIDI learn.
+    NotifyLiveMidiController {
+        /// Zero-based event bus index.
+        bus: i32,
+        /// MIDI channel.
+        channel: crate::midi::MidiChannel,
+        /// MIDI controller address.
+        controller: crate::midi::MidiController,
+    },
+    /// Queue a live MIDI event and deferred learning.
+    SendLiveMidiEvent {
+        /// Live input event.
+        event: crate::midi::MidiEvent,
+    },
+    /// Query keyswitch metadata.
+    Keyswitches {
+        /// Zero-based event bus index.
+        bus: i32,
+        /// MIDI channel.
+        channel: crate::midi::MidiChannel,
+    },
+
+    /// Seek the project transport.
+    SetTransportPosition {
+        /// Position for the next block.
+        position: crate::plugin::TransportPosition,
+    },
+    /// Query the next block's project position.
+    TransportPosition,
     /// Load a plugin from the specified path, configured for the given audio settings.
     LoadPlugin {
         /// Path to the `.vst3` bundle.
@@ -773,6 +820,27 @@ pub enum HostCommand {
 /// Responses from the isolated plugin process
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HostResponse {
+    /// Reply to MidiControllerAssignments.
+    MidiControllerAssignments {
+        /// Returned assignments.
+        assignments: Vec<crate::midi::MidiControllerAssignment>,
+    },
+    /// Reply to NotifyLiveMidiController.
+    NotifyLiveMidiController {
+        /// Whether the plugin accepted the learn notification.
+        accepted: bool,
+    },
+    /// Reply to Keyswitches.
+    Keyswitches {
+        /// Returned keyswitches.
+        keyswitches: Vec<crate::midi::KeyswitchInfo>,
+    },
+
+    /// Current transport position.
+    TransportPosition {
+        /// Position for the next block.
+        position: crate::plugin::TransportPosition,
+    },
     /// Operation succeeded with message
     Success {
         /// Human-readable success detail.

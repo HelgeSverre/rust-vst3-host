@@ -71,6 +71,8 @@ const MAX_DEFERRED_CONTROLLER_SYNC: usize = 4096;
 struct MidiMappingCache {
     buses: usize,
     assignments: Vec<Option<u32>>,
+    mapped: Vec<crate::midi::MidiControllerAssignment>,
+    output: Vec<crate::midi::MidiControllerAssignment>,
 }
 
 /// Which controller-derived caches a `restartComponent` or host notification left stale.
@@ -150,6 +152,11 @@ pub struct PluginImpl {
     pub(crate) info: PluginInfo,
     pub(crate) compatibility: Vec<crate::discovery::ClassCompatibility>,
 
+    // Transport survives buffer/layout reconfiguration.
+    position: crate::plugin::TransportPosition,
+    continuous_samples: i64,
+    latency: u32,
+    tail: u32,
     // Processing state
     is_active: bool,
     is_processing: bool,
@@ -191,6 +198,7 @@ pub struct PluginImpl {
     midi_mapping_cache: MidiMappingCache,
     program_change_cache: Vec<ProgramChangeMapping>,
     dirty_caches: DirtyCaches,
+    live_controllers: ArrayQueue<(MidiChannel, crate::midi::MidiController)>,
     unit_cache: Mutex<Option<Vec<crate::plugin::PluginUnit>>>,
 
     // Host data structures
@@ -1102,7 +1110,29 @@ impl PluginImpl {
         let mut cache = MidiMappingCache {
             buses,
             assignments: vec![None; buses * MIDI_CHANNEL_COUNT * MIDI_CONTROLLER_COUNT],
+            mapped: Vec::new(),
+            output: Vec::new(),
         };
+        if let Some(controller) = self.controller.as_ref() {
+            if let Some(mapped) = super::midi_mapping::assignments(controller, kInput) {
+                for item in &mapped {
+                    if let crate::midi::MidiController::Midi1(cc) = item.controller {
+                        if let Some(index) =
+                            cache.index(item.bus, item.channel.as_index() as i16, cc)
+                        {
+                            if let Some(slot) = cache.assignments.get_mut(index) {
+                                *slot = Some(item.parameter_id);
+                            }
+                        }
+                    }
+                }
+                cache.mapped = mapped;
+                cache.output =
+                    super::midi_mapping::assignments(controller, kOutput).unwrap_or_default();
+                self.midi_mapping_cache = cache;
+                return;
+            }
+        }
         let Some(mapping) = self
             .controller
             .as_ref()
@@ -1127,6 +1157,16 @@ impl PluginImpl {
                                 * MIDI_CONTROLLER_COUNT
                                 + controller;
                             cache.assignments[index] = Some(id);
+                            if let Some(channel) = MidiChannel::from_index(channel as u8) {
+                                cache.mapped.push(crate::midi::MidiControllerAssignment {
+                                    bus: bus as i32,
+                                    channel,
+                                    controller: crate::midi::MidiController::Midi1(
+                                        controller as u16,
+                                    ),
+                                    parameter_id: id,
+                                });
+                            }
                         }
                     }
                 }
@@ -1504,6 +1544,7 @@ impl PluginImpl {
                 midi_mapping_cache: MidiMappingCache::default(),
                 program_change_cache: Vec::new(),
                 dirty_caches: DirtyCaches::default(),
+                live_controllers: ArrayQueue::new(256),
                 unit_cache: Mutex::new(None),
                 process_data: None,
                 component_handler: Some(component_handler),
@@ -1528,6 +1569,10 @@ impl PluginImpl {
                 _module: module,
                 _host_app: host_app,
                 control_thread: thread::current().id(),
+                position: Default::default(),
+                continuous_samples: 0,
+                latency: 0,
+                tail: 0,
             };
             // From here on `plugin` owns the teardown: dropping it runs the same ordered
             // sequence the guard would.
@@ -1830,6 +1875,8 @@ impl PluginImpl {
             // Create process data
             self.create_process_data()?;
             self.applied_setup = Some(self.current_setup());
+            self.latency = self.processor.getLatencySamples();
+            self.tail = self.processor.getTailSamples();
 
             Ok(())
         }
@@ -1868,6 +1915,9 @@ impl PluginImpl {
 
             // Initialize process context
             data.process_context.sampleRate = self.sample_rate;
+            data.process_context.projectTimeSamples = self.position.samples;
+            data.process_context.projectTimeMusic = self.position.quarter_notes;
+            data.process_context.continousTimeSamples = self.continuous_samples;
             if process_context_needs(
                 self.process_context_requirements,
                 IProcessContextRequirements_::Flags_::kNeedSystemTime as u32,
@@ -2175,6 +2225,11 @@ impl PluginImpl {
                 // A zero-sample flush carries events/parameter queues only. The VST3 process
                 // contract requires no audio buses or pointers for that call.
                 let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
+                if data.process_context.state & ProcessContext_::StatesAndFlags_::kSystemTimeValid
+                    != 0
+                {
+                    data.process_context.systemTime = current_system_time_nanos();
+                }
                 self._host_app.enter_data_exchange_process();
                 let process_result = self.processor.process(&mut data.process_data);
                 self._host_app.leave_data_exchange_process();
@@ -2196,6 +2251,9 @@ impl PluginImpl {
                     data.transport_tempo,
                     frames as i64,
                 );
+                self.position.samples = data.process_context.projectTimeSamples;
+                self.position.quarter_notes = data.process_context.projectTimeMusic;
+                self.continuous_samples = data.process_context.continousTimeSamples;
 
                 // Clear the staged input events AFTER processing, so the plugin got to see them
                 // and the next chunk starts from an empty list.
@@ -2383,6 +2441,106 @@ impl PluginImpl {
 }
 
 impl PluginInternal for PluginImpl {
+    fn midi_controller_assignments(
+        &self,
+        direction: crate::audio::BusDirection,
+    ) -> Result<Vec<crate::midi::MidiControllerAssignment>> {
+        Ok(match direction {
+            crate::audio::BusDirection::Input => &self.midi_mapping_cache.mapped,
+            crate::audio::BusDirection::Output => &self.midi_mapping_cache.output,
+        }
+        .clone())
+    }
+    fn send_midi_controller_at(
+        &mut self,
+        bus: i32,
+        channel: MidiChannel,
+        controller: crate::midi::MidiController,
+        value: f64,
+        offset: i32,
+    ) -> Result<()> {
+        // Copy one small assignment at a time: no allocation on the audio thread.
+        for i in 0..self.midi_mapping_cache.mapped.len() {
+            let mapping = self.midi_mapping_cache.mapped[i];
+            if mapping.bus == bus && mapping.channel == channel && mapping.controller == controller
+            {
+                self.queue_processor_parameter_at(mapping.parameter_id, value, offset)?;
+            }
+        }
+        Ok(())
+    }
+    fn notify_live_midi_controller(
+        &mut self,
+        bus: i32,
+        channel: MidiChannel,
+        controller: crate::midi::MidiController,
+    ) -> Result<bool> {
+        self.ensure_control_thread("MIDI learn notification")?;
+        Ok(self
+            .controller
+            .as_ref()
+            .is_some_and(|c| super::midi_mapping::learn(c, bus, channel, controller)))
+    }
+    fn send_live_midi_event(&mut self, event: MidiEvent) -> Result<()> {
+        self.send_midi_event(event)?;
+        if let Some(address) = event.controller_address() {
+            self.live_controllers.force_push(address);
+        }
+        Ok(())
+    }
+    fn keyswitches(
+        &self,
+        bus: i32,
+        channel: MidiChannel,
+    ) -> Result<Vec<crate::midi::KeyswitchInfo>> {
+        self.ensure_control_thread("keyswitch query")?;
+        let Some(controller) = self
+            .controller
+            .as_ref()
+            .and_then(|c| c.cast::<IKeyswitchController>())
+        else {
+            return Ok(Vec::new());
+        };
+        // SAFETY: queried on the UI thread; output structs are initialized and bounded.
+        unsafe {
+            let count = controller.getKeyswitchCount(bus, channel.as_index() as i16);
+            if !(0..=4096).contains(&count) {
+                return Err(Error::Other("invalid keyswitch count".into()));
+            }
+            let mut out = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let mut info: vst3::Steinberg::Vst::KeyswitchInfo = std::mem::zeroed();
+                if controller.getKeyswitchInfo(bus, channel.as_index() as i16, i, &mut info)
+                    == kResultOk
+                {
+                    out.push(crate::midi::KeyswitchInfo {
+                        type_id: info.typeId,
+                        title: super::utils::vst_string_to_string(&info.title),
+                        short_title: super::utils::vst_string_to_string(&info.shortTitle),
+                        key_min: info.keyswitchMin,
+                        key_max: info.keyswitchMax,
+                        remapped_key: (info.keyRemapped >= 0).then_some(info.keyRemapped),
+                        unit_id: info.unitId,
+                        flags: info.flags,
+                    });
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    fn set_transport_position(&mut self, position: crate::plugin::TransportPosition) -> Result<()> {
+        self.position = position;
+        if let Some(data) = self.process_data.as_mut() {
+            data.process_context.projectTimeSamples = position.samples;
+            data.process_context.projectTimeMusic = position.quarter_notes;
+        }
+        Ok(())
+    }
+    fn transport_position(&self) -> Result<crate::plugin::TransportPosition> {
+        Ok(self.position)
+    }
+
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
         self.set_parameter_at(id, value, 0)
     }
@@ -3380,12 +3538,11 @@ impl PluginInternal for PluginImpl {
     }
 
     fn take_host_notifications(&mut self) -> Vec<crate::plugin::HostNotification> {
-        let mut notifications = self
+        let notifications = self
             .component_handler
             .as_ref()
             .map(|handler| handler.take_host_notifications())
             .unwrap_or_default();
-        notifications.extend(self._host_app.take_progress_notifications());
         if notifications
             .iter()
             .any(crate::plugin::HostNotification::invalidates_unit_cache)
@@ -3428,6 +3585,9 @@ impl PluginInternal for PluginImpl {
             .map(|h| h.take_restart_flags())
             .unwrap_or_default();
         let bits = flags.bits();
+        if bits & (RestartFlags_::kParamTitlesChanged | RestartFlags_::kReloadComponent) != 0 {
+            *self.unit_cache.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
         // `restartComponent` can arrive on any thread, and rebuilding these tables is a burst of
         // main-thread-domain controller calls (the MIDI map alone is buses × 16 × 130 of them).
         // So record what went stale and let the control thread rebuild.
@@ -3450,6 +3610,12 @@ impl PluginInternal for PluginImpl {
             ));
         }
 
+        for _ in 0..self.live_controllers.capacity() {
+            let Some((channel, controller)) = self.live_controllers.pop() else {
+                break;
+            };
+            let _ = self.notify_live_midi_controller(0, channel, controller)?;
+        }
         let flags = self.take_restart_flags();
         if !flags.latency_changed() && !flags.io_changed() {
             return Ok(flags);
@@ -3496,6 +3662,8 @@ impl PluginInternal for PluginImpl {
                 Ok(())
             };
 
+            self.latency = self.processor.getLatencySamples();
+            self.tail = self.processor.getTailSamples();
             let reactivate_result = if was_active { self.activate() } else { Ok(()) };
 
             let resume_result = if was_processing && reactivate_result.is_ok() {
@@ -3545,11 +3713,11 @@ impl PluginInternal for PluginImpl {
     }
 
     fn latency_samples(&self) -> u32 {
-        unsafe { self.processor.getLatencySamples() }
+        self.latency
     }
 
     fn tail_samples(&self) -> u32 {
-        unsafe { self.processor.getTailSamples() }
+        self.tail
     }
 
     fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
@@ -4056,15 +4224,19 @@ impl PluginInternal for PluginImpl {
             )));
         }
         self.ensure_control_thread("MIDI learn notification")?;
-        let midi_learn = self
-            .controller
-            .as_ref()
-            .and_then(|edit_controller| edit_controller.cast::<IMidiLearn>())
-            .ok_or_else(|| Error::Other("plugin does not implement IMidiLearn".to_string()))?;
-        Self::check_controller_result(
-            unsafe { midi_learn.onLiveMIDIControllerInput(bus, channel, controller as i16) },
-            "IMidiLearn::onLiveMIDIControllerInput",
-        )
+        let channel = MidiChannel::from_index(channel as u8)
+            .ok_or_else(|| Error::InvalidParameter("invalid channel".into()))?;
+        if self.notify_live_midi_controller(
+            bus,
+            channel,
+            crate::midi::MidiController::Midi1(controller),
+        )? {
+            Ok(())
+        } else {
+            Err(Error::Other(
+                "plugin declined MIDI learn or does not support it".into(),
+            ))
+        }
     }
 
     fn set_automation_state(&mut self, state: crate::plugin::AutomationState) -> Result<()> {
@@ -4450,12 +4622,13 @@ impl PluginImpl {
         // Rebuild the table here if a restart invalidated it off-thread; a no-op on the audio
         // thread, which must never make controller calls.
         self.service_control_thread_caches();
-        if let Some(id) = self
-            .midi_mapping_cache
-            .get(0, channel.as_index() as i16, controller)
-        {
-            self.queue_processor_parameter_at(id, normalized, sample_offset)?;
-        }
+        self.send_midi_controller_at(
+            0,
+            channel,
+            crate::midi::MidiController::Midi1(controller),
+            normalized,
+            sample_offset,
+        )?;
         Ok(())
     }
 
@@ -4796,19 +4969,14 @@ fn process_context_state(requirements: Option<u32>, playing: bool) -> u32 {
             R::kNeedProjectTimeMusic as u32,
             S::kProjectTimeMusicValid as u32,
         ),
-        (R::kNeedBarPositionMusic as u32, S::kBarPositionValid as u32),
-        (R::kNeedCycleMusic as u32, S::kCycleValid as u32),
-        (R::kNeedSamplesToNextClock as u32, S::kClockValid as u32),
         (R::kNeedTempo as u32, S::kTempoValid as u32),
         (R::kNeedTimeSignature as u32, S::kTimeSigValid as u32),
-        (R::kNeedChord as u32, S::kChordValid as u32),
-        (R::kNeedFrameRate as u32, S::kSmpteValid as u32),
     ];
     let mut state = mappings
         .iter()
         .filter(|(required, _)| requirements & required != 0)
         .fold(0, |state, (_, valid)| state | valid);
-    if playing && requirements & R::kNeedTransportState as u32 != 0 {
+    if playing {
         state |= S::kPlaying as u32;
     }
     state
@@ -4832,22 +5000,15 @@ fn advance_process_context(
     frames: i64,
 ) {
     use IProcessContextRequirements_::Flags_ as R;
-    ctx.projectTimeSamples = ctx.projectTimeSamples.wrapping_add(frames);
+    let playing = ctx.state & PROCESS_CONTEXT_PLAYING != 0;
+    if playing {
+        ctx.projectTimeSamples = ctx.projectTimeSamples.saturating_add(frames);
+        if ctx.sampleRate > 0.0 {
+            ctx.projectTimeMusic += frames as f64 / ctx.sampleRate * (transport_tempo / 60.0);
+        }
+    }
     if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
         ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
-    }
-    if requirements.is_some()
-        && process_context_needs(requirements, R::kNeedSystemTime as u32)
-        && ctx.sampleRate > 0.0
-    {
-        let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
-        ctx.systemTime = ctx.systemTime.saturating_add(nanos);
-    }
-    if process_context_needs(requirements, R::kNeedProjectTimeMusic as u32) && ctx.sampleRate > 0.0
-    {
-        // Quarter notes elapsed = seconds * (BPM / 60).
-        let secs = ctx.projectTimeSamples as f64 / ctx.sampleRate;
-        ctx.projectTimeMusic = secs * (transport_tempo / 60.0);
     }
 }
 
@@ -5095,6 +5256,7 @@ mod transport_tests {
         let mut ctx: ProcessContext = unsafe { std::mem::zeroed() };
         ctx.sampleRate = 48_000.0;
         ctx.tempo = 120.0;
+        ctx.state = PROCESS_CONTEXT_PLAYING;
         // One second of audio at 48 kHz in 512-sample blocks.
         let blocks = 48_000 / 512;
         for _ in 0..blocks {
@@ -5116,7 +5278,7 @@ mod transport_tests {
         let state = process_context_state(Some(requirements), true);
         assert_ne!(state & S::kTempoValid as u32, 0);
         assert_ne!(state & S::kContTimeValid as u32, 0);
-        assert_eq!(state & S::kPlaying as u32, 0);
+        assert_ne!(state & S::kPlaying as u32, 0);
         assert_eq!(state & S::kTimeSigValid as u32, 0);
         assert_eq!(state & S::kProjectTimeMusicValid as u32, 0);
     }
@@ -5387,6 +5549,7 @@ mod midi_mapping_cache_tests {
         let mut cache = MidiMappingCache {
             buses: 1,
             assignments: vec![None; MIDI_CHANNEL_COUNT * MIDI_CONTROLLER_COUNT],
+            ..Default::default()
         };
         let controller = ControllerNumbers_::kCtrlProgramChange as u16;
         let index = cache
@@ -5506,5 +5669,43 @@ mod editor_scale_tests {
             );
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod sdk_transport_regressions {
+    use super::*;
+
+    #[test]
+    fn tempo_changes_preserve_accumulated_beats_and_stop_freezes_project_time() {
+        let mut context: ProcessContext = unsafe { std::mem::zeroed() };
+        context.sampleRate = 48_000.0;
+        context.state = process_context_state(None, true);
+        advance_process_context(&mut context, None, 120.0, 480_000);
+        assert_eq!(context.projectTimeMusic, 20.0);
+        advance_process_context(&mut context, None, 60.0, 48_000);
+        assert_eq!(context.projectTimeMusic, 21.0);
+        context.state = process_context_state(None, false);
+        advance_process_context(&mut context, None, 60.0, 48_000);
+        assert_eq!(context.projectTimeMusic, 21.0);
+        assert_eq!(context.projectTimeSamples, 528_000);
+        assert_eq!(context.continousTimeSamples, 576_000);
+    }
+
+    #[test]
+    #[allow(clippy::unnecessary_cast)]
+    fn requesting_unknown_transport_data_never_makes_it_valid() {
+        use ProcessContext_::StatesAndFlags_ as S;
+        let state = process_context_state(Some(u32::MAX), true);
+        for unsupported in [
+            S::kBarPositionValid,
+            S::kCycleValid,
+            S::kClockValid,
+            S::kChordValid,
+            S::kSmpteValid,
+        ] {
+            assert_eq!(state & unsupported as u32, 0);
+        }
+        assert_ne!(state & S::kTempoValid as u32, 0);
     }
 }

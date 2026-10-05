@@ -19,7 +19,6 @@ use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, Steinberg::Vst::*, Stei
 // initialize. `createInstance` below also vends the host-created objects they ask for
 // (IMessage/IAttributeList), used to pass data between a plugin's component and controller.
 struct ProgressState {
-    notifications: Vec<crate::plugin::HostNotification>,
     active: HashSet<u64>,
     next_id: u64,
 }
@@ -27,7 +26,6 @@ struct ProgressState {
 impl Default for ProgressState {
     fn default() -> Self {
         Self {
-            notifications: Vec::with_capacity(MAX_HOST_NOTIFICATIONS),
             active: HashSet::with_capacity(MAX_HOST_NOTIFICATIONS),
             next_id: 1,
         }
@@ -35,28 +33,18 @@ impl Default for ProgressState {
 }
 
 pub struct HostApplication {
-    progress: Mutex<ProgressState>,
     data_exchange: Arc<super::data_exchange::DataExchangeState>,
 }
 
 impl Default for HostApplication {
     fn default() -> Self {
         Self {
-            progress: Mutex::new(ProgressState::default()),
             data_exchange: super::data_exchange::DataExchangeState::new(),
         }
     }
 }
 
 impl HostApplication {
-    pub fn take_progress_notifications(&self) -> Vec<crate::plugin::HostNotification> {
-        let mut state = self
-            .progress
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        state.notifications.drain(..).collect()
-    }
-
     pub fn configure_data_exchange(
         &self,
         processor: *mut IAudioProcessor,
@@ -96,7 +84,6 @@ impl Class for HostApplication {
     type Interfaces = (
         IHostApplication,
         IPlugInterfaceSupport,
-        IProgress,
         IDataExchangeHandler,
     );
 }
@@ -114,6 +101,9 @@ impl IPlugInterfaceSupportTrait for HostApplication {
         let supported = [
             &IConnectionPoint::IID,
             &IMidiMapping::IID,
+            &IMidiMapping2::IID,
+            &IMidiLearn2::IID,
+            &IKeyswitchController::IID,
             &IUnitInfo::IID,
             &IProgramListData::IID,
             &IUnitData::IID,
@@ -228,7 +218,7 @@ impl IHostApplicationTrait for HostApplication {
     }
 }
 
-impl IProgressTrait for HostApplication {
+impl IProgressTrait for ComponentHandler {
     unsafe fn start(
         &self,
         r#type: IProgress_::ProgressType,
@@ -269,7 +259,11 @@ impl IProgressTrait for HostApplication {
             .progress
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if state.notifications.len() >= MAX_HOST_NOTIFICATIONS
+        let mut notifications = self
+            .notifications
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if notifications.len() >= MAX_HOST_NOTIFICATIONS
             || state.active.len() >= MAX_HOST_NOTIFICATIONS
         {
             return kResultFalse;
@@ -277,13 +271,11 @@ impl IProgressTrait for HostApplication {
         let id = state.next_id;
         state.next_id = state.next_id.checked_add(1).unwrap_or(1);
         state.active.insert(id);
-        state
-            .notifications
-            .push(crate::plugin::HostNotification::ProgressStarted {
-                id,
-                kind,
-                description,
-            });
+        notifications.push(crate::plugin::HostNotification::ProgressStarted {
+            id,
+            kind,
+            description,
+        });
         *out_id = id;
         kResultOk
     }
@@ -292,16 +284,18 @@ impl IProgressTrait for HostApplication {
         let Some(value) = crate::plugin::ProgressValue::new(norm_value) else {
             return kInvalidArgument;
         };
-        let mut state = self
+        let state = self
             .progress
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if !state.active.contains(&id) || state.notifications.len() >= MAX_HOST_NOTIFICATIONS {
+        let mut notifications = self
+            .notifications
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !state.active.contains(&id) || notifications.len() >= MAX_HOST_NOTIFICATIONS {
             return kResultFalse;
         }
-        state
-            .notifications
-            .push(crate::plugin::HostNotification::ProgressUpdated { id, value });
+        notifications.push(crate::plugin::HostNotification::ProgressUpdated { id, value });
         kResultOk
     }
 
@@ -310,13 +304,15 @@ impl IProgressTrait for HostApplication {
             .progress
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if !state.active.contains(&id) || state.notifications.len() >= MAX_HOST_NOTIFICATIONS {
+        let mut notifications = self
+            .notifications
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !state.active.contains(&id) || notifications.len() >= MAX_HOST_NOTIFICATIONS {
             return kResultFalse;
         }
         state.active.remove(&id);
-        state
-            .notifications
-            .push(crate::plugin::HostNotification::ProgressFinished { id });
+        notifications.push(crate::plugin::HostNotification::ProgressFinished { id });
         kResultOk
     }
 }
@@ -1634,6 +1630,7 @@ impl IContextMenuTrait for HostContextMenu {
 // Interleaving them into one ordered stream would change the public shape of both accessors
 // and is not implemented.
 pub struct ComponentHandler {
+    progress: Mutex<ProgressState>,
     // Track parameter changes from the plugin
     pub parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>,
     // Ordered log of begin/change/end gestures the editor reports, preserving their order so
@@ -1658,6 +1655,7 @@ pub struct ComponentHandler {
 impl ComponentHandler {
     pub fn new(parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>) -> Self {
         ComponentHandler {
+            progress: Mutex::new(ProgressState::default()),
             parameter_changes,
             edits: Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK))),
             restart_flags: AtomicI32::new(0),
@@ -1706,7 +1704,7 @@ impl ComponentHandler {
             .notifications
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        notifications.drain(..).collect()
+        notifications.split_off(0)
     }
 
     pub fn execute_context_menu_item(&self, menu_id: u64, item_id: u32) -> crate::Result<()> {
@@ -1744,6 +1742,8 @@ impl Class for ComponentHandler {
         IComponentHandler,
         IComponentHandler2,
         IComponentHandler3,
+        IProgress,
+        IComponentHandlerBusActivation,
         IUnitHandler,
         IUnitHandler2,
     );
@@ -1798,6 +1798,40 @@ impl IComponentHandlerTrait for ComponentHandler {
         // library handles on the host's behalf (none, currently) and which need host action.
         self.restart_flags.fetch_or(flags, Ordering::AcqRel);
         kResultOk
+    }
+}
+
+impl IComponentHandlerBusActivationTrait for ComponentHandler {
+    unsafe fn requestBusActivation(
+        &self,
+        media: i32,
+        direction: i32,
+        index: i32,
+        state: u8,
+    ) -> tresult {
+        let media_type = match media {
+            0 => crate::audio::MediaType::Audio,
+            1 => crate::audio::MediaType::Event,
+            _ => return kInvalidArgument,
+        };
+        let direction = match direction {
+            0 => crate::audio::BusDirection::Input,
+            1 => crate::audio::BusDirection::Output,
+            _ => return kInvalidArgument,
+        };
+        if index < 0 {
+            return kInvalidArgument;
+        }
+        if self.push_notification(crate::plugin::HostNotification::BusActivationRequested {
+            media_type,
+            direction,
+            bus_index: index,
+            active: state != 0,
+        }) {
+            kResultOk
+        } else {
+            kResultFalse
+        }
     }
 }
 
@@ -3156,8 +3190,12 @@ mod host_application_tests {
     fn progress_callbacks_are_bounded_ordered_and_polled() {
         use crate::plugin::{HostNotification, ProgressKind};
 
-        let host = create_host_application();
-        let progress = host.to_com_ptr::<IProgress>().unwrap();
+        let host = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
+        let progress = host
+            .to_com_ptr::<IComponentHandler>()
+            .unwrap()
+            .cast::<IProgress>()
+            .expect("SDK query path");
         let description: Vec<u16> = "Loading samples\0".encode_utf16().collect();
         let mut id = 0;
         unsafe {
@@ -3177,7 +3215,7 @@ mod host_application_tests {
             assert_eq!(progress.update(id, f64::NAN), kInvalidArgument);
         }
         assert_eq!(
-            host.take_progress_notifications(),
+            host.take_host_notifications(),
             vec![
                 HostNotification::ProgressStarted {
                     id,
@@ -3195,8 +3233,12 @@ mod host_application_tests {
 
     #[test]
     fn progress_reports_backpressure_instead_of_false_success() {
-        let host = create_host_application();
-        let progress = host.to_com_ptr::<IProgress>().unwrap();
+        let host = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
+        let progress = host
+            .to_com_ptr::<IComponentHandler>()
+            .unwrap()
+            .cast::<IProgress>()
+            .expect("SDK query path");
         let mut id = 0;
         unsafe {
             assert_eq!(
@@ -3213,10 +3255,7 @@ mod host_application_tests {
             assert_eq!(progress.update(id, 0.5), kResultFalse);
             assert_eq!(progress.finish(id), kResultFalse);
         }
-        assert_eq!(
-            host.take_progress_notifications().len(),
-            MAX_HOST_NOTIFICATIONS
-        );
+        assert_eq!(host.take_host_notifications().len(), MAX_HOST_NOTIFICATIONS);
         unsafe {
             assert_eq!(progress.finish(id), kResultOk);
         }

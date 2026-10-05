@@ -76,6 +76,8 @@ pub(crate) fn drain_commands<T>(rx: &mut Consumer<T>, mut apply: impl FnMut(T)) 
 /// mutex-based playback path so both apply transport mutation the same way.
 #[derive(Clone, Copy)]
 pub(crate) enum TransportCommand {
+    /// Explicit project position for the next block.
+    Position(crate::plugin::TransportPosition),
     /// Set the transport tempo (BPM).
     Tempo(f64),
     /// Set the transport time signature (`numerator`, `denominator`).
@@ -89,6 +91,9 @@ impl TransportCommand {
     /// all queued control. The value was validated on the control thread before being queued.
     pub(crate) fn apply(self, plugin: &mut Plugin) {
         match self {
+            TransportCommand::Position(position) => {
+                let _ = plugin.set_transport_position(position);
+            }
             TransportCommand::Tempo(bpm) => {
                 let _ = plugin.set_tempo(bpm);
             }
@@ -317,6 +322,18 @@ impl Drop for RealtimePluginRunner {
 }
 
 impl RtControl {
+    /// Queue a seek; returns false for invalid musical position or a full ring.
+    pub fn set_transport_position(&mut self, position: crate::plugin::TransportPosition) -> bool {
+        if !position.quarter_notes.is_finite() {
+            return false;
+        }
+        let ok = self
+            .tx
+            .push(RtCommand::Transport(TransportCommand::Position(position)))
+            .is_ok();
+        self.track(ok)
+    }
+
     /// Destroy a plugin handed back by a dropped [`RealtimePluginRunner`].
     ///
     /// This call never waits for the runner. It returns `true` only when a pending plugin was

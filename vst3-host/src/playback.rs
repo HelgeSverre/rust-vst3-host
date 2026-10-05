@@ -29,6 +29,7 @@ const SIDE_CHANNEL_CAPACITY: usize = 4096;
 /// A control command queued by a UI/control thread and applied on the audio thread (inside the
 /// callback, under the plugin lock it already holds) at the start of the next block.
 enum HybridCommand {
+    LiveMidi { event: MidiEvent },
     Midi { event: MidiEvent, offset: i32 },
     Param { id: u32, value: f64 },
     Transport(TransportCommand),
@@ -66,6 +67,9 @@ impl AudioSideChannels {
     /// callback indefinitely. Anything still queued is applied on the next block.
     fn apply_control(&mut self, plugin: &mut Plugin) {
         crate::realtime::drain_commands(&mut self.control_rx, |command| match command {
+            HybridCommand::LiveMidi { event } => {
+                let _ = plugin.send_live_midi_event(event);
+            }
             HybridCommand::Midi { event, offset } => {
                 let _ = plugin.send_midi_event_at(event, offset);
             }
@@ -198,6 +202,12 @@ pub struct MidiSink {
 }
 
 impl MidiSink {
+    /// Queue a live event, including deferred MIDI learn. Service the owning AudioHandle
+    /// on its control thread each UI tick to deliver learn notifications.
+    pub fn send_live_midi(&self, event: MidiEvent) -> bool {
+        queue_command(&self.control_tx, HybridCommand::LiveMidi { event })
+    }
+
     /// Queue a MIDI event for the plugin, applied at the start of the next audio block.
     ///
     /// Lock-free and non-blocking (the same path as [`AudioHandle::send_midi`]). Returns `false`
@@ -221,6 +231,27 @@ impl MidiSink {
 }
 
 impl AudioHandle {
+    /// Queue live MIDI (as opposed to sequenced input) for DSP and MIDI learn.
+    pub fn send_live_midi(&self, event: MidiEvent) -> bool {
+        self.midi_sink().send_live_midi(event)
+    }
+
+    /// Service deferred MIDI learn and plugin restart requests on the plugin's control
+    /// thread. Call once per UI tick; this briefly locks out audio processing.
+    pub fn service_host_requests(&self) -> Result<crate::plugin::RestartFlags> {
+        self.lock().service_host_requests()
+    }
+
+    /// Queue a seek for the next processing block. Returns false for a non-finite musical
+    /// position or a full command ring.
+    pub fn set_transport_position(&self, position: crate::plugin::TransportPosition) -> bool {
+        position.quarter_notes.is_finite()
+            && queue_command(
+                &self.ui.control_tx,
+                HybridCommand::Transport(TransportCommand::Position(position)),
+            )
+    }
+
     /// Lock the running plugin to send MIDI, change parameters, etc.
     ///
     /// Recovers automatically if the audio thread previously panicked while holding
