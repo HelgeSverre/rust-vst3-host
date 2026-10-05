@@ -109,6 +109,16 @@ impl PingPong {
         }
     }
 
+    /// Discard old echoes on a transport restart without reallocating delay buffers.
+    #[allow(dead_code)] // only used by the GUI example
+    pub fn clear(&mut self) {
+        self.buf_l.fill(0.0);
+        self.buf_r.fill(0.0);
+        self.w = 0;
+        self.damp = [0.0; 2];
+        self.locut = [0.0; 2];
+    }
+
     /// Change the tap length live (clamped to the buffer). Stepped changes click a little —
     /// like retuning a hardware DDL — which is fine for switching musical divisions.
     #[allow(dead_code)] // used by the GUI's delay TIME knob; the offline demo sizes at new()

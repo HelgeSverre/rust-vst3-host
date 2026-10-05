@@ -3,7 +3,7 @@
 //!   cargo run --example trance_timeline_gui                 # in-repo TestSynth (build with `just test-plugin`)
 //!   cargo run --example trance_timeline_gui -- "/path/to/Synth.vst3"
 //!
-//! Plays classic trance riffs live through the `transport::Timeline` into a VST3 synth (four
+//! Plays classic trance riffs live through the `transport::Timeline` into a VST3 synth (six
 //! embedded `.mid`s — a RIFF SELECT LCD with ◀/▶ buttons cycles between them and restarts
 //! playback; a PATCH SELECT LCD loads whole front-panel sounds), through a
 //! small trance FX chain (3-band EQ → tempo-synced dotted-1/8 ping-pong delay → Dattorro plate
@@ -18,6 +18,14 @@
 //! on a cpal output stream whose callback drives the timeline sample-synced. Synth-side knobs
 //! map onto the plugin's parameters by name (TestSynth exposes them all; other synths degrade
 //! gracefully), so pluck→lead morphs are all live knob rides here.
+//! Stop releases both parts and fades the output; Play starts the riff from the top.
+//! Restart retriggers the selected riff. Level is a smoothed master gain.
+//! Switching releases held notes on every channel; natural pad/reverb tails may decay
+//! across the change. This demo still uses Timeline's allocating event collection and
+//! is not a hard-real-time reference implementation.
+//!
+//! Silent regression tests (including the bundled TestSynth release test):
+//! `cargo test -p vst3-host --all-features --example trance_timeline_gui -- --include-ignored`
 
 #[path = "dsp/mod.rs"]
 mod dsp;
@@ -32,7 +40,7 @@ use vst3_host::{
     audio::AudioBuffers,
     midi::{MidiChannel, MidiEvent},
     transport::{MidiClip, Timeline},
-    Vst3Host,
+    Plugin, TransportPosition, Vst3Host,
 };
 
 const DEFAULT_PLUGIN: &str = concat!(
@@ -358,6 +366,10 @@ struct Shared {
     kick_on: AtomicU32,
     /// Last-selected patch (display only — the knobs hold the actual values).
     patch_index: AtomicU32,
+    playing: AtomicU32,
+    restart: AtomicU32,
+    master: AtomicU32,
+    render_errors: AtomicU32,
 }
 
 impl Shared {
@@ -373,6 +385,10 @@ impl Shared {
             riff_index: AtomicU32::new(0),
             kick_on: AtomicU32::new(0),
             patch_index: AtomicU32::new(0),
+            playing: AtomicU32::new(1),
+            restart: AtomicU32::new(0),
+            master: AtomicU32::new(0.5f32.to_bits()),
+            render_errors: AtomicU32::new(0),
         }
     }
 }
@@ -407,7 +423,7 @@ fn load_midi(bytes: &[u8]) -> (Vec<(f64, MidiEvent)>, Vec<NoteSpan>, f64) {
     let mut bpm = 140.0;
     let mut events = Vec::new();
     let mut spans = Vec::new();
-    let mut open: Vec<(u8, f64)> = Vec::new(); // (pitch, on_beat) awaiting note-off
+    let mut open: Vec<(MidiChannel, u8, f64)> = Vec::new(); // channel, pitch, start
 
     for track in &smf.tracks {
         let mut tick: u64 = 0;
@@ -431,7 +447,7 @@ fn load_midi(bytes: &[u8]) -> (Vec<(f64, MidiEvent)>, Vec<NoteSpan>, f64) {
                                     velocity: vel.as_int(),
                                 },
                             ));
-                            open.push((note, beat));
+                            open.push((ch, note, beat));
                         }
                         MidiMessage::NoteOff { key, .. } | MidiMessage::NoteOn { key, .. } => {
                             let note = key.as_int();
@@ -443,8 +459,11 @@ fn load_midi(bytes: &[u8]) -> (Vec<(f64, MidiEvent)>, Vec<NoteSpan>, f64) {
                                     velocity: 0,
                                 },
                             ));
-                            if let Some(pos) = open.iter().rposition(|(p, _)| *p == note) {
-                                let (pitch, on_beat) = open.remove(pos);
+                            if let Some(pos) = open
+                                .iter()
+                                .position(|(channel, p, _)| *channel == ch && *p == note)
+                            {
+                                let (_, pitch, on_beat) = open.remove(pos);
                                 spans.push(NoteSpan {
                                     on_beat,
                                     off_beat: beat,
@@ -880,10 +899,29 @@ impl eframe::App for App {
                 self.riff_picker(ui);
                 ui.add_space(18.0);
                 self.patch_picker(ui);
+                let playing = self.shared.playing.load(Ordering::Relaxed) != 0;
+                if ui.button(if playing { "Stop" } else { "Play" }).clicked() {
+                    self.shared
+                        .playing
+                        .store(u32::from(!playing), Ordering::Relaxed);
+                }
+                if ui.button("Restart").clicked() {
+                    self.shared.restart.fetch_add(1, Ordering::Relaxed);
+                }
+                let mut master = getf(&self.shared.master);
+                if ui
+                    .add(egui::Slider::new(&mut master, 0.0..=1.0).text("Level"))
+                    .changed()
+                {
+                    setf(&self.shared.master, master);
+                }
+                if self.shared.render_errors.load(Ordering::Relaxed) != 0 {
+                    ui.colored_label(SW_RED, "Audio error — restart the example");
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new("v0.5 · drag knobs · double-click resets")
+                        egui::RichText::new("drag knobs · double-click resets")
                             .size(9.0)
                             .color(egui::Color32::from_gray(220)),
                     );
@@ -981,8 +1019,42 @@ impl eframe::App for App {
             );
         });
 
-        ctx.request_repaint(); // keep the playhead moving
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
+}
+
+/// Release tracked notes on every channel, including the channel-2 pad. Raw CC123
+/// alone is insufficient: VST3 controllers are mapped parameters, not input CC events.
+fn release_notes(plugin: &mut Plugin) -> vst3_host::Result<()> {
+    for index in 0..16 {
+        if let Some(channel) = MidiChannel::from_index(index) {
+            plugin.send_midi_event(MidiEvent::ControlChange {
+                channel,
+                controller: 64,
+                value: 0,
+            })?;
+        }
+    }
+    plugin.midi_panic()
+}
+
+fn is_lead_event(event: MidiEvent) -> bool {
+    matches!(
+        event,
+        MidiEvent::NoteOn {
+            channel: MidiChannel::Ch1,
+            ..
+        } | MidiEvent::NoteOff {
+            channel: MidiChannel::Ch1,
+            ..
+        }
+    )
+}
+
+fn frames_until_loop(clock: u64, end: u64, remaining: usize, max_block: usize) -> usize {
+    remaining
+        .min(max_block)
+        .min(end.saturating_sub(clock) as usize)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1026,7 +1098,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A second instance renders the pad part to its own bus, so the delay + reverb can stay
     // on the lead while the pad joins the mix dry (reverbed pads mud up fast). The lead
     // instance mutes its channel-2 part; the pad instance mutes channel 1 and plays the
-    // Lush Pad preset on channel 2. Both receive the same timeline events.
+    // Lush Pad preset on channel 2. Events are routed to one part only, including when
+    // a third-party synth lacks TestSynth's part-level controls.
     let mut pad_plugin = host_builder.load_plugin(&plugin_path)?;
     let has_parts = find_param(&plugin, "Ch1 Level").is_some();
     if has_parts {
@@ -1063,7 +1136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     plugin.start_processing()?;
     pad_plugin.start_processing()?;
 
-    // Build the timeline for a riff: fresh clip, tempo, and a re-synced dotted-1/8 delay.
+    // Prepare each riff's clip, tempo, and loop length before starting audio.
     let make_timeline = move |riff: &AudioRiff| {
         let mut clip = MidiClip::new();
         for &(beat, ev) in &riff.events {
@@ -1071,14 +1144,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let timeline = Timeline::new(sr, riff.bpm).with_clip(clip);
         let total_frames = timeline.beat_to_frame(riff.total_beats).max(1);
-        // Buffer one full beat — the TIME knob's largest division; the knob retunes the tap.
-        let delay = PingPong::new((60.0 / riff.bpm * sr) as usize, sr as f32);
         let samples_per_beat = sr * 60.0 / riff.bpm;
-        (timeline, total_frames, delay, samples_per_beat)
+        (timeline, total_frames, samples_per_beat)
     };
     let mut current_riff = 0usize;
-    let (mut timeline, mut total_frames, mut delay, mut samples_per_beat) =
-        make_timeline(&audio_riffs[current_riff]);
+    // Prebuild every clip and reserve the slowest riff's full-beat delay off the audio thread.
+    let mut prepared_riffs: Vec<_> = audio_riffs.iter().map(make_timeline).collect();
+    let max_beat = prepared_riffs
+        .iter()
+        .map(|(_, _, beat)| *beat as usize)
+        .max()
+        .unwrap_or(1);
+    let mut delay = PingPong::new(max_beat, sr as f32);
 
     let shared = Arc::new(Shared::new());
     let shared_audio = shared.clone();
@@ -1107,6 +1184,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Only push knob values to the plugin when they actually change.
     let mut last_sent: Vec<f32> = vec![f32::NAN; param_ids.len()];
 
+    let mut buf = AudioBuffers::new(0, 2, max_block, sr);
+    let mut pad_buf = AudioBuffers::new(0, 2, max_block, sr);
+    let mut was_playing = true;
+    let mut restart_seen = 0;
+    let mut master_gain = 0.0f32;
+    let gain_step = 1.0 / (sr as f32 * 0.01); // 10 ms ramp avoids hard mute/level jumps.
+
     let config = cpal::StreamConfig {
         channels: channels as u16,
         sample_rate: sr as u32,
@@ -1115,144 +1199,212 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = device.build_output_stream(
         config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let frames = data.len() / channels.max(1);
-            if frames == 0 {
-                return;
-            }
-            // Riff switch from the RIFF SELECT buttons: rebuild the timeline (new tempo,
-            // re-synced delay), silence held notes, and restart from the top.
-            let want = shared_audio.riff_index.load(Ordering::Relaxed) as usize % audio_riffs.len();
-            if want != current_riff {
-                current_riff = want;
-                (timeline, total_frames, delay, samples_per_beat) =
-                    make_timeline(&audio_riffs[current_riff]);
-                next_kick = 0.0;
-                for p in [&mut plugin, &mut pad_plugin] {
-                    let _ = p.send_midi_event(MidiEvent::ControlChange {
-                        channel: MidiChannel::Ch1,
-                        controller: 123,
-                        value: 0,
-                    }); // CC 123 = all notes off
-                }
-            }
-            // Loop the riff.
-            if timeline.sample_clock() >= total_frames {
-                timeline.seek_frame(0);
-                next_kick = 0.0;
-                for p in [&mut plugin, &mut pad_plugin] {
-                    let _ = p.send_midi_event(MidiEvent::ControlChange {
-                        channel: MidiChannel::Ch1,
-                        controller: 123,
-                        value: 0,
-                    }); // CC 123 = all notes off
-                }
-            }
-            // Live knobs → plugin params (by name-resolved id, change-detected).
-            for (i, id) in param_ids.iter().enumerate() {
-                if let Some(id) = id {
-                    let v = getf(&shared_audio.values[i]);
-                    if (v - last_sent[i]).abs() > 1e-5 || last_sent[i].is_nan() {
-                        let _ = plugin.set_parameter(*id, v as f64);
-                        last_sent[i] = v;
-                    }
-                }
-            }
-            if let Some(id) = pad_level_id {
-                let v = getf(&shared_audio.values[IDX_PAD_LEVEL]);
-                if (v - last_sent[IDX_PAD_LEVEL]).abs() > 1e-5 || last_sent[IDX_PAD_LEVEL].is_nan()
-                {
-                    let _ = pad_plugin.set_parameter(id, v as f64);
-                    last_sent[IDX_PAD_LEVEL] = v;
-                }
-            }
-            // Drive the timeline for this block.
-            let block_start = timeline.sample_clock() as f64;
-            let block = timeline.advance_block(frames);
-            for (ev, off) in block.midi {
-                let _ = plugin.send_midi_event_at(ev, off);
-                let _ = pad_plugin.send_midi_event_at(ev, off);
-            }
-            let mut buf = AudioBuffers::new(0, 2, frames, sr);
-            let mut pad_buf = AudioBuffers::new(0, 2, frames, sr);
-            let pad_ok = pad_plugin.process_audio(&mut pad_buf).is_ok();
-            if plugin.process_audio(&mut buf).is_ok() {
-                let (mut l, mut r) = (buf.outputs[0].clone(), buf.outputs[1].clone());
-                eq.process(&mut l, &mut r);
-                let division =
-                    DIVISIONS[division_index(getf(&shared_audio.values[IDX_DELAY_TIME]))].1;
-                delay.set_delay((division * samples_per_beat) as usize);
-                delay.process(
-                    &mut l,
-                    &mut r,
-                    getf(&shared_audio.values[IDX_DELAY_FB]),
-                    getf(&shared_audio.values[IDX_DELAY_MIX]),
-                );
-                reverb.decay = getf(&shared_audio.values[IDX_VERB_DECAY]);
-                reverb.process(&mut l, &mut r, getf(&shared_audio.values[IDX_VERB_MIX]));
-                // The pad bus joins here — dry (post lead FX), but before the sidechain so
-                // it pumps with everything else.
-                if pad_ok {
-                    for (dst, src) in l.iter_mut().zip(pad_buf.outputs[0].iter()) {
-                        *dst += src;
-                    }
-                    for (dst, src) in r.iter_mut().zip(pad_buf.outputs[1].iter()) {
-                        *dst += src;
-                    }
-                }
-                if shared_audio.kick_on.load(Ordering::Relaxed) != 0 {
-                    // Sidechain pump keyed to the beat grid: duck the synth bus, then lay the
-                    // kick on top unducked (same order as the offline demo).
-                    let depth = getf(&shared_audio.values[IDX_KICK_PUMP]) * 0.8;
-                    for (i, (ls, rs)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
-                        let t = ((block_start + i as f64) % samples_per_beat) / sr;
-                        let g = 1.0 - depth * (-(t / 0.085)).exp() as f32;
-                        *ls *= g;
-                        *rs *= g;
-                    }
-                    let (level, punch, kdecay) = (
-                        getf(&shared_audio.values[IDX_KICK_LEVEL]),
-                        getf(&shared_audio.values[IDX_KICK_PUNCH]),
-                        getf(&shared_audio.values[IDX_KICK_DECAY]),
-                    );
-                    // Render the kick, splitting the block at beat boundaries so triggers
-                    // land sample-accurately.
-                    let mut i = 0usize;
-                    while i < frames {
-                        let abs = block_start + i as f64;
-                        if next_kick <= abs {
-                            kick.trigger();
-                            next_kick += samples_per_beat;
-                            continue;
+            let playing = shared_audio.playing.load(Ordering::Relaxed) != 0;
+            let restart = shared_audio.restart.load(Ordering::Relaxed);
+            let transport_changed = playing != was_playing || restart != restart_seen;
+            was_playing = playing;
+            restart_seen = restart;
+            let mut cursor = 0;
+            while cursor < data.len() / channels.max(1) {
+                let remaining = data.len() / channels.max(1) - cursor;
+                // Select the prepared timeline, clear old echoes, release held notes,
+                // and restart from the top. Stop/Play and Restart use the same reset path.
+                let want =
+                    shared_audio.riff_index.load(Ordering::Relaxed) as usize % audio_riffs.len();
+                if want != current_riff || (cursor == 0 && transport_changed) {
+                    current_riff = want;
+                    prepared_riffs[current_riff].0.seek_frame(0);
+                    delay.clear();
+                    kick = Kick::new(sr as f32);
+                    next_kick = 0.0;
+                    for p in [&mut plugin, &mut pad_plugin] {
+                        if release_notes(p).is_err() {
+                            shared_audio.render_errors.fetch_add(1, Ordering::Relaxed);
                         }
-                        let span = (((next_kick - abs).ceil() as usize).max(1)).min(frames - i);
-                        kick.process(
-                            &mut l[i..i + span],
-                            &mut r[i..i + span],
-                            level,
-                            punch,
-                            kdecay,
+                    }
+                }
+                let (ref mut timeline, total_frames, samples_per_beat) =
+                    prepared_riffs[current_riff];
+                // Loop exactly at the end, even when it lands inside a device callback.
+                if timeline.sample_clock() >= total_frames {
+                    timeline.seek_frame(0);
+                    next_kick = 0.0;
+                    for p in [&mut plugin, &mut pad_plugin] {
+                        if release_notes(p).is_err() {
+                            shared_audio.render_errors.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                let frames = if playing {
+                    frames_until_loop(timeline.sample_clock(), total_frames, remaining, max_block)
+                } else {
+                    remaining.min(max_block)
+                };
+                if frames == 0 {
+                    break;
+                }
+                // Live knobs → plugin params (by name-resolved id, change-detected).
+                for (i, id) in param_ids.iter().enumerate() {
+                    if let Some(id) = id {
+                        let v = getf(&shared_audio.values[i]);
+                        if (v - last_sent[i]).abs() > 1e-5 || last_sent[i].is_nan() {
+                            let _ = plugin.set_parameter(*id, v as f64);
+                            last_sent[i] = v;
+                        }
+                    }
+                }
+                if let Some(id) = pad_level_id {
+                    let v = getf(&shared_audio.values[IDX_PAD_LEVEL]);
+                    if (v - last_sent[IDX_PAD_LEVEL]).abs() > 1e-5
+                        || last_sent[IDX_PAD_LEVEL].is_nan()
+                    {
+                        let _ = pad_plugin.set_parameter(id, v as f64);
+                        last_sent[IDX_PAD_LEVEL] = v;
+                    }
+                }
+                // Drive the timeline for this block.
+                let block_start = timeline.sample_clock() as f64;
+                for p in [&mut plugin, &mut pad_plugin] {
+                    let _ = p.set_tempo(audio_riffs[current_riff].bpm);
+                    let _ = p.set_playing(playing);
+                    let _ = p.set_transport_position(TransportPosition {
+                        samples: timeline.sample_clock() as i64,
+                        quarter_notes: timeline.frame_to_beat(timeline.sample_clock()),
+                    });
+                }
+                if playing {
+                    let block = timeline.advance_block(frames);
+                    for (ev, off) in block.midi {
+                        let part = if is_lead_event(ev) {
+                            &mut plugin
+                        } else {
+                            &mut pad_plugin
+                        };
+                        if part.send_midi_event_at(ev, off).is_err() {
+                            shared_audio.render_errors.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                for buffers in [&mut buf, &mut pad_buf] {
+                    buffers.block_size = frames;
+                    for channel in &mut buffers.outputs {
+                        channel.resize(frames, 0.0);
+                        channel.fill(0.0);
+                    }
+                }
+                let pad_ok = pad_plugin.process_audio(&mut pad_buf).is_ok();
+                if !pad_ok {
+                    shared_audio.render_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                if plugin.process_audio(&mut buf).is_ok() {
+                    let (left, right) = buf.outputs.split_at_mut(1);
+                    let (l, r) = (&mut left[0][..], &mut right[0][..]);
+                    eq.process(l, r);
+                    let division =
+                        DIVISIONS[division_index(getf(&shared_audio.values[IDX_DELAY_TIME]))].1;
+                    delay.set_delay((division * samples_per_beat) as usize);
+                    delay.process(
+                        l,
+                        r,
+                        getf(&shared_audio.values[IDX_DELAY_FB]),
+                        getf(&shared_audio.values[IDX_DELAY_MIX]),
+                    );
+                    reverb.decay = getf(&shared_audio.values[IDX_VERB_DECAY]);
+                    reverb.process(l, r, getf(&shared_audio.values[IDX_VERB_MIX]));
+                    // The pad bus joins here — dry (post lead FX), but before the sidechain so
+                    // it pumps with everything else.
+                    if pad_ok {
+                        for (dst, src) in l.iter_mut().zip(pad_buf.outputs[0].iter()) {
+                            *dst += src
+                                * if pad_level_id.is_some() {
+                                    1.0
+                                } else {
+                                    getf(&shared_audio.values[IDX_PAD_LEVEL])
+                                };
+                        }
+                        for (dst, src) in r.iter_mut().zip(pad_buf.outputs[1].iter()) {
+                            *dst += src
+                                * if pad_level_id.is_some() {
+                                    1.0
+                                } else {
+                                    getf(&shared_audio.values[IDX_PAD_LEVEL])
+                                };
+                        }
+                    }
+                    if playing && shared_audio.kick_on.load(Ordering::Relaxed) != 0 {
+                        // Sidechain pump keyed to the beat grid: duck the synth bus, then lay the
+                        // kick on top unducked (same order as the offline demo).
+                        let depth = getf(&shared_audio.values[IDX_KICK_PUMP]) * 0.8;
+                        for (i, (ls, rs)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
+                            let t = ((block_start + i as f64) % samples_per_beat) / sr;
+                            let g = 1.0 - depth * (-(t / 0.085)).exp() as f32;
+                            *ls *= g;
+                            *rs *= g;
+                        }
+                        let (level, punch, kdecay) = (
+                            getf(&shared_audio.values[IDX_KICK_LEVEL]),
+                            getf(&shared_audio.values[IDX_KICK_PUNCH]),
+                            getf(&shared_audio.values[IDX_KICK_DECAY]),
                         );
-                        i += span;
+                        // Render the kick, splitting the block at beat boundaries so triggers
+                        // land sample-accurately.
+                        let mut i = 0usize;
+                        while i < frames {
+                            let abs = block_start + i as f64;
+                            if next_kick <= abs {
+                                kick.trigger();
+                                next_kick += samples_per_beat;
+                                continue;
+                            }
+                            let span = (((next_kick - abs).ceil() as usize).max(1)).min(frames - i);
+                            kick.process(
+                                &mut l[i..i + span],
+                                &mut r[i..i + span],
+                                level,
+                                punch,
+                                kdecay,
+                            );
+                            i += span;
+                        }
+                    } else {
+                        // Keep the trigger armed on the next beat boundary while switched off.
+                        next_kick = ((block_start + frames as f64) / samples_per_beat).ceil()
+                            * samples_per_beat;
+                    }
+                    let target_gain = if playing {
+                        getf(&shared_audio.master)
+                    } else {
+                        0.0
+                    };
+                    for (i, frame) in data[cursor * channels..(cursor + frames) * channels]
+                        .chunks_mut(channels)
+                        .enumerate()
+                    {
+                        master_gain += (target_gain - master_gain).clamp(-gain_step, gain_step);
+                        // Soft clip: resonance + delay feedback can push peaks past full scale.
+                        let (lv, rv) = (
+                            l.get(i).copied().unwrap_or(0.0).tanh(),
+                            r.get(i).copied().unwrap_or(0.0).tanh(),
+                        );
+                        for (ch, out) in frame.iter_mut().enumerate() {
+                            *out = master_gain
+                                * if channels == 1 {
+                                    (lv + rv) * 0.5
+                                } else if ch % 2 == 0 {
+                                    lv
+                                } else {
+                                    rv
+                                };
+                        }
                     }
                 } else {
-                    // Keep the trigger armed on the next beat boundary while switched off.
-                    next_kick = ((block_start + frames as f64) / samples_per_beat).ceil()
-                        * samples_per_beat;
+                    data[cursor * channels..(cursor + frames) * channels].fill(0.0);
+                    shared_audio.render_errors.fetch_add(1, Ordering::Relaxed);
                 }
-                for (i, frame) in data.chunks_mut(channels.max(1)).enumerate() {
-                    // Soft clip: resonance + delay feedback can push peaks past full scale.
-                    let (lv, rv) = (
-                        l.get(i).copied().unwrap_or(0.0).tanh(),
-                        r.get(i).copied().unwrap_or(0.0).tanh(),
-                    );
-                    for (ch, out) in frame.iter_mut().enumerate() {
-                        *out = if ch % 2 == 0 { lv } else { rv };
-                    }
-                }
-            } else {
-                data.fill(0.0);
+                cursor += frames;
             }
-            let beats = timeline.sample_clock() as f64 / samples_per_beat;
+            let beats = prepared_riffs[current_riff].0.sample_clock() as f64
+                / prepared_riffs[current_riff].2;
             setf(&shared_audio.playhead_beats, beats as f32);
         },
         move |err| eprintln!("audio stream error: {err}"),
@@ -1278,4 +1430,122 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loop_boundary_splits_a_device_block_without_losing_frames() {
+        let mut clock = 950;
+        let mut remaining = 512;
+        let mut spans = Vec::new();
+        while remaining > 0 {
+            if clock == 1000 {
+                clock = 0;
+            }
+            let frames = frames_until_loop(clock, 1000, remaining, 8192);
+            assert!(frames > 0);
+            spans.push(frames);
+            clock += frames as u64;
+            remaining -= frames;
+        }
+        assert_eq!(spans, [50, 462]);
+        assert_eq!(clock, 462);
+        assert_eq!(frames_until_loop(0, 100_000, 20_000, 8192), 8192);
+    }
+
+    #[test]
+    fn piano_roll_matches_notes_by_channel_and_routes_parts_once() {
+        use midly::{Format, Header, TrackEvent};
+        let event = |delta: u32, channel: u8, velocity: u8| TrackEvent {
+            delta: delta.into(),
+            kind: TrackEventKind::Midi {
+                channel: channel.into(),
+                message: MidiMessage::NoteOn {
+                    key: 60.into(),
+                    vel: velocity.into(),
+                },
+            },
+        };
+        let smf = Smf {
+            header: Header::new(Format::SingleTrack, Timing::Metrical(480.into())),
+            tracks: vec![vec![
+                event(0, 0, 100),
+                event(120, 1, 100),
+                event(120, 0, 0),
+                event(120, 1, 0),
+            ]],
+        };
+        let mut bytes = Vec::new();
+        smf.write_std(&mut bytes).unwrap();
+        let (events, spans, _) = load_midi(&bytes);
+        assert_eq!(
+            (spans[0].on_beat, spans[0].off_beat, spans[0].pad),
+            (0.0, 0.5, false)
+        );
+        assert_eq!(
+            (spans[1].on_beat, spans[1].off_beat, spans[1].pad),
+            (0.25, 0.75, true)
+        );
+        assert!(is_lead_event(events[0].1));
+        assert!(!is_lead_event(events[1].1));
+    }
+
+    #[test]
+    #[ignore = "Requires bundled TestSynth; renders offline without an audio device"]
+    fn riff_change_releases_the_channel_two_pad_without_a_scheduled_note_off() {
+        let mut host = Vst3Host::builder()
+            .sample_rate(48_000.0)
+            .block_size(512)
+            .build()
+            .unwrap();
+        let mut plugin = host
+            .load_plugin(DEFAULT_PLUGIN)
+            .expect("build with just test-plugin");
+        for (name, value) in [("Ch1 Level", 0.0), ("Ch2 Level", 1.0), ("Ch2 Program", 1.0)] {
+            let id = find_param(&plugin, name).expect("TestSynth parameter");
+            plugin.set_parameter(id, value).unwrap();
+        }
+        plugin.start_processing().unwrap();
+        plugin.send_midi_note(60, 100, MidiChannel::Ch2).unwrap();
+        let mut buffers = AudioBuffers::new(0, 2, 512, 48_000.0);
+        for _ in 0..100 {
+            plugin.process_audio(&mut buffers).unwrap();
+        }
+        let peak = |buffers: &AudioBuffers| {
+            buffers
+                .outputs
+                .iter()
+                .flatten()
+                .fold(0.0f32, |p, x| p.max(x.abs()))
+        };
+        assert!(peak(&buffers) > 1e-3, "pad should be held before switching");
+        // Reproduce the old switch path: CC123 on channel 1 cannot release this pad.
+        plugin
+            .send_midi_event(MidiEvent::ControlChange {
+                channel: MidiChannel::Ch1,
+                controller: 123,
+                value: 0,
+            })
+            .unwrap();
+        for _ in 0..1000 {
+            plugin.process_audio(&mut buffers).unwrap();
+        }
+        assert!(
+            peak(&buffers) > 1e-3,
+            "old switch path should leave the pad held"
+        );
+        release_notes(&mut plugin).unwrap();
+        // Preserve the musical release; it must decay instead of staying gated forever.
+        for _ in 0..1000 {
+            plugin.process_audio(&mut buffers).unwrap();
+        }
+        assert!(
+            peak(&buffers) < 1e-5,
+            "old pad still sounding after its release"
+        );
+        plugin.stop_processing().unwrap();
+    }
 }
