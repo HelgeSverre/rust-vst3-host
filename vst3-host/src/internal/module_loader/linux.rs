@@ -14,8 +14,10 @@ use vst3::Steinberg::IPluginFactory;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use libloading::{Library, Symbol};
 
-/// Function signature for ModuleEntry
-type ModuleEntryFunc = unsafe extern "C" fn() -> bool;
+/// Function signature for ModuleEntry: `bool ModuleEntry (void* sharedLibraryHandle)`. The
+/// module receives the handle `dlopen` returned for it, which the SDK keeps to find the
+/// module's own resources.
+type ModuleEntryFunc = unsafe extern "C" fn(*mut std::ffi::c_void) -> bool;
 
 /// Function signature for ModuleExit
 type ModuleExitFunc = unsafe extern "C" fn() -> bool;
@@ -73,6 +75,12 @@ impl LinuxModule {
             })?;
             log::debug!("Shared object loaded successfully");
 
+            // ModuleEntry receives the dlopen handle. libloading hands it out only by
+            // converting the library to its raw form, so take it and wrap it again.
+            let library: libloading::os::unix::Library = library.into();
+            let handle = library.into_raw();
+            let library: Library = libloading::os::unix::Library::from_raw(handle).into();
+
             // Step 2: Get ModuleEntry function (REQUIRED)
             log::debug!("Step 2: Getting ModuleEntry function...");
             let module_entry = library
@@ -96,7 +104,7 @@ impl LinuxModule {
 
             // Step 4: Call ModuleEntry (MUST be called before GetPluginFactory)
             log::debug!("Step 4: Calling ModuleEntry...");
-            let entry_result = module_entry();
+            let entry_result = module_entry(handle);
             if !entry_result {
                 return Err(Error::PluginLoadFailed(
                     "ModuleEntry function returned false".to_string(),
