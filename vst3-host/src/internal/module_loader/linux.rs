@@ -57,9 +57,13 @@ impl LinuxModule {
 
             // A modern VST3 is a bundle DIRECTORY (Contents/x86_64-linux/foo.so); resolve to the
             // inner .so so dlopen gets a file (and the arch diagnostic can read its header).
-            // Falls back to the given path for the legacy single-file layout.
-            let binary =
-                crate::discovery::get_vst3_binary_path(path).unwrap_or_else(|_| path.to_path_buf());
+            // A bundle with no binary for this process's architecture fails here, saying so.
+            // Anything else is the legacy single-file layout and loads as given.
+            let binary = if path.is_dir() {
+                crate::discovery::get_vst3_binary_path(path)?
+            } else {
+                path.to_path_buf()
+            };
 
             // Step 1: Load the library
             log::debug!("Step 1: Loading shared object: {}", binary.display());

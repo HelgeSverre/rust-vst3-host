@@ -1077,33 +1077,74 @@ pub fn discover_plugins_safe(paths: &[PathBuf], timeout: Duration) -> SafeDiscov
     report
 }
 
-/// The `Contents` folders of a Windows VST3 bundle that hold a binary this process can load,
-/// in order of preference. An Arm64 process loads Arm64X (Arm64 and Arm64EC in one binary) or
-/// plain Arm64. An x64 process loads x64, and Arm64EC when it runs on Arm64 Windows.
-#[cfg(target_os = "windows")]
-const WINDOWS_ARCH_FOLDERS: &[&str] = if cfg!(target_arch = "aarch64") {
-    &["arm64x-win", "arm64-win"]
-} else if cfg!(target_arch = "x86_64") {
-    &["x86_64-win", "arm64ec-win"]
-} else if cfg!(target_arch = "x86") {
-    &["x86-win"]
-} else {
-    &[]
-};
+/// The `Contents` folders of a Windows VST3 bundle holding a binary that a process built for
+/// `arch` (a `std::env::consts::ARCH` value) can load, its own architecture's first.
+///
+/// Which binaries load where is the compatibility table of Steinberg's plug-in format doc: an
+/// Arm64 process loads Arm64 and Arm64X (Arm64 and Arm64EC code in one binary); an Arm64EC
+/// process Arm64EC, Arm64X and x64, in the SDK's `module_win32.cpp` order; an x64 process x64,
+/// and Arm64EC and Arm64X too when it runs emulated on Arm64 Windows. Compiled into tests on
+/// every platform, so CI checks the lists wherever it runs.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_arch_folders(arch: &str, on_arm64_windows: bool) -> &'static [&'static str] {
+    match arch {
+        "x86" => &["x86-win"],
+        "x86_64" if on_arm64_windows => &["x86_64-win", "arm64ec-win", "arm64x-win"],
+        "x86_64" => &["x86_64-win"],
+        "arm64ec" => &["arm64ec-win", "arm64x-win", "x86_64-win"],
+        "aarch64" => &["arm64-win", "arm64x-win"],
+        _ => &[],
+    }
+}
 
-/// The `Contents` folder of a Linux VST3 bundle that holds a binary this process can load.
-#[cfg(target_os = "linux")]
-const LINUX_ARCH_FOLDERS: &[&str] = if cfg!(target_arch = "aarch64") {
-    &["aarch64-linux"]
-} else if cfg!(target_arch = "x86_64") {
-    &["x86_64-linux"]
-} else if cfg!(target_arch = "x86") {
-    &["i386-linux"]
-} else {
-    &[]
-};
+/// The `Contents` folder of a Linux VST3 bundle holding a binary that a process built for
+/// `arch` (a `std::env::consts::ARCH` value) can load.
+#[cfg(any(test, target_os = "linux"))]
+fn linux_arch_folders(arch: &str) -> &'static [&'static str] {
+    match arch {
+        "x86" => &["i386-linux"],
+        "x86_64" => &["x86_64-linux"],
+        "aarch64" => &["aarch64-linux"],
+        _ => &[],
+    }
+}
 
-/// Platform-specific VST3 binary path resolution
+/// The first binary with `extension` in the first of the bundle's `Contents/<folder>` folders
+/// that holds one.
+#[cfg(any(test, target_os = "windows", target_os = "linux"))]
+fn find_arch_binary(bundle_path: &Path, folders: &[&str], extension: &str) -> Option<PathBuf> {
+    let contents = bundle_path.join("Contents");
+    folders.iter().find_map(|folder| {
+        std::fs::read_dir(contents.join(folder))
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.extension() == Some(std::ffi::OsStr::new(extension)))
+    })
+}
+
+/// The error for a bundle without a binary this process can load. The bundle exists, so this is
+/// a failure to load it rather than a missing plugin.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn no_loadable_binary(bundle_path: &Path, folders: &[&str]) -> crate::Error {
+    let searched = if folders.is_empty() {
+        "none".to_owned()
+    } else {
+        folders.join(", ")
+    };
+    crate::Error::PluginLoadFailed(format!(
+        "{} has no binary this {} process can load (Contents folders searched: {searched})",
+        bundle_path.display(),
+        std::env::consts::ARCH,
+    ))
+}
+
+/// Platform-specific VST3 binary path resolution.
+///
+/// A path to a file is returned as given. On macOS the binary comes from `Contents/MacOS`. On
+/// Windows and Linux only the `Contents/<arch>` folders holding a binary this process can load
+/// are searched, its own architecture's first, so a bundle that ships binaries only for other
+/// architectures is an `Error::PluginLoadFailed`.
 pub fn get_vst3_binary_path(bundle_path: &Path) -> Result<PathBuf> {
     // If it's already pointing to the binary, use it
     if bundle_path.is_file() {
@@ -1143,20 +1184,12 @@ pub fn get_vst3_binary_path(bundle_path: &Path) -> Result<PathBuf> {
         if bundle_path.is_dir() {
             // Only the per-arch Contents folders this process can load; a bundle may ship
             // binaries for several architectures side by side.
-            let contents = bundle_path.join("Contents");
-            for contents_path in WINDOWS_ARCH_FOLDERS
-                .iter()
-                .map(|folder| contents.join(folder))
-            {
-                if let Ok(entries) = std::fs::read_dir(&contents_path) {
-                    for entry in entries.flatten() {
-                        let file_path = entry.path();
-                        if file_path.extension() == Some(std::ffi::OsStr::new("vst3")) {
-                            return Ok(file_path);
-                        }
-                    }
-                }
-            }
+            let folders = windows_arch_folders(
+                std::env::consts::ARCH,
+                crate::internal::module_loader::windows::runs_on_arm64_windows(),
+            );
+            return find_arch_binary(bundle_path, folders, "vst3")
+                .ok_or_else(|| no_loadable_binary(bundle_path, folders));
         }
     }
 
@@ -1164,22 +1197,9 @@ pub fn get_vst3_binary_path(bundle_path: &Path) -> Result<PathBuf> {
     {
         // Linux: Similar to Windows
         if bundle_path.is_dir() {
-            // Only the per-arch Contents folder this process can load; a bundle may ship
-            // binaries for several architectures side by side.
-            let contents_path = bundle_path.join("Contents");
-            for arch_path in LINUX_ARCH_FOLDERS
-                .iter()
-                .map(|folder| contents_path.join(folder))
-            {
-                if let Ok(entries) = std::fs::read_dir(&arch_path) {
-                    for entry in entries.flatten() {
-                        let file_path = entry.path();
-                        if file_path.extension() == Some(std::ffi::OsStr::new("so")) {
-                            return Ok(file_path);
-                        }
-                    }
-                }
-            }
+            let folders = linux_arch_folders(std::env::consts::ARCH);
+            return find_arch_binary(bundle_path, folders, "so")
+                .ok_or_else(|| no_loadable_binary(bundle_path, folders));
         }
     }
 
@@ -1189,50 +1209,161 @@ pub fn get_vst3_binary_path(bundle_path: &Path) -> Result<PathBuf> {
     )))
 }
 
-#[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
+#[cfg(test)]
 mod bundle_binary_tests {
     use super::*;
 
-    /// A bundle that ships binaries for several architectures resolves to the one this
-    /// process can load, whatever order the folders are listed in.
-    #[test]
-    fn a_multi_arch_bundle_resolves_to_the_native_binary() {
-        #[cfg(target_os = "windows")]
-        let (folders, native, extension) = (
-            &[
-                "arm64-win",
-                "arm64ec-win",
-                "arm64x-win",
-                "x86-win",
-                "x86_64-win",
-            ][..],
-            WINDOWS_ARCH_FOLDERS,
-            "vst3",
-        );
-        #[cfg(target_os = "linux")]
-        let (folders, native, extension) = (
-            &["aarch64-linux", "i386-linux", "x86_64-linux"][..],
-            LINUX_ARCH_FOLDERS,
-            "so",
-        );
-        let Some(expected) = native.first() else {
-            return;
-        };
-        let bundle =
-            std::env::temp_dir().join(format!("vst3-host-multi-arch-{}.vst3", std::process::id()));
-        for folder in folders {
-            let dir = bundle.join("Contents").join(folder);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join(format!("Test.{extension}")), b"").unwrap();
+    /// A bundle in the temp dir with an empty `Test.<extension>` in each of `folders`, removed
+    /// on drop.
+    struct TempBundle(PathBuf);
+
+    impl TempBundle {
+        fn new(folders: &[&str], extension: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let bundle = std::env::temp_dir().join(format!(
+                "vst3-host-multi-arch-{}-{}.vst3",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            // A bundle left by a killed run with the same process id would add stray binaries.
+            let _ = std::fs::remove_dir_all(&bundle);
+            for folder in folders {
+                let dir = bundle.join("Contents").join(folder);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join(format!("Test.{extension}")), b"").unwrap();
+            }
+            Self(bundle)
         }
-        let found = get_vst3_binary_path(&bundle);
-        std::fs::remove_dir_all(&bundle).unwrap();
-        let found = found.unwrap();
+    }
+
+    impl Drop for TempBundle {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The folders each kind of Windows process looks in, in order, written out apart from
+    /// `windows_arch_folders` so a wrong entry there can't become its own expectation.
+    #[test]
+    fn a_windows_process_looks_only_in_folders_it_can_load_its_own_first() {
+        // (process architecture, runs on Arm64 Windows, folders looked in)
+        let cases: &[(&str, bool, &[&str])] = &[
+            ("x86", false, &["x86-win"]),
+            ("x86_64", false, &["x86_64-win"]),
+            ("x86_64", true, &["x86_64-win", "arm64ec-win", "arm64x-win"]),
+            (
+                "arm64ec",
+                true,
+                &["arm64ec-win", "arm64x-win", "x86_64-win"],
+            ),
+            ("aarch64", true, &["arm64-win", "arm64x-win"]),
+        ];
+        for &(arch, on_arm64, expected) in cases {
+            assert_eq!(
+                windows_arch_folders(arch, on_arm64),
+                expected,
+                "{arch} process, on Arm64 Windows: {on_arm64}"
+            );
+        }
+    }
+
+    /// The folder each kind of Linux process looks in.
+    #[test]
+    fn a_linux_process_looks_only_in_its_own_folder() {
+        for (arch, expected) in [
+            ("x86", "i386-linux"),
+            ("x86_64", "x86_64-linux"),
+            ("aarch64", "aarch64-linux"),
+        ] {
+            assert_eq!(linux_arch_folders(arch), [expected], "{arch} process");
+        }
+    }
+
+    /// The first listed folder that holds a binary wins: without the process's own binary the
+    /// next folder it can load is taken, and folders it can't load are never looked in.
+    #[test]
+    fn a_missing_native_binary_falls_back_in_order_to_a_loadable_one() {
+        let bundle = TempBundle::new(&["fallback-a", "fallback-b", "unloadable"], "vst3");
+        let found_in = |folders: &[&str]| {
+            let binary = find_arch_binary(&bundle.0, folders, "vst3")?;
+            Some(binary.parent()?.file_name()?.to_str()?.to_owned())
+        };
+        let a_first = found_in(&["native", "fallback-a", "fallback-b"]);
+        assert_eq!(a_first.as_deref(), Some("fallback-a"));
+        let b_first = found_in(&["native", "fallback-b", "fallback-a"]);
+        assert_eq!(b_first.as_deref(), Some("fallback-b"));
+        assert_eq!(found_in(&["native"]), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    const ALL_FOLDERS: &[&str] = &[
+        "arm64-win",
+        "arm64ec-win",
+        "arm64x-win",
+        "x86-win",
+        "x86_64-win",
+    ];
+    #[cfg(target_os = "windows")]
+    const EXTENSION: &str = "vst3";
+
+    #[cfg(target_os = "linux")]
+    const ALL_FOLDERS: &[&str] = &["aarch64-linux", "i386-linux", "x86_64-linux"];
+    #[cfg(target_os = "linux")]
+    const EXTENSION: &str = "so";
+
+    /// This process's own folder, and folders holding binaries it can never load, written out
+    /// apart from the code under test.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn own_and_unloadable_folders() -> (&'static str, &'static [&'static str]) {
+        match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("windows", "x86") => (
+                "x86-win",
+                &["arm64-win", "arm64ec-win", "arm64x-win", "x86_64-win"],
+            ),
+            ("windows", "x86_64") => ("x86_64-win", &["arm64-win", "x86-win"]),
+            ("windows", "arm64ec") => ("arm64ec-win", &["arm64-win", "x86-win"]),
+            ("windows", "aarch64") => ("arm64-win", &["arm64ec-win", "x86-win", "x86_64-win"]),
+            ("linux", "x86") => ("i386-linux", &["aarch64-linux", "x86_64-linux"]),
+            ("linux", "x86_64") => ("x86_64-linux", &["aarch64-linux", "i386-linux"]),
+            ("linux", "aarch64") => ("aarch64-linux", &["i386-linux", "x86_64-linux"]),
+            (os, arch) => panic!("no VST3 bundle folder is known for {arch} {os}"),
+        }
+    }
+
+    /// `get_vst3_binary_path` resolves a bundle that ships every architecture's binary to this
+    /// process's own. With the old fixed search order, x64 hosts picked the Arm64 binary.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn a_multi_arch_bundle_resolves_to_this_processs_own_binary() {
+        let (own, _) = own_and_unloadable_folders();
+        let bundle = TempBundle::new(ALL_FOLDERS, EXTENSION);
+        let found = get_vst3_binary_path(&bundle.0).unwrap();
         assert_eq!(
             found.parent().and_then(|folder| folder.file_name()),
-            Some(std::ffi::OsStr::new(expected)),
+            Some(std::ffi::OsStr::new(own)),
             "{}",
             found.display()
+        );
+    }
+
+    /// Loading a bundle that only ships other architectures' binaries fails as a load failure
+    /// naming this process's architecture, not with the OS's error for loading the folder.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn a_bundle_with_only_other_architectures_binaries_fails_to_load_saying_so() {
+        let (_, unloadable) = own_and_unloadable_folders();
+        let bundle = TempBundle::new(unloadable, EXTENSION);
+        let Err(error) = crate::internal::module_loader::load_module(&bundle.0) else {
+            panic!("loaded a bundle with only other architectures' binaries");
+        };
+        assert!(
+            matches!(error, crate::Error::PluginLoadFailed(_)),
+            "{error}"
+        );
+        let arch = std::env::consts::ARCH;
+        assert!(
+            error.to_string().contains(&format!("this {arch} process")),
+            "{error}"
         );
     }
 }

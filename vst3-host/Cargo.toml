@@ -64,7 +64,7 @@ objc2-app-kit = { version = "0.3.2", features = [
 ] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi"] }
+winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi", "processthreadsapi"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # X11 plugin-editor window support (ported from the khremeviuc1004 fork). Requires
