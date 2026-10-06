@@ -2414,7 +2414,7 @@ impl PluginImpl {
             self.process_chunks(buffers, total)
         };
 
-        self.chunk_events.clear();
+        return_unstaged_events(&mut self.chunk_events, &self.input_events);
         self.pending_param_changes.clear();
         result
     }
@@ -3049,6 +3049,16 @@ impl PluginInternal for PluginImpl {
     fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
         self.input_events.add_event(event);
         Ok(())
+    }
+
+    fn reserve_sysex(&mut self, messages: usize, bytes: usize) -> Result<()> {
+        self.input_events.reserve_payloads(messages, bytes);
+        Ok(())
+    }
+
+    fn send_sysex_from_slice_at(&mut self, bytes: &[u8], sample_offset: i32) -> bool {
+        self.input_events
+            .add_data_from_slice(0, sample_offset, 0, bytes)
     }
 
     fn start_processing(&mut self) -> Result<()> {
@@ -4815,6 +4825,15 @@ fn stage_chunk_events(
     }));
 }
 
+/// Empty the block's event slots into `list`'s reserve. A slot still full here was never
+/// staged, because the block failed part way, and its data buffer goes back to the reserve
+/// rather than to the allocator.
+fn return_unstaged_events(queued: &mut Vec<Option<PluginEvent>>, list: &HostEventList) {
+    for event in queued.drain(..).flatten() {
+        list.recycle(event);
+    }
+}
+
 /// Ordered teardown for a component that has been initialized but whose `PluginImpl` doesn't
 /// exist yet.
 ///
@@ -5316,6 +5335,28 @@ mod transport_tests {
 mod chunked_block_tests {
     use super::*;
     use crate::internal::com_implementations::create_event_list;
+
+    /// A block that fails part way leaves events in its slots; a reserved SysEx buffer among
+    /// them goes back to the reserve, not to the allocator.
+    #[test]
+    fn an_unstaged_sysex_buffer_returns_to_the_reserve() {
+        let list = HostEventList::new();
+        list.reserve_payloads(1, 8);
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0, 1, 0xf7]));
+        let mut slots = Vec::with_capacity(4);
+        list.take_into_slots(&mut slots);
+        assert!(
+            !list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]),
+            "the reserve is out"
+        );
+
+        return_unstaged_events(&mut slots, &list);
+        assert!(slots.is_empty());
+        assert!(
+            list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]),
+            "the buffer came back"
+        );
+    }
 
     fn note_on_at(offset: i32, pitch: i16) -> PluginEvent {
         PluginEvent {
