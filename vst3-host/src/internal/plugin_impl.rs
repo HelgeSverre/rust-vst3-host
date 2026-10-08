@@ -2225,9 +2225,7 @@ impl PluginImpl {
                 // A zero-sample flush carries events/parameter queues only. The VST3 process
                 // contract requires no audio buses or pointers for that call.
                 let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
-                if data.process_context.state & ProcessContext_::StatesAndFlags_::kSystemTimeValid
-                    != 0
-                {
+                if data.process_context.state & PROCESS_CONTEXT_SYSTEM_TIME_VALID != 0 {
                     data.process_context.systemTime = current_system_time_nanos();
                 }
                 self._host_app.enter_data_exchange_process();
@@ -4936,6 +4934,10 @@ const PROCESS_CONTEXT_STATE: u32 = (ProcessContext_::StatesAndFlags_::kPlaying
 /// state can be toggled at runtime without disturbing the validity flags.
 #[allow(clippy::unnecessary_cast)] // the `as u32` is needed where the constant is i32 (Windows)
 const PROCESS_CONTEXT_PLAYING: u32 = ProcessContext_::StatesAndFlags_::kPlaying as u32;
+
+#[allow(clippy::unnecessary_cast)] // the constant is i32 on Windows and u32 elsewhere
+const PROCESS_CONTEXT_SYSTEM_TIME_VALID: u32 =
+    ProcessContext_::StatesAndFlags_::kSystemTimeValid as u32;
 
 #[allow(clippy::unnecessary_cast)]
 fn process_context_needs(requirements: Option<u32>, flag: u32) -> bool {

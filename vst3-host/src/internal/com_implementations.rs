@@ -3369,6 +3369,9 @@ mod connection_proxy_tests {
 mod host_event_list_tests {
     use super::*;
 
+    #[allow(clippy::unnecessary_cast)] // the constant is i32 on Windows and u32 elsewhere
+    const MIDI_SYSEX: u32 = DataEvent_::DataTypes_::kMidiSysEx as u32;
+
     /// `process()` is the input list's only drain and it returns early while the plugin isn't
     /// processing, so queueing MIDI at a stopped plugin must not grow the list forever.
     #[test]
@@ -3405,7 +3408,7 @@ mod host_event_list_tests {
         raw.r#type = Event_::EventTypes_::kDataEvent as u16;
         raw.__field0.data = DataEvent {
             size: source.len() as u32,
-            r#type: DataEvent_::DataTypes_::kMidiSysEx,
+            r#type: MIDI_SYSEX,
             bytes: source_ptr,
         };
 
@@ -3436,7 +3439,7 @@ mod host_event_list_tests {
         raw.r#type = Event_::EventTypes_::kDataEvent as u16;
         raw.__field0.data = DataEvent {
             size: 1,
-            r#type: DataEvent_::DataTypes_::kMidiSysEx,
+            r#type: MIDI_SYSEX,
             bytes: ptr::null(),
         };
         assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultFalse);
