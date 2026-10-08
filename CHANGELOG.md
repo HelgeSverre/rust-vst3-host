@@ -4,6 +4,18 @@ All notable changes to `vst3-host` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: new features bump the minor version).
 
+## [Unreleased]
+
+### Fixed
+
+- **The audio thread no longer waits on a plugin editor's `performEdit`.** `process` drained
+  the editor's edits under a blocking lock that `performEdit` takes on the editor's thread.
+  It now uses `try_lock`; a held lock leaves the edits for the next block, so none is lost.
+- **SysEx can be sent from the audio thread with no allocation or free.**
+  `Plugin::reserve_sysex` reserves buffers before processing, and
+  `Plugin::send_sysex_from_slice_at` copies a message into one; `process` hands each buffer
+  back to the reserve instead of freeing it. `send_sysex` is unchanged and still allocates.
+
 ## [0.9.0] - 2026-07-28
 
 ### Changed (VST3 spec-compliance pass — behavior, some breaking)

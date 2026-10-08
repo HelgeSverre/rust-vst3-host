@@ -12,7 +12,7 @@ use crate::{
 };
 use crossbeam_queue::ArrayQueue;
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread::{self, ThreadId};
 use vst3::Steinberg::Vst::BusDirections_::*;
 use vst3::Steinberg::Vst::Event_::EventTypes_::*;
@@ -2127,7 +2127,7 @@ impl PluginImpl {
         frames: usize,
         is_last: bool,
     ) -> Result<()> {
-        let result = if let Some(ref mut data) = self.process_data {
+        if let Some(ref mut data) = self.process_data {
             unsafe {
                 // Clear output events only - input events should be preserved for processing
                 self.output_events.clear();
@@ -2167,29 +2167,11 @@ impl PluginImpl {
                 // twice in the same block, which is idempotent.) Drained here at offset 0 and
                 // stashed for the host's display poll (get_parameter_changes).
                 if let Some(ref handler) = self.component_handler {
-                    if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
-                        if !gui_changes.is_empty() {
-                            for &(id, value) in gui_changes.iter() {
-                                data.input_param_changes.enqueue(id, 0, value);
-                            }
-                            if let Ok(mut stash) = self.gui_param_changes_for_host.lock() {
-                                // Bounded: nothing drains the stash unless the host polls
-                                // `get_parameter_changes`, and the realtime runner never does, so
-                                // an unbounded append here would grow forever and reallocate on
-                                // the audio thread. Both buffers are pre-reserved to the cap, so
-                                // the steady-state append allocates nothing.
-                                let room = MAX_EDITOR_FEEDBACK.saturating_sub(stash.len());
-                                if room >= gui_changes.len() {
-                                    stash.append(&mut gui_changes);
-                                } else {
-                                    stash.extend(gui_changes.drain(..room));
-                                    gui_changes.clear();
-                                }
-                            } else {
-                                gui_changes.clear();
-                            }
-                        }
-                    }
+                    drain_editor_edits(
+                        &handler.parameter_changes,
+                        &data.input_param_changes,
+                        &self.gui_param_changes_for_host,
+                    );
                 }
 
                 match buffers {
@@ -2316,9 +2298,7 @@ impl PluginImpl {
             }
         } else {
             Err(Error::Other("Process data not initialized".to_string()))
-        };
-
-        result
+        }
     }
 
     /// Distribute the block's queued input events over its chunks and process each one.
@@ -2434,7 +2414,7 @@ impl PluginImpl {
             self.process_chunks(buffers, total)
         };
 
-        self.chunk_events.clear();
+        return_unstaged_events(&mut self.chunk_events, &self.input_events);
         self.pending_param_changes.clear();
         result
     }
@@ -3069,6 +3049,16 @@ impl PluginInternal for PluginImpl {
     fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
         self.input_events.add_event(event);
         Ok(())
+    }
+
+    fn reserve_sysex(&mut self, messages: usize, bytes: usize) -> Result<()> {
+        self.input_events.reserve_payloads(messages, bytes);
+        Ok(())
+    }
+
+    fn send_sysex_from_slice_at(&mut self, bytes: &[u8], sample_offset: i32) -> bool {
+        self.input_events
+            .add_data_from_slice(0, sample_offset, 0, bytes)
     }
 
     fn start_processing(&mut self) -> Result<()> {
@@ -4768,6 +4758,54 @@ fn chunk_offset(
     }
 }
 
+/// Move the edits the plugin's editor made with `performEdit` into the processor's input
+/// queue at offset 0, and into the stash the host's display poll drains.
+///
+/// Runs on the audio thread, so it never waits: `performEdit` takes `edits` on the editor's
+/// thread and the host's poll takes `stash` on its own, and either may hold its lock when a
+/// block starts. A lock that is held leaves the edits where they are for the next block,
+/// which loses none of them and delays them by one block. A poisoned `edits` is skipped and a
+/// poisoned `stash` gets no copy, as with a blocking lock. Returns whether the edits were
+/// drained.
+fn drain_editor_edits(
+    edits: &Mutex<Vec<(u32, f64)>>,
+    input: &ParameterChanges,
+    stash: &Mutex<Vec<(u32, f64)>>,
+) -> bool {
+    let Ok(mut gui_changes) = edits.try_lock() else {
+        return false;
+    };
+    if gui_changes.is_empty() {
+        return true;
+    }
+    // Taken before any edit is enqueued, so a busy stash cannot leave an edit delivered to
+    // the processor and still pending for the next block.
+    let mut stash = match stash.try_lock() {
+        Ok(stash) => Some(stash),
+        Err(TryLockError::Poisoned(_)) => None,
+        Err(TryLockError::WouldBlock) => return false,
+    };
+    for &(id, value) in gui_changes.iter() {
+        input.enqueue(id, 0, value);
+    }
+    let Some(stash) = stash.as_mut() else {
+        gui_changes.clear();
+        return true;
+    };
+    // Bounded: nothing drains the stash unless the host polls `get_parameter_changes`, and
+    // the realtime runner never does, so an unbounded append here would grow forever and
+    // reallocate on the audio thread. Both buffers are pre-reserved to the cap, so the
+    // steady-state append allocates nothing.
+    let room = MAX_EDITOR_FEEDBACK.saturating_sub(stash.len());
+    if room >= gui_changes.len() {
+        stash.append(&mut gui_changes);
+    } else {
+        stash.extend(gui_changes.drain(..room));
+        gui_changes.clear();
+    }
+    true
+}
+
 /// Stage the events belonging to one chunk into the plugin-facing event list, rebasing each
 /// offset to the chunk start (see [`chunk_offset`]). Replaces whatever the list held, so each
 /// chunk of a split block sees exactly its own events, in order and with their spacing intact.
@@ -4785,6 +4823,15 @@ fn stage_chunk_events(
             event
         })
     }));
+}
+
+/// Empty the block's event slots into `list`'s reserve. A slot still full here was never
+/// staged, because the block failed part way, and its data buffer goes back to the reserve
+/// rather than to the allocator.
+fn return_unstaged_events(queued: &mut Vec<Option<PluginEvent>>, list: &HostEventList) {
+    for event in queued.drain(..).flatten() {
+        list.recycle(event);
+    }
 }
 
 /// Ordered teardown for a component that has been initialized but whose `PluginImpl` doesn't
@@ -5289,6 +5336,28 @@ mod chunked_block_tests {
     use super::*;
     use crate::internal::com_implementations::create_event_list;
 
+    /// A block that fails part way leaves events in its slots; a reserved SysEx buffer among
+    /// them goes back to the reserve, not to the allocator.
+    #[test]
+    fn an_unstaged_sysex_buffer_returns_to_the_reserve() {
+        let list = HostEventList::new();
+        list.reserve_payloads(1, 8);
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0, 1, 0xf7]));
+        let mut slots = Vec::with_capacity(4);
+        list.take_into_slots(&mut slots);
+        assert!(
+            !list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]),
+            "the reserve is out"
+        );
+
+        return_unstaged_events(&mut slots, &list);
+        assert!(slots.is_empty());
+        assert!(
+            list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]),
+            "the buffer came back"
+        );
+    }
+
     fn note_on_at(offset: i32, pitch: i16) -> PluginEvent {
         PluginEvent {
             bus_index: 0,
@@ -5707,5 +5776,99 @@ mod sdk_transport_regressions {
             assert_eq!(state & unsupported as u32, 0);
         }
         assert_ne!(state & S::kTempoValid as u32, 0);
+    }
+}
+
+#[cfg(test)]
+mod editor_edit_drain_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    type Edits = Arc<Mutex<Vec<(u32, f64)>>>;
+
+    /// Runs one drain while another thread holds `held`, and returns its answer, or an error
+    /// when it has not answered in ten seconds: a drain that waits for the lock fails rather
+    /// than hangs, since the holder lets go only after the drain answers or the time is up.
+    fn drain_while_held(
+        held: &Edits,
+        edits: &Edits,
+        input: &ParameterChanges,
+        stash: &Edits,
+    ) -> std::result::Result<bool, mpsc::RecvTimeoutError> {
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder = {
+            let held = Arc::clone(held);
+            thread::spawn(move || {
+                let _guard = held.lock().unwrap();
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        };
+        held_rx.recv().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let answer = thread::scope(|s| {
+            s.spawn(|| {
+                done_tx
+                    .send(drain_editor_edits(edits, input, stash))
+                    .unwrap()
+            });
+            let answer = done_rx.recv_timeout(Duration::from_secs(10));
+            release_tx.send(()).unwrap();
+            answer
+        });
+        holder.join().unwrap();
+        answer
+    }
+
+    fn lists(edits: Vec<(u32, f64)>) -> (Edits, ParameterChanges, Edits) {
+        let stash = Vec::with_capacity(MAX_EDITOR_FEEDBACK);
+        (
+            Arc::new(Mutex::new(edits)),
+            ParameterChanges::default(),
+            Arc::new(Mutex::new(stash)),
+        )
+    }
+
+    /// The audio thread must not wait for `performEdit`: while the editor's thread holds the
+    /// edit list, the drain returns at once and keeps the edits for the next block.
+    #[test]
+    fn a_held_edit_list_is_skipped_and_drained_the_next_block() {
+        let (edits, input, stash) = lists(vec![(7, 0.25), (9, 0.5)]);
+
+        let drained = drain_while_held(&edits, &edits, &input, &stash);
+        assert_eq!(drained, Ok(false), "the drain waited on the editor's lock");
+        assert_eq!(unsafe { input.getParameterCount() }, 0);
+        assert_eq!(
+            edits.lock().unwrap().len(),
+            2,
+            "the edits are kept for the next block"
+        );
+
+        assert!(drain_editor_edits(&edits, &input, &stash));
+        assert_eq!(unsafe { input.getParameterCount() }, 2);
+        assert!(edits.lock().unwrap().is_empty());
+        assert_eq!(*stash.lock().unwrap(), vec![(7, 0.25), (9, 0.5)]);
+    }
+
+    /// The host's display poll holds the stash: the drain neither waits nor hands the
+    /// processor an edit it would hand it again next block.
+    #[test]
+    fn a_held_stash_leaves_every_edit_pending() {
+        let (edits, input, stash) = lists(vec![(3, 1.0)]);
+
+        let drained = drain_while_held(&stash, &edits, &input, &stash);
+        assert_eq!(
+            drained,
+            Ok(false),
+            "the drain waited on the display poll's lock"
+        );
+        assert_eq!(unsafe { input.getParameterCount() }, 0);
+        assert_eq!(*edits.lock().unwrap(), vec![(3, 1.0)]);
+
+        assert!(drain_editor_edits(&edits, &input, &stash));
+        assert_eq!(unsafe { input.getParameterCount() }, 1);
+        assert_eq!(*stash.lock().unwrap(), vec![(3, 1.0)]);
     }
 }
