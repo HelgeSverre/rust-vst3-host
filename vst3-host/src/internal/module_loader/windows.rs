@@ -43,8 +43,40 @@ pub struct WindowsModule {
 fn arch_mismatch_detail(binary: &Path) -> Option<String> {
     use super::arch;
     let data = std::fs::read(binary).ok()?;
-    let name = arch::pe_machine_name(arch::detect_pe_machine(&data)?);
-    arch::mismatch_detail("DLL", name)
+    let machine = arch::detect_pe_machine(&data)?;
+    // An x64 process on Arm64 Windows loads Arm64X binaries, whose header says ARM64, so there
+    // the header can't show a mismatch.
+    if machine == arch::PE_MACHINE_ARM64 && runs_on_arm64_windows() {
+        return None;
+    }
+    arch::mismatch_detail("DLL", arch::pe_machine_name(machine))
+}
+
+/// Whether this process runs on Arm64 Windows, where an x64 process is emulated and can load
+/// Arm64EC and Arm64X binaries as well as x64 ones.
+///
+/// `IsWow64Process2` is looked up at run time: Windows before 10 1709 lacks it, and also
+/// predates x64 emulation on Arm64, so its absence means "no".
+pub(crate) fn runs_on_arm64_windows() -> bool {
+    type IsWow64Process2 =
+        unsafe extern "system" fn(*mut std::ffi::c_void, *mut u16, *mut u16) -> i32;
+    let Ok(kernel32) = libloading::os::windows::Library::open_already_loaded("kernel32.dll") else {
+        return false;
+    };
+    // SAFETY: the signature matches the documented `IsWow64Process2`, and `kernel32` is held
+    // for the duration of the call.
+    unsafe {
+        let Ok(is_wow64_process2) = kernel32.get::<IsWow64Process2>(b"IsWow64Process2\0") else {
+            return false;
+        };
+        let (mut process_machine, mut native_machine) = (0, 0);
+        is_wow64_process2(
+            winapi::um::processthreadsapi::GetCurrentProcess().cast(),
+            &mut process_machine,
+            &mut native_machine,
+        ) != 0
+            && native_machine == super::arch::PE_MACHINE_ARM64
+    }
 }
 
 impl WindowsModule {
@@ -56,9 +88,13 @@ impl WindowsModule {
 
             // A modern VST3 is a bundle DIRECTORY (Contents/x86_64-win/Foo.vst3); resolve to the
             // inner DLL so LoadLibrary gets a file (and the arch diagnostic can read its header).
-            // Falls back to the given path for the legacy single-file layout.
-            let binary =
-                crate::discovery::get_vst3_binary_path(path).unwrap_or_else(|_| path.to_path_buf());
+            // A bundle with no binary for this process's architecture fails here, saying so.
+            // Anything else is the legacy single-file layout and loads as given.
+            let binary = if path.is_dir() {
+                crate::discovery::get_vst3_binary_path(path)?
+            } else {
+                path.to_path_buf()
+            };
 
             // Step 1: Load the library
             log::debug!("Step 1: Loading DLL: {}", binary.display());

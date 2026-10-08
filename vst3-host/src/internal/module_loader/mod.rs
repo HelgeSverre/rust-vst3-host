@@ -87,7 +87,7 @@ pub fn load_module(path: &Path) -> Result<Box<dyn VstModule>> {
 /// message, mirroring the macOS Mach-O diagnostic. Unused on macOS itself, hence the allow.
 #[allow(dead_code)]
 pub(crate) mod arch {
-    /// The architecture this host binary was built for (the plugin must provide it too).
+    /// The architecture this host binary was built for.
     #[cfg(target_arch = "aarch64")]
     pub(crate) const HOST_ARCH: &str = "arm64";
     #[cfg(target_arch = "x86_64")]
