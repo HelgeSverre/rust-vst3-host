@@ -8,7 +8,7 @@ All notable changes to `vst3-host` are documented here. The format is based on
 
 ### Added
 
-- MIDI controller assignment queries, one-to-many MIDI 2 controller mappings, live MIDI
+- MIDI controller assignment queries, one-to-many `IMidiMapping2` controller mappings, live MIDI
   learning, and keyswitch/articulation metadata. Live input can be delivered through
   `Plugin::send_live_midi_event`, `AudioHandle::send_live_midi`, and `MidiSink::send_live_midi`;
   service deferred learning with `service_host_requests` on the control thread.
