@@ -155,7 +155,7 @@ fn safe_discovery_that_runs_reports_no_error() {
     if probe_dir.file_name() == Some(std::ffi::OsStr::new("deps")) {
         probe_dir = probe_dir.parent().expect("profile dir");
     }
-    let probe = probe_dir.join("vst3-host-probe");
+    let probe = probe_dir.join(format!("vst3-host-probe{}", std::env::consts::EXE_SUFFIX));
     if !probe.exists() {
         eprintln!("vst3-host-probe not built at {probe:?}; skipping");
         return;

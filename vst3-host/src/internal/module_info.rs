@@ -871,8 +871,13 @@ mod tests {
 
     #[test]
     fn reads_sdk_generated_bundle_metadata() {
-        let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test_plugins/Dexed.vst3");
-        let info = read(&bundle)
+        let bundle = TempBundle::new();
+        std::fs::write(
+            bundle.0.join("Contents/Resources/moduleinfo.json"),
+            include_bytes!("fixtures/dexed-moduleinfo.json"),
+        )
+        .expect("write SDK-generated metadata fixture");
+        let info = read(&bundle.0)
             .expect("valid moduleinfo")
             .expect("moduleinfo exists");
         assert_eq!(info.name, "Dexed");

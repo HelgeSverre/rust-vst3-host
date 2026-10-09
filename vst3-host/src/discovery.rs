@@ -822,7 +822,7 @@ pub(crate) fn running_from_cargo_target(exe_dir: &Path) -> bool {
 /// override via the `VST3_HOST_PROBE_PATH` environment variable. Kept self-contained here
 /// rather than reusing the isolation module's resolver so the two stay decoupled.
 fn find_probe_binary() -> std::result::Result<PathBuf, String> {
-    const PROBE_NAME: &str = "vst3-host-probe";
+    let probe_name = format!("vst3-host-probe{}", std::env::consts::EXE_SUFFIX);
 
     if let Some(p) = std::env::var_os("VST3_HOST_PROBE_PATH").map(PathBuf::from) {
         if p.exists() {
@@ -839,7 +839,7 @@ fn find_probe_binary() -> std::result::Result<PathBuf, String> {
     let exe_dir = exe_path.parent().ok_or("Failed to get exe directory")?;
 
     // Same directory as the current executable.
-    let direct = exe_dir.join(PROBE_NAME);
+    let direct = exe_dir.join(&probe_name);
     if direct.exists() {
         return Ok(direct);
     }
@@ -847,7 +847,7 @@ fn find_probe_binary() -> std::result::Result<PathBuf, String> {
     // If we're in an examples/ directory, try the parent (where bins land).
     if exe_dir.file_name() == Some(std::ffi::OsStr::new("examples")) {
         if let Some(parent) = exe_dir.parent() {
-            let p = parent.join(PROBE_NAME);
+            let p = parent.join(&probe_name);
             if p.exists() {
                 return Ok(p);
             }
@@ -867,7 +867,7 @@ fn find_probe_binary() -> std::result::Result<PathBuf, String> {
         let mut current = exe_dir;
         while let Some(parent) = current.parent() {
             for profile in ["debug", "release"] {
-                let candidate = parent.join("target").join(profile).join(PROBE_NAME);
+                let candidate = parent.join("target").join(profile).join(&probe_name);
                 if candidate.exists() {
                     return Ok(candidate);
                 }
@@ -880,7 +880,7 @@ fn find_probe_binary() -> std::result::Result<PathBuf, String> {
     }
 
     Err(format!(
-        "Probe executable '{PROBE_NAME}' not found near {} or in target/{{debug,release}}. \
+        "Probe executable '{probe_name}' not found near {} or in target/{{debug,release}}. \
          Build it with `cargo build --bin vst3-host-probe`, or set VST3_HOST_PROBE_PATH.",
         exe_dir.display()
     ))

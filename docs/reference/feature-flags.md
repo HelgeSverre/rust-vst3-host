@@ -11,7 +11,7 @@
 
 ```toml
 [dependencies]
-vst3-host = "0.9"   # = cpal-backend + process-isolation
+vst3-host = "0.10"   # = cpal-backend + process-isolation
 ```
 
 `process-isolation` is on by default so the helper binary always builds and isolation
@@ -33,7 +33,7 @@ and don't need a child process):
 
 ```toml
 [dependencies]
-vst3-host = { version = "0.9", default-features = false }
+vst3-host = { version = "0.10", default-features = false }
 ```
 
 Without `cpal-backend`, `play`/`simple::play` are unavailable; drive plugins with

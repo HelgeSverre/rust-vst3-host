@@ -4,6 +4,48 @@ All notable changes to `vst3-host` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: new features bump the minor version).
 
+## [0.10.0] - 2026-10-09
+
+### Added
+
+- MIDI controller assignment queries, one-to-many MIDI 2 controller mappings, live MIDI
+  learning, and keyswitch/articulation metadata. Live input can be delivered through
+  `Plugin::send_live_midi_event`, `AudioHandle::send_live_midi`, and `MidiSink::send_live_midi`;
+  service deferred learning with `service_host_requests` on the control thread.
+- `TransportPosition` and explicit transport seeking through `Plugin`, `AudioHandle`, and
+  `RtControl`. Timeline playback now synchronizes the plugin's tempo and project position.
+- `Plugin::is_editor_open`, `attached_editor_size`, and `attached_editor_can_resize` query an
+  existing editor without creating a temporary view. These queries describe in-process views.
+- Bus activation requests are exposed as `HostNotification::BusActivationRequested`, leaving
+  the host in control of whether to change routing.
+
+### Fixed
+
+- Multi-architecture VST3 bundles select binaries compatible with the host process. Windows
+  on Arm supports the appropriate Arm64EC/Arm64X fallbacks; incompatible bundles report a
+  clear load error naming the process architecture and searched folders.
+- Linux `ModuleEntry` receives the shared-library handle required by the VST3 ABI.
+- Windows builds normalize VST3 enum constants to the unsigned field types they populate.
+  Isolation helpers and discovery probes are located using their `.exe` filenames.
+- MIDI program changes honor plugin controller mappings before falling back to program lists.
+- Plugin setup and reconfiguration refresh cached latency/tail values; MIDI learning and
+  transport context handling follow the controller and processor contracts more closely.
+- CI metadata tests use a checked-in SDK-generated fixture instead of an installed Dexed
+  plugin. Teardown tests still verify that destruction never occurs on the wrong thread,
+  without leaking their own test allocations under LeakSanitizer.
+- Updated `rtrb` to 0.3.5 and the workspace's `webbrowser` dependency to 1.2.2 to address
+  RUSTSEC-2026-0274 and RUSTSEC-2026-0257. The published crate requires `rtrb >= 0.3.5`.
+
+### Compatibility
+
+- `HostNotification`, `process_isolation::HostCommand`, and `HostResponse` have new variants.
+  Downstream exhaustive matches must handle them. Rebuild and deploy the isolation helper
+  alongside the matching library version when using the new commands.
+- Bundles without a compatible Windows/Linux binary now return `Error::PluginLoadFailed`
+  instead of resolving another architecture's binary or attempting to load a directory.
+- The library's default-feature MSRV remains Rust 1.85. The optional `egui-widgets` feature
+  still requires Rust 1.92 or newer.
+
 ## [0.9.0] - 2026-07-28
 
 ### Changed (VST3 spec-compliance pass — behavior, some breaking)

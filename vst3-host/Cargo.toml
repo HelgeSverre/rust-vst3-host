@@ -1,6 +1,6 @@
 [package]
 name = "vst3-host"
-version = "0.9.0"
+version = "0.10.0"
 authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 edition = "2021"
 # Default-feature floor (cpal 0.18 needs 1.85). The optional `egui-widgets` feature
@@ -31,7 +31,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 libc = "0.2"
 # Lock-free SPSC ring for the real-time plugin runner's command queue.
-rtrb = "0.3"
+rtrb = "0.3.5"
 # Lock-free bounded MPMC queue for output MIDI: the audio thread pushes emitted events and a
 # UI thread drains them without either locking the other (crossbeam-utils is already in-tree).
 crossbeam-queue = "0.3"
