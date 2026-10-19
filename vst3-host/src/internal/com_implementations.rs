@@ -1928,6 +1928,9 @@ impl IComponentHandlerTrait for ComponentHandler {
 }
 
 impl IComponentHandlerBusActivationTrait for ComponentHandler {
+    /// Queues a validated control-thread request without changing the active bus layout.
+    /// Refuses processing-thread calls before taking the notification mutex; the plugin may
+    /// retry off-thread. Invalid addresses and a full queue also leave the layout unchanged.
     unsafe fn requestBusActivation(
         &self,
         media: i32,
@@ -1935,6 +1938,9 @@ impl IComponentHandlerBusActivationTrait for ComponentHandler {
         index: i32,
         state: u8,
     ) -> tresult {
+        if crate::internal::realtime_guard::is_active() {
+            return kResultFalse;
+        }
         let media_type = match media {
             0 => crate::audio::MediaType::Audio,
             1 => crate::audio::MediaType::Event,
@@ -3113,10 +3119,12 @@ mod component_handler_tests {
     }
 
     /// Guarded callbacks must not enter the mutex-backed editor/notification queues, while the
-    /// atomic restart accumulator remains available for later control-thread servicing.
+    /// atomic restart accumulator remains available for later control-thread servicing. Holding
+    /// the notification lock also proves that the new bus-activation callback refuses to wait.
     #[test]
     fn guarded_component_callbacks_do_not_lock_or_allocate() {
         let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let notifications = handler.notifications.lock().unwrap();
         let _guard = crate::internal::realtime_guard::ProcessThreadGuard::enter();
         unsafe {
             assert_eq!(handler.beginEdit(5), kResultOk);
@@ -3125,12 +3133,60 @@ mod component_handler_tests {
             assert_eq!(handler.setDirty(1), kResultOk);
             assert_eq!(handler.requestOpenEditor(c"editor".as_ptr()), kResultFalse);
             assert_eq!(handler.notifyUnitSelection(3), kResultFalse);
+            assert_eq!(handler.requestBusActivation(0, 1, 0, 1), kResultFalse);
             assert_eq!(handler.restartComponent(1), kResultOk);
         }
         drop(_guard);
+        drop(notifications);
         assert!(handler.take_parameter_edits().is_empty());
         assert!(handler.take_host_notifications().is_empty());
         assert!(!handler.take_restart_flags().is_empty());
+    }
+
+    /// Outside processing, the same COM interface queues requests in order without activating
+    /// buses itself, and rejects invalid addresses or a full notification queue.
+    #[test]
+    fn bus_activation_requests_remain_available_off_thread() {
+        let handler = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
+        let activation = handler
+            .to_com_ptr::<IComponentHandler>()
+            .unwrap()
+            .cast::<IComponentHandlerBusActivation>()
+            .expect("SDK component-handler query path");
+        unsafe {
+            assert_eq!(activation.requestBusActivation(0, 1, 2, 1), kResultOk);
+            assert_eq!(
+                activation.requestBusActivation(2, 1, 0, 1),
+                kInvalidArgument
+            );
+            assert_eq!(
+                activation.requestBusActivation(0, 2, 0, 1),
+                kInvalidArgument
+            );
+            assert_eq!(
+                activation.requestBusActivation(0, 1, -1, 1),
+                kInvalidArgument
+            );
+        }
+        assert_eq!(
+            handler.take_host_notifications(),
+            vec![crate::plugin::HostNotification::BusActivationRequested {
+                media_type: crate::audio::MediaType::Audio,
+                direction: crate::audio::BusDirection::Output,
+                bus_index: 2,
+                active: true,
+            }]
+        );
+        for _ in 0..MAX_HOST_NOTIFICATIONS {
+            assert_eq!(
+                unsafe { activation.requestBusActivation(1, 0, 0, 0) },
+                kResultOk
+            );
+        }
+        assert_eq!(
+            unsafe { activation.requestBusActivation(1, 0, 0, 0) },
+            kResultFalse
+        );
     }
 
     #[test]

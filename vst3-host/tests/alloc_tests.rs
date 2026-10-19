@@ -178,8 +178,10 @@ fn realtime_runner_steady_state_is_allocation_free() {
 /// The exclusive hard-realtime lifecycle keeps the same TestSynth instance, translates its
 /// controller-derived MIDI mappings through fixed parameter storage, supports an off-thread
 /// stop/restart, and performs no host allocation, reallocation, or deallocation while processing
-/// repeated mixed audio/MIDI/parameter blocks. The fixture must be built before this ignored test;
-/// a missing bundle is treated as a local skip so the ordinary test suite remains portable.
+/// repeated mixed audio/MIDI/parameter blocks including Mapping 2 fan-out. A seek and playing
+/// transport must survive the round trip and continue through ordinary processing; stopped
+/// transport must remain stationary during a second realtime tenure. Build the fixture before
+/// this ignored test; a missing bundle is treated as a skip so the ordinary suite stays portable.
 #[test]
 #[ignore = "Requires the bundled TestSynth (just test-plugin)"]
 fn exclusive_hard_realtime_lifecycle_is_allocation_free() {
@@ -213,8 +215,16 @@ fn exclusive_hard_realtime_lifecycle_is_allocation_free() {
         Err(failure) => failure,
         Ok(_) => panic!("a zero-sized realtime block must be rejected"),
     };
-    let (plugin, _) = failure.into_parts();
+    let (mut plugin, _) = failure.into_parts();
     assert_eq!(plugin.info().uid, original_uid);
+    plugin
+        .set_transport_position(vst3_host::TransportPosition {
+            samples: -512,
+            quarter_notes: -0.5,
+        })
+        .expect("seek before realtime ownership");
+    plugin.set_tempo(60.0).expect("set transport tempo");
+    plugin.set_playing(true).expect("start project transport");
 
     let capacities = RealtimeCapacities {
         max_block_frames: 512,
@@ -272,6 +282,14 @@ fn exclusive_hard_realtime_lifecycle_is_allocation_free() {
                 sample_offset: 128,
             },
             RealtimeMidiEvent {
+                event: MidiEvent::ControlChange {
+                    channel,
+                    controller: 75,
+                    value: (step % 128) as u8,
+                },
+                sample_offset: 180,
+            },
+            RealtimeMidiEvent {
                 event: MidiEvent::NoteOff {
                     channel,
                     note: 60,
@@ -288,13 +306,14 @@ fn exclusive_hard_realtime_lifecycle_is_allocation_free() {
     };
 
     // Warm every route, including IDataExchange, before measuring. TestSynth maps CC74,
-    // pitch bend, channel aftertouch, and root-unit program changes to four parameter ids.
+    // pitch bend, channel aftertouch, and root-unit program changes to four parameter ids;
+    // CC75 adds points for cutoff and resonance, overlapping the explicit resonance parameter.
     for step in 0..16 {
         let report = realtime
             .process(&mut buffers, &make_midi(step), &[make_parameter(step)])
             .expect("warm hard-realtime process graph");
         assert_eq!(report.input_events, 2);
-        assert_eq!(report.parameter_changes, 5);
+        assert_eq!(report.parameter_changes, 7);
         assert_eq!(report.distinct_parameters, 5);
     }
     realtime.stop().expect("stop off-thread");
@@ -325,7 +344,30 @@ fn exclusive_hard_realtime_lifecycle_is_allocation_free() {
         "exclusive hard-realtime process() allocated, reallocated, or freed {allocation_operations} times"
     );
 
-    let (plugin, exit) = match realtime.try_into_plugin() {
+    // The fixture applies whole parameter queues, so a program change can overwrite cutoff
+    // regardless of offsets in a different queue. Observe fan-out in a final program-free block.
+    let report = realtime
+        .process(
+            &mut buffers,
+            &[RealtimeMidiEvent {
+                event: MidiEvent::ControlChange {
+                    channel,
+                    controller: 75,
+                    value: 63,
+                },
+                sample_offset: 180,
+            }],
+            &[RealtimeParameterChange {
+                id: 4,
+                value: last_resonance,
+                sample_offset: 200,
+            }],
+        )
+        .unwrap();
+    assert_eq!(report.parameter_changes, 3);
+    assert_eq!(report.distinct_parameters, 2);
+
+    let (mut plugin, exit) = match realtime.try_into_plugin() {
         Ok(restored) => restored,
         Err(failure) => panic!(
             "restore the same ordinary plugin off-thread: {}",
@@ -342,4 +384,33 @@ fn exclusive_hard_realtime_lifecycle_is_allocation_free() {
         (restored_resonance - last_resonance).abs() < 1e-6,
         "restored controller value {restored_resonance} did not match {last_resonance}"
     );
+    assert!(
+        (plugin.get_parameter(0).unwrap() - 63.0 / 127.0).abs() < 1e-6,
+        "Mapping 2 must deliver cutoff as well as its final resonance assignment"
+    );
+    let frames = 217 * 512;
+    let position = plugin.transport_position().unwrap();
+    assert_eq!(position.samples, -512 + frames);
+    assert!((position.quarter_notes - (-0.5 + frames as f64 / 48_000.0)).abs() < 1e-9);
+    plugin.start_processing().unwrap();
+    plugin.process_audio(&mut buffers).unwrap();
+    assert_eq!(
+        plugin.transport_position().unwrap().samples,
+        position.samples + 512
+    );
+    plugin.stop_processing().unwrap();
+    plugin.set_playing(false).unwrap();
+    let stopped_position = plugin.transport_position().unwrap();
+    let mut realtime = match plugin.try_into_realtime(capacities) {
+        Ok(realtime) => realtime,
+        Err(failure) => panic!("reenter realtime ownership: {}", failure.error()),
+    };
+    realtime.process(&mut buffers, &[], &[]).unwrap();
+    let (mut plugin, _) = match realtime.try_into_plugin() {
+        Ok(restored) => restored,
+        Err(failure) => panic!("restore stopped transport: {}", failure.error()),
+    };
+    assert_eq!(plugin.transport_position().unwrap(), stopped_position);
+    plugin.reconfigure(44_100.0, 256).unwrap();
+    assert_eq!(plugin.transport_position().unwrap(), stopped_position);
 }

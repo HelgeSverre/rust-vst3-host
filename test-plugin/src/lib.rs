@@ -965,6 +965,9 @@ fn encode_state(params: &[f64; PARAM_COUNT as usize]) -> Vec<u8> {
 }
 
 /// Read + validate a state blob from a stream, returning the stored parameter values.
+/// Rejects a bad magic number, more than 1024 parameters, or any short read. Each parameter is
+/// an eight-byte little-endian f64; exact chunks retain compatibility with the Rust 1.85 floor.
+/// The non-null stream, when supplied, must implement IBStream and stay valid for this call.
 // Keep `chunks_exact` while the crate's Rust 1.85 minimum predates stable `slice::as_chunks`;
 // newer Clippy versions otherwise reject the compatibility spelling under `-D warnings`.
 #[allow(clippy::chunks_exact_to_as_chunks)]
@@ -979,10 +982,8 @@ unsafe fn read_state_params(stream: *mut IBStream) -> Option<Vec<f64>> {
     }
     let body = stream_read_exact(stream, count * 8)?;
     Some(
-        body.as_chunks::<8>()
-            .0
-            .iter()
-            .map(|&bytes| f64::from_le_bytes(bytes))
+        body.chunks_exact(8)
+            .map(|bytes| f64::from_le_bytes(bytes.try_into().expect("exact f64 chunk")))
             .collect(),
     )
 }
@@ -2114,6 +2115,9 @@ struct ReleasedMidi2Assignment {
 }
 
 impl TestSynthController {
+    /// Enumerates legacy MIDI 1 input mappings plus a Mapping-2-only CC75 fan-out on channel 1.
+    /// CC75 controls cutoff and resonance together, allowing hosts to verify that all assignments
+    /// survive caching and realtime capacity accounting without changing existing CC semantics.
     fn midi1_assignments(&self) -> Vec<Midi1ControllerParamIDAssignment> {
         let mut out = Vec::new();
         for channel in 0..16 {
@@ -2129,6 +2133,14 @@ impl TestSynthController {
                     });
                 }
             }
+        }
+        for p_id in [CUTOFF_PARAM_ID, RESONANCE_PARAM_ID] {
+            out.push(Midi1ControllerParamIDAssignment {
+                pId: p_id,
+                busIndex: 0,
+                channel: 0,
+                controller: 75,
+            });
         }
         out
     }

@@ -2811,6 +2811,10 @@ impl PluginInternal for PluginImpl {
         Ok(())
     }
 
+    /// Processes only prepared storage and snapshotted mappings, including one-to-many MIDI
+    /// assignments. Capacity errors precede the plugin call; completed calls, including processor
+    /// failures, advance the cached transport just like the ordinary path. Host callbacks are
+    /// guarded, and valid system time is refreshed per block without controller access.
     fn process_hard_realtime(
         &mut self,
         buffers: &mut AudioBuffers,
@@ -2851,20 +2855,18 @@ impl PluginInternal for PluginImpl {
         let output_parameter_overflows_before = state.output_parameters.overflow_count();
 
         for scheduled in midi {
-            match route(scheduled) {
-                RealtimeMidiRoute::Event(event) => {
-                    if !state.input_events.push(event) {
-                        state.clear_process_collections();
-                        return Err(RealtimeProcessError::InputEventCapacity);
-                    }
+            let routed = route(scheduled);
+            if let RealtimeMidiRoute::Event(event) = routed {
+                if !state.input_events.push(event) {
+                    state.clear_process_collections();
+                    return Err(RealtimeProcessError::InputEventCapacity);
                 }
-                RealtimeMidiRoute::Parameter { id, offset, value } => {
-                    if !state.input_parameters.enqueue(id, offset, value) {
-                        state.clear_process_collections();
-                        return Err(RealtimeProcessError::ParameterPointCapacity);
-                    }
+            }
+            for (id, offset, value) in routed.parameter_points(&state.midi_mapping) {
+                if !state.input_parameters.enqueue(id, offset, value) {
+                    state.clear_process_collections();
+                    return Err(RealtimeProcessError::ParameterPointCapacity);
                 }
-                RealtimeMidiRoute::Ignored => {}
             }
         }
         for parameter in parameters {
@@ -2897,6 +2899,9 @@ impl PluginInternal for PluginImpl {
             &mut data.output_bus_buffers,
             &self.bus_activation.audio_outputs,
         );
+        if data.process_context.state & PROCESS_CONTEXT_SYSTEM_TIME_VALID != 0 {
+            data.process_context.systemTime = current_system_time_nanos();
+        }
 
         // The guard is active only while third-party code can synchronously call back into host
         // COM objects. All host validation and collection preparation above remains ordinary
@@ -2915,6 +2920,9 @@ impl PluginInternal for PluginImpl {
             data.transport_tempo,
             frames as i64,
         );
+        self.position.samples = data.process_context.projectTimeSamples;
+        self.position.quarter_notes = data.process_context.projectTimeMusic;
+        self.continuous_samples = data.process_context.continousTimeSamples;
         if process_result != kResultOk {
             state.clear_process_collections();
             return Err(RealtimeProcessError::ProcessorFailed(process_result));
@@ -2949,7 +2957,15 @@ impl PluginInternal for PluginImpl {
         Ok(report)
     }
 
+    /// Restores the ordinary graph's playhead before freeing fixed storage off-thread. Processing
+    /// must be stopped and exclusively owned; the next ordinary block resumes at the realtime
+    /// endpoint, including continuous time while the project transport was stopped.
     fn leave_hard_realtime(&mut self) -> Result<()> {
+        if let Some(data) = self.process_data.as_mut() {
+            data.process_context.projectTimeSamples = self.position.samples;
+            data.process_context.projectTimeMusic = self.position.quarter_notes;
+            data.process_context.continousTimeSamples = self.continuous_samples;
+        }
         // Called only during the caller-paused reverse transition. Dropping fixed Vec/COM
         // allocations here is intentionally non-realtime and leaves ordinary structures intact.
         self.realtime_state.take();
@@ -4877,10 +4893,58 @@ impl PluginInternal for PluginImpl {
 }
 
 /// Pre-resolved, allocation-free routing result for one realtime MIDI convenience event.
+#[derive(Clone, Copy)]
 enum RealtimeMidiRoute {
+    /// A bus-zero note or poly-pressure event, independent of controller mappings.
     Event(Event),
+    /// A root-unit program fallback with an already normalized value and clamped offset.
     Parameter { id: u32, offset: i32, value: f64 },
+    /// All bus-zero input assignments for this channel/controller must receive the point.
+    MappedController {
+        channel: MidiChannel,
+        controller: u16,
+        offset: i32,
+        value: f64,
+    },
+    /// An unmapped controller or unavailable/out-of-range root program produces no input.
     Ignored,
+}
+
+impl RealtimeMidiRoute {
+    /// Iterates every snapshotted parameter target without allocating or consulting a controller.
+    /// Input mapping order and duplicates are preserved, matching ordinary controller sends;
+    /// events and ignored messages yield no points. Offsets and values are already normalized.
+    fn parameter_points(
+        self,
+        cache: &MidiMappingCache,
+    ) -> impl Iterator<Item = (u32, i32, f64)> + '_ {
+        let single = match self {
+            Self::Parameter { id, offset, value } => Some((id, offset, value)),
+            _ => None,
+        };
+        let assignments = if matches!(self, Self::MappedController { .. }) {
+            cache.mapped.as_slice()
+        } else {
+            &[]
+        };
+        single
+            .into_iter()
+            .chain(assignments.iter().filter_map(move |mapping| {
+                let Self::MappedController {
+                    channel,
+                    controller,
+                    offset,
+                    value,
+                } = self
+                else {
+                    return None;
+                };
+                (mapping.bus == 0
+                    && mapping.channel == channel
+                    && mapping.controller == crate::midi::MidiController::Midi1(controller))
+                .then_some((mapping.parameter_id, offset, value))
+            }))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4900,7 +4964,9 @@ fn realtime_sample_offset(requested: usize, frames: usize) -> i32 {
 ///
 /// The scans are deliberately quadratic in the number of points rather than using a temporary
 /// set: caller-provided block slices are bounded, and avoiding allocation is the stronger realtime
-/// invariant. Duplicate parameter ids consume point capacity but only one queue slot.
+/// invariant. Every one-to-many assignment consumes a point; duplicate parameter ids across
+/// mappings, messages, and explicit automation consume only one queue slot. No collections or
+/// plugin state are changed on rejection.
 fn preflight_realtime_inputs(
     midi: &[RealtimeMidiEvent],
     parameters: &[RealtimeParameterChange],
@@ -4917,10 +4983,16 @@ fn preflight_realtime_inputs(
             root_program_change,
         )
     };
-    let mapped_parameter_points = midi
-        .iter()
-        .filter(|scheduled| matches!(route(scheduled), RealtimeMidiRoute::Parameter { .. }))
-        .count();
+    let parameter_ids = || {
+        parameters
+            .iter()
+            .map(|parameter| parameter.id)
+            .chain(midi.iter().flat_map(|scheduled| {
+                route(scheduled)
+                    .parameter_points(midi_mapping)
+                    .map(|(id, _, _)| id)
+            }))
+    };
     let input_events = midi
         .iter()
         .filter(|scheduled| matches!(route(scheduled), RealtimeMidiRoute::Event(_)))
@@ -4928,29 +5000,17 @@ fn preflight_realtime_inputs(
     if input_events > capacities.max_input_events {
         return Err(RealtimeProcessError::InputEventCapacity);
     }
-    let parameter_points = parameters.len().saturating_add(mapped_parameter_points);
+    // Stop as soon as capacity is exceeded, before the quadratic distinct-id scan.
+    let parameter_points = parameter_ids()
+        .take(capacities.max_parameter_changes.saturating_add(1))
+        .count();
     if parameter_points > capacities.max_parameter_changes {
         return Err(RealtimeProcessError::ParameterPointCapacity);
     }
 
     let mut distinct_parameters = 0usize;
-    for (index, parameter) in parameters.iter().enumerate() {
-        if !parameters[..index]
-            .iter()
-            .any(|seen| seen.id == parameter.id)
-        {
-            distinct_parameters += 1;
-        }
-    }
-    for (index, scheduled) in midi.iter().enumerate() {
-        let RealtimeMidiRoute::Parameter { id, .. } = route(scheduled) else {
-            continue;
-        };
-        if !parameters.iter().any(|change| change.id == id)
-            && !midi[..index].iter().any(|earlier| {
-                matches!(route(earlier), RealtimeMidiRoute::Parameter { id: earlier_id, .. } if earlier_id == id)
-            })
-        {
+    for (index, id) in parameter_ids().enumerate() {
+        if !parameter_ids().take(index).any(|earlier| earlier == id) {
             distinct_parameters += 1;
         }
     }
@@ -4969,8 +5029,9 @@ fn preflight_realtime_inputs(
 ///
 /// VST3 represents notes and poly-pressure as events. Channel controllers, pitch bend, channel
 /// pressure, and program changes are parameter automation looked up in controller-derived tables
-/// captured before realtime processing. An absent or out-of-range mapping is a successful no-op,
-/// matching the ordinary v0.9 MIDI path.
+/// captured before realtime processing. Mapping 2 may fan out to several targets; program changes
+/// prefer the channel's mapped controller and use root-unit program metadata only when unmapped.
+/// An absent or out-of-range fallback is a successful no-op, matching the ordinary MIDI path.
 #[allow(non_upper_case_globals, clippy::unnecessary_cast)]
 fn route_realtime_midi(
     event: MidiEvent,
@@ -5003,40 +5064,45 @@ fn route_realtime_midi(
             controller,
             value,
         } => {
-            let Some(id) = midi_mapping.get(0, channel.as_index() as i16, u16::from(controller))
-            else {
+            if midi_mapping
+                .get(0, channel.as_index() as i16, u16::from(controller))
+                .is_none()
+            {
                 return RealtimeMidiRoute::Ignored;
-            };
-            return RealtimeMidiRoute::Parameter {
-                id,
+            }
+            return RealtimeMidiRoute::MappedController {
+                channel,
+                controller: u16::from(controller),
                 offset: sample_offset,
                 value: f64::from(value) / 127.0,
             };
         }
         MidiEvent::PitchBend { channel, value } => {
-            let Some(id) = midi_mapping.get(
-                0,
-                channel.as_index() as i16,
-                ControllerNumbers_::kPitchBend as u16,
-            ) else {
+            let controller = ControllerNumbers_::kPitchBend as u16;
+            if midi_mapping
+                .get(0, channel.as_index() as i16, controller)
+                .is_none()
+            {
                 return RealtimeMidiRoute::Ignored;
-            };
-            return RealtimeMidiRoute::Parameter {
-                id,
+            }
+            return RealtimeMidiRoute::MappedController {
+                channel,
+                controller,
                 offset: sample_offset,
                 value: f64::from(value) / 16_383.0,
             };
         }
         MidiEvent::ChannelAftertouch { channel, pressure } => {
-            let Some(id) = midi_mapping.get(
-                0,
-                channel.as_index() as i16,
-                ControllerNumbers_::kAfterTouch as u16,
-            ) else {
+            let controller = ControllerNumbers_::kAfterTouch as u16;
+            if midi_mapping
+                .get(0, channel.as_index() as i16, controller)
+                .is_none()
+            {
                 return RealtimeMidiRoute::Ignored;
-            };
-            return RealtimeMidiRoute::Parameter {
-                id,
+            }
+            return RealtimeMidiRoute::MappedController {
+                channel,
+                controller,
                 offset: sample_offset,
                 value: f64::from(pressure) / 127.0,
             };
@@ -5052,7 +5118,19 @@ fn route_realtime_midi(
             vst_event.__field0.polyPressure.pressure = pressure as f32 / 127.0;
             vst_event.__field0.polyPressure.noteId = -1;
         }
-        MidiEvent::ProgramChange { program, .. } => {
+        MidiEvent::ProgramChange { channel, program } => {
+            let controller = ControllerNumbers_::kCtrlProgramChange as u16;
+            if midi_mapping
+                .get(0, channel.as_index() as i16, controller)
+                .is_some()
+            {
+                return RealtimeMidiRoute::MappedController {
+                    channel,
+                    controller,
+                    offset: sample_offset,
+                    value: f64::from(program) / 127.0,
+                };
+            }
             let Some(mapping) = root_program_change else {
                 return RealtimeMidiRoute::Ignored;
             };
@@ -6072,16 +6150,25 @@ mod output_midi_tests {
 mod hard_realtime_routing_tests {
     use super::*;
 
+    /// Builds both cache representations for bus-zero MIDI 1 input, retaining duplicate targets
+    /// in mapping order while the legacy lookup records the last assignment for each address.
     fn mapping(entries: &[(MidiChannel, u16, u32)]) -> MidiMappingCache {
         let mut cache = MidiMappingCache {
             buses: 1,
             assignments: vec![None; MIDI_CHANNEL_COUNT * MIDI_CONTROLLER_COUNT],
+            ..Default::default()
         };
         for &(channel, controller, parameter) in entries {
             let index = cache
                 .index(0, channel.as_index() as i16, controller)
                 .expect("test mapping index");
             cache.assignments[index] = Some(parameter);
+            cache.mapped.push(crate::midi::MidiControllerAssignment {
+                bus: 0,
+                channel,
+                controller: crate::midi::MidiController::Midi1(controller),
+                parameter_id: parameter,
+            });
         }
         cache
     }
@@ -6103,6 +6190,8 @@ mod hard_realtime_routing_tests {
         }
     }
 
+    /// Legacy single-target mappings retain channel, normalization, and sample offset when
+    /// traversed through the same iterator used by Mapping 2 fan-out.
     #[test]
     fn channel_controllers_use_snapshotted_parameter_mappings() {
         let cache = mapping(&[
@@ -6142,15 +6231,102 @@ mod hard_realtime_routing_tests {
             ),
         ];
         for (event, expected_id, expected_value) in cases {
-            match route_realtime_midi(event, 17, &cache, None) {
-                RealtimeMidiRoute::Parameter { id, offset, value } => {
-                    assert_eq!(id, expected_id);
-                    assert_eq!(offset, 17);
-                    assert!((value - expected_value).abs() < f64::EPSILON);
-                }
-                _ => panic!("mapped controller was not routed as parameter automation"),
-            }
+            let mut points = route_realtime_midi(event, 17, &cache, None).parameter_points(&cache);
+            let (id, offset, value) = points.next().expect("mapped controller point");
+            assert_eq!(id, expected_id);
+            assert_eq!(offset, 17);
+            assert!((value - expected_value).abs() < f64::EPSILON);
+            assert!(points.next().is_none());
         }
+    }
+
+    /// Mapping 2 fans out only to matching bus-zero/channel/controller inputs. Every assignment
+    /// consumes a point, but repeated ids across mappings and explicit changes share a queue.
+    #[test]
+    fn one_to_many_mappings_preserve_targets_and_preflight_all_points() {
+        let mut cache = mapping(&[
+            (MidiChannel::Ch2, 74, 101),
+            (MidiChannel::Ch2, 74, 102),
+            (MidiChannel::Ch2, 74, 101),
+            (MidiChannel::Ch1, 74, 103),
+            (MidiChannel::Ch2, 71, 104),
+        ]);
+        cache.mapped.push(crate::midi::MidiControllerAssignment {
+            bus: 1,
+            channel: MidiChannel::Ch2,
+            controller: crate::midi::MidiController::Midi1(74),
+            parameter_id: 105,
+        });
+        let midi = [scheduled(MidiEvent::ControlChange {
+            channel: MidiChannel::Ch2,
+            controller: 74,
+            value: 127,
+        })];
+        let points: Vec<_> = route_realtime_midi(midi[0].event, 17, &cache, None)
+            .parameter_points(&cache)
+            .collect();
+        assert_eq!(points, vec![(101, 17, 1.0), (102, 17, 1.0), (101, 17, 1.0)]);
+        let explicit = [RealtimeParameterChange {
+            id: 101,
+            sample_offset: 31,
+            value: 0.25,
+        }];
+        assert_eq!(
+            preflight_realtime_inputs(&midi, &explicit, 64, &cache, None, capacities(1, 4, 2)),
+            Ok(RealtimeInputCounts {
+                input_events: 0,
+                parameter_points: 4,
+                distinct_parameters: 2
+            })
+        );
+        assert_eq!(
+            preflight_realtime_inputs(&midi, &explicit, 64, &cache, None, capacities(1, 3, 2)),
+            Err(RealtimeProcessError::ParameterPointCapacity)
+        );
+        assert_eq!(
+            preflight_realtime_inputs(&midi, &explicit, 64, &cache, None, capacities(1, 4, 1)),
+            Err(RealtimeProcessError::DistinctParameterCapacity)
+        );
+    }
+
+    /// Channel mappings take precedence even when the program exceeds the root bank's range;
+    /// an unmapped channel still uses root-bank normalization and the original sample offset.
+    #[test]
+    fn mapped_program_changes_precede_root_fallback_and_fan_out() {
+        let controller = ControllerNumbers_::kCtrlProgramChange as u16;
+        let cache = mapping(&[
+            (MidiChannel::Ch2, controller, 101),
+            (MidiChannel::Ch2, controller, 102),
+        ]);
+        let root = Some(ProgramChangeMapping {
+            unit_id: 0,
+            param_id: 300,
+            program_count: 5,
+        });
+        let points: Vec<_> = route_realtime_midi(
+            MidiEvent::ProgramChange {
+                channel: MidiChannel::Ch2,
+                program: 127,
+            },
+            23,
+            &cache,
+            root,
+        )
+        .parameter_points(&cache)
+        .collect();
+        assert_eq!(points, vec![(101, 23, 1.0), (102, 23, 1.0)]);
+        let fallback: Vec<_> = route_realtime_midi(
+            MidiEvent::ProgramChange {
+                channel: MidiChannel::Ch1,
+                program: 2,
+            },
+            23,
+            &cache,
+            root,
+        )
+        .parameter_points(&cache)
+        .collect();
+        assert_eq!(fallback, vec![(300, 23, 0.5)]);
     }
 
     #[test]

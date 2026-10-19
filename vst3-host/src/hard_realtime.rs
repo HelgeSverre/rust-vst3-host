@@ -16,6 +16,11 @@
 //! collections for the current block; [`RealtimeProcessReport`] reports rejected output writes but
 //! does not expose their payloads. Ordinary output drains therefore do not replay data emitted
 //! while the plugin was sealed in realtime mode.
+//!
+//! MIDI 1 controller messages use every snapshotted input assignment, including one-to-many
+//! Mapping 2 assignments. Program changes prefer channel mappings and otherwise use the root
+//! unit's program list. The current tempo, playing state, and seek position carry into realtime
+//! mode; processing advances the same transport, and the reverse transition preserves its endpoint.
 
 use crate::{audio::AudioBuffers, error::Error, midi::MidiEvent, plugin::Plugin, Result};
 
@@ -28,7 +33,8 @@ pub struct RealtimeCapacities {
     ///
     /// Notes and poly-aftertouch consume this capacity. CC, pitch bend, channel aftertouch, and
     /// program changes use their plugin-provided parameter mappings and consume parameter capacity
-    /// instead; unmapped messages consume neither capacity.
+    /// instead; each target of a one-to-many mapping consumes a parameter point. Unmapped messages
+    /// consume neither capacity unless a program change has a valid root-unit fallback.
     pub max_input_events: usize,
     /// Largest number of plugin-emitted events retained for one block.
     pub max_output_events: usize,

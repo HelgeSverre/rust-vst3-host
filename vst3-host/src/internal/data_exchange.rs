@@ -252,7 +252,7 @@ impl DataExchangeState {
         (queue.id == id).then_some(queue)
     }
 
-    /// Atomically reserves queue storage without exceeding the process-wide fixed byte budget.
+    /// Atomically reserves queue storage within this host application's fixed byte budget.
     ///
     /// The compare-exchange loop supports Rust 1.85 and rejects arithmetic overflow or budget
     /// exhaustion without changing the counter. Concurrent reservations retry against fresh usage.
