@@ -117,10 +117,10 @@ pub use playback::{
     RtAudioHandle,
 };
 pub use plugin::{
-    AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, OutputMidiConsumer,
-    ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode,
-    ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, TransportPosition,
-    WindowHandle,
+    component_state_from_plugin_state, AutomationState, ContextMenuItem, DataExchangeBlock,
+    HostNotification, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin, PluginInfo,
+    PluginPreset, PluginUnit, ProcessMode, ProgramPitchName, ProgressKind, ProgressValue,
+    RestartFlags, StateContext, TransportPosition, WindowHandle,
 };
 pub use realtime::{RealtimePluginRunner, RtControl};
 pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
@@ -151,10 +151,10 @@ pub mod prelude {
         parameters::{AutomationCurve, AutomationPoint, Parameter, ParameterAutomation},
         playback::{play_with_backend, AudioHandle},
         plugin::{
-            AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification,
-            OutputEventConsumer, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin,
-            PluginInfo, ProcessMode, ProgramPitchName, ProgressKind, ProgressValue, StateContext,
-            WindowHandle,
+            component_state_from_plugin_state, AutomationState, ContextMenuItem, DataExchangeBlock,
+            HostNotification, OutputEventConsumer, OutputMidiConsumer, ParameterEdit,
+            ParameterEditKind, Plugin, PluginInfo, ProcessMode, ProgramPitchName, ProgressKind,
+            ProgressValue, StateContext, WindowHandle,
         },
         transport::{AutomationLane, MidiClip, Timeline},
         window::PluginWindow,
