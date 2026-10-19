@@ -193,10 +193,23 @@ impl StateContext {
 ///
 /// This stays private to the crate. Public callers continue to exchange an opaque `Vec<u8>`;
 /// the versioned envelope below lets that API preserve both streams while still accepting the
-/// raw component blobs returned by older releases.
+/// raw component blobs returned by older releases. Callers which need to inspect a component's
+/// vendor-defined payload without discarding controller state can borrow it through
+/// [`component_state_from_plugin_state`].
 pub(crate) struct StateSnapshot {
     pub component: Vec<u8>,
     pub controller: Option<Vec<u8>>,
+}
+
+/// Borrowed byte ranges for the component and optional controller streams in one saved state.
+///
+/// A legacy raw-component state uses the complete input as its component range and has no
+/// controller range. A versioned snapshot is accepted only when its header, version, lengths,
+/// total size, and configured state-size limit all agree, so downstream views cannot point into
+/// a truncated, trailing, or otherwise malformed envelope.
+struct StateSnapshotLayout {
+    component: std::ops::Range<usize>,
+    controller: Option<std::ops::Range<usize>>,
 }
 
 const STATE_SNAPSHOT_MAGIC: &[u8; 16] = b"VST3HOST_STATE\0\0";
@@ -245,7 +258,25 @@ pub(crate) fn encode_state_snapshot(snapshot: &StateSnapshot) -> Result<Vec<u8>>
     Ok(out)
 }
 
-pub(crate) fn decode_state_snapshot(data: &[u8]) -> Result<StateSnapshot> {
+/// Borrows the processor/component stream from an opaque blob returned by [`Plugin::save_state`].
+///
+/// Current blobs contain both the VST3 component and optional controller streams in a versioned
+/// host envelope; this function validates that envelope and returns only the component bytes.
+/// Blobs produced by releases before the envelope was introduced are treated as legacy raw
+/// component state and returned unchanged after the same size-limit check. An error is returned
+/// for unsupported versions, truncated headers, inconsistent lengths, trailing bytes, arithmetic
+/// overflow, or states exceeding the host's configured 64 MiB payload limit.
+///
+/// The returned slice borrows `data` and is intended only for read-only vendor-specific
+/// inspection. Preserve and pass the original opaque blob to [`Plugin::load_state`] so any
+/// independent controller state is not lost.
+pub fn component_state_from_plugin_state(data: &[u8]) -> Result<&[u8]> {
+    let layout = state_snapshot_layout(data)?;
+    Ok(&data[layout.component])
+}
+
+/// Validates an opaque current or legacy state and returns its borrowed stream ranges.
+fn state_snapshot_layout(data: &[u8]) -> Result<StateSnapshotLayout> {
     if !data.starts_with(STATE_SNAPSHOT_MAGIC) {
         if data.len() > MAX_STATE_SNAPSHOT_PAYLOAD_BYTES {
             return Err(Error::Other(format!(
@@ -254,8 +285,8 @@ pub(crate) fn decode_state_snapshot(data: &[u8]) -> Result<StateSnapshot> {
                 data.len()
             )));
         }
-        return Ok(StateSnapshot {
-            component: data.to_vec(),
+        return Ok(StateSnapshotLayout {
+            component: 0..data.len(),
             controller: None,
         });
     }
@@ -288,9 +319,17 @@ pub(crate) fn decode_state_snapshot(data: &[u8]) -> Result<StateSnapshot> {
     }
     let component_start = STATE_SNAPSHOT_HEADER_SIZE;
     let component_end = component_start + component_len;
+    Ok(StateSnapshotLayout {
+        component: component_start..component_end,
+        controller: controller_len.map(|len| component_end..component_end + len),
+    })
+}
+
+pub(crate) fn decode_state_snapshot(data: &[u8]) -> Result<StateSnapshot> {
+    let layout = state_snapshot_layout(data)?;
     Ok(StateSnapshot {
-        component: data[component_start..component_end].to_vec(),
-        controller: controller_len.map(|len| data[component_end..component_end + len].to_vec()),
+        component: data[layout.component].to_vec(),
+        controller: layout.controller.map(|range| data[range].to_vec()),
     })
 }
 
@@ -824,6 +863,38 @@ pub(crate) trait PluginInternal: Send {
         Err(Error::Other(
             "bus-aware audio processing is not supported for this plugin".to_string(),
         ))
+    }
+    /// Preallocates and installs the exclusive hard-realtime process structures.
+    fn prepare_hard_realtime(
+        &mut self,
+        _capacities: crate::hard_realtime::RealtimeCapacities,
+    ) -> Result<()> {
+        Err(Error::Other(
+            "hard-realtime mode is unavailable for this plugin backend".to_string(),
+        ))
+    }
+    /// Processes one block through the prepared hard-realtime structures.
+    fn process_hard_realtime(
+        &mut self,
+        _buffers: &mut AudioBuffers,
+        _midi: &[crate::hard_realtime::RealtimeMidiEvent],
+        _parameters: &[crate::hard_realtime::RealtimeParameterChange],
+    ) -> std::result::Result<
+        crate::hard_realtime::RealtimeProcessReport,
+        crate::hard_realtime::RealtimeProcessError,
+    > {
+        Err(crate::hard_realtime::RealtimeProcessError::UnsupportedBackend)
+    }
+    /// Removes hard-realtime structures after processing has stopped.
+    fn leave_hard_realtime(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Synchronizes the ordinary controller after live processor-only automation.
+    fn sync_controller_after_realtime(
+        &mut self,
+        _final_parameters: &[(u32, f64)],
+    ) -> crate::hard_realtime::ControllerSyncStatus {
+        crate::hard_realtime::ControllerSyncStatus::Unsupported
     }
     /// Re-run `setupProcessing` for a new sample rate / block size. Defaults to unsupported
     /// for implementations that don't support it.
@@ -3389,8 +3460,8 @@ mod output_midi_consumer_tests {
 #[cfg(test)]
 mod vstpreset_tests {
     use super::{
-        decode_state_snapshot, encode_state_snapshot, vstpreset, StateSnapshot,
-        STATE_SNAPSHOT_MAGIC,
+        component_state_from_plugin_state, decode_state_snapshot, encode_state_snapshot, vstpreset,
+        StateSnapshot, STATE_SNAPSHOT_MAGIC,
     };
 
     const TEST_CLASS_ID: &str = "0123456789ABCDEF0123456789ABCDEF";
@@ -3518,6 +3589,10 @@ mod vstpreset_tests {
         };
         let bytes = encode_state_snapshot(&snapshot).expect("encode");
         assert!(bytes.starts_with(STATE_SNAPSHOT_MAGIC));
+        assert_eq!(
+            component_state_from_plugin_state(&bytes).expect("component view"),
+            snapshot.component
+        );
         let decoded = decode_state_snapshot(&bytes).expect("decode");
         assert_eq!(decoded.component, snapshot.component);
         assert_eq!(decoded.controller, snapshot.controller);
@@ -3525,6 +3600,10 @@ mod vstpreset_tests {
         let legacy = decode_state_snapshot(b"old raw component blob").expect("legacy");
         assert_eq!(legacy.component, b"old raw component blob");
         assert!(legacy.controller.is_none());
+        assert_eq!(
+            component_state_from_plugin_state(b"old raw component blob").expect("legacy view"),
+            b"old raw component blob"
+        );
     }
 
     #[test]
@@ -3536,9 +3615,11 @@ mod vstpreset_tests {
         let mut bytes = encode_state_snapshot(&snapshot).expect("encode");
         bytes[16..20].copy_from_slice(&2u32.to_le_bytes());
         assert!(decode_state_snapshot(&bytes).is_err());
+        assert!(component_state_from_plugin_state(&bytes).is_err());
 
         let mut bytes = encode_state_snapshot(&snapshot).expect("encode");
         bytes[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(decode_state_snapshot(&bytes).is_err());
+        assert!(component_state_from_plugin_state(&bytes).is_err());
     }
 }

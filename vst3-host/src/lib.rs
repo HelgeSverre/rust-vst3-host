@@ -56,6 +56,7 @@
 
 pub mod audio;
 pub mod error;
+pub mod hard_realtime;
 pub mod host;
 pub mod midi;
 pub mod parameters;
@@ -94,6 +95,11 @@ pub use discovery::{
 #[cfg(feature = "egui-widgets")]
 pub use embed::{EditorRect, EmbeddedEditor};
 pub use error::{Error, Result};
+pub use hard_realtime::{
+    ControllerSyncStatus, RealtimeCapacities, RealtimeExitFailure, RealtimeExitReport,
+    RealtimeMidiEvent, RealtimeParameterChange, RealtimePlugin, RealtimeProcessError,
+    RealtimeProcessReport, RealtimeTransitionFailure,
+};
 pub use host::{DiscoveryProgress, ProbeResult, Vst3Host, Vst3HostBuilder};
 pub use midi::{
     cc, KeyswitchInfo, MidiChannel, MidiController, MidiControllerAssignment, MidiEvent,
@@ -111,10 +117,10 @@ pub use playback::{
     RtAudioHandle,
 };
 pub use plugin::{
-    AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, OutputMidiConsumer,
-    ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode,
-    ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, TransportPosition,
-    WindowHandle,
+    component_state_from_plugin_state, AutomationState, ContextMenuItem, DataExchangeBlock,
+    HostNotification, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin, PluginInfo,
+    PluginPreset, PluginUnit, ProcessMode, ProgramPitchName, ProgressKind, ProgressValue,
+    RestartFlags, StateContext, TransportPosition, WindowHandle,
 };
 pub use realtime::{RealtimePluginRunner, RtControl};
 pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
@@ -133,6 +139,10 @@ pub mod prelude {
         // `Result<T>` alias in a glob prelude shadows `std::result::Result` and breaks
         // any `Result<T, E>` written by consumers. Use `vst3_host::Result` explicitly.
         error::Error,
+        hard_realtime::{
+            RealtimeCapacities, RealtimeMidiEvent, RealtimeParameterChange, RealtimePlugin,
+            RealtimeProcessError, RealtimeProcessReport,
+        },
         host::{DiscoveryProgress, Vst3Host, Vst3HostBuilder},
         midi::{
             cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId,
@@ -141,10 +151,10 @@ pub mod prelude {
         parameters::{AutomationCurve, AutomationPoint, Parameter, ParameterAutomation},
         playback::{play_with_backend, AudioHandle},
         plugin::{
-            AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification,
-            OutputEventConsumer, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin,
-            PluginInfo, ProcessMode, ProgramPitchName, ProgressKind, ProgressValue, StateContext,
-            WindowHandle,
+            component_state_from_plugin_state, AutomationState, ContextMenuItem, DataExchangeBlock,
+            HostNotification, OutputEventConsumer, OutputMidiConsumer, ParameterEdit,
+            ParameterEditKind, Plugin, PluginInfo, ProcessMode, ProgramPitchName, ProgressKind,
+            ProgressValue, StateContext, WindowHandle,
         },
         transport::{AutomationLane, MidiClip, Timeline},
         window::PluginWindow,
