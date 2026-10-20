@@ -3,13 +3,13 @@
 use crate::{
     audio::{AudioBuffers, AudioBusLayout, AudioLevels, BusAudioBuffers},
     error::{Error, Result},
+    internal::realtime_output::OutputEventQueue,
     midi::{
         MidiChannel, MidiEvent, PluginEvent, PluginEventData, MAX_EVENT_PAYLOAD_BYTES,
         MAX_EVENT_TEXT_UNITS,
     },
     parameters::{Parameter, ParameterUpdate},
 };
-use crossbeam_queue::ArrayQueue;
 use std::sync::{Arc, Mutex};
 
 /// A `Send` + `Sync` handle for draining the MIDI a plugin emits (arpeggiators, MPE, MIDI
@@ -25,22 +25,20 @@ use std::sync::{Arc, Mutex};
 /// crosses the boundary in the IPC responses instead).
 #[derive(Clone)]
 pub struct OutputMidiConsumer {
-    queue: Arc<ArrayQueue<PluginEvent>>,
+    queue: Arc<OutputEventQueue>,
 }
 
 impl OutputMidiConsumer {
-    pub(crate) fn from_queue(queue: Arc<ArrayQueue<PluginEvent>>) -> Self {
+    pub(crate) fn from_queue(queue: Arc<OutputEventQueue>) -> Self {
         Self { queue }
     }
 
-    /// Pop the oldest emitted event, or `None` if none are queued. Lock-free.
+    /// Pop the oldest emitted event. Lock-free.
+    ///
+    /// Returns `None` when empty or briefly paused by an off-thread realtime-mode transition;
+    /// a polling consumer can retry on its next tick.
     pub fn pop(&self) -> Option<MidiEvent> {
-        while let Some(event) = self.queue.pop() {
-            if let Some(midi) = event.to_midi() {
-                return Some(midi);
-            }
-        }
-        None
+        self.queue.pop_midi()
     }
 
     /// Drain all currently queued events in emission order into a `Vec`. Lock-free pops; the
@@ -58,17 +56,22 @@ impl OutputMidiConsumer {
 /// A `Send` + `Sync` handle for draining every owned event a plugin emits.
 #[derive(Clone)]
 pub struct OutputEventConsumer {
-    queue: Arc<ArrayQueue<PluginEvent>>,
+    queue: Arc<OutputEventQueue>,
 }
 
 impl OutputEventConsumer {
-    pub(crate) fn from_queue(queue: Arc<ArrayQueue<PluginEvent>>) -> Self {
+    pub(crate) fn from_queue(queue: Arc<OutputEventQueue>) -> Self {
         Self { queue }
     }
 
-    /// Pop the oldest emitted event, or `None` if none are queued.
+    /// Pop the oldest emitted event.
+    ///
+    /// Payload-bearing prepared events are copied into owned storage on this calling thread.
+    /// Call this method on a control/UI thread when those events are enabled. Returns `None`
+    /// when empty or briefly paused by an off-thread realtime-mode transition; retry on the next
+    /// consumer poll.
     pub fn pop(&self) -> Option<PluginEvent> {
-        self.queue.pop()
+        self.queue.pop_event()
     }
 
     /// Drain all currently queued events in emission order.
@@ -3428,13 +3431,13 @@ mod output_midi_consumer_tests {
 
     #[test]
     fn drains_in_order_and_drops_oldest_when_full() {
-        let q = Arc::new(ArrayQueue::new(2));
+        let q = OutputEventQueue::new(2);
         let consumer = OutputMidiConsumer::from_queue(q.clone());
 
         // force_push mirrors what process() does: when full, the oldest is dropped.
-        q.force_push(note(60).into());
-        q.force_push(note(61).into());
-        q.force_push(note(62).into()); // capacity 2 → drops note 60
+        q.force_push_owned(note(60).into());
+        q.force_push_owned(note(61).into());
+        q.force_push_owned(note(62).into()); // capacity 2 → drops note 60
 
         assert_eq!(consumer.drain(), vec![note(61), note(62)]);
         // Drained: now empty.
@@ -3444,12 +3447,12 @@ mod output_midi_consumer_tests {
 
     #[test]
     fn handle_is_send_and_shares_the_queue_across_threads() {
-        let q = Arc::new(ArrayQueue::new(8));
+        let q = OutputEventQueue::new(8);
         let consumer = OutputMidiConsumer::from_queue(q.clone());
         // Push from another thread (the audio side is a different thread in practice).
         let producer = q.clone();
         std::thread::spawn(move || {
-            producer.force_push(note(64).into());
+            producer.force_push_owned(note(64).into());
         })
         .join()
         .unwrap();

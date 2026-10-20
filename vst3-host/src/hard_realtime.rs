@@ -12,10 +12,10 @@
 //!
 //! The public audio surface stays flat: active buses are concatenated in bus-index/channel order,
 //! inactive buses are omitted, and a processor negotiated for 64-bit samples is converted through
-//! preallocated storage. Copy-only plugin output events and automation are retained through the
-//! ordinary bounded output queues; payloads requiring host-owned allocation are refused.
-//! [`RealtimeProcessReport`] counts writes rejected by the fixed collections, including those
-//! unsupported payloads.
+//! preallocated storage. Plugin output events and automation use the ordinary bounded output
+//! queues. SysEx and text payloads are copied into reusable storage reserved during preparation;
+//! the output consumer constructs owned payloads on its calling thread. [`RealtimeProcessReport`]
+//! counts writes rejected by the fixed event, payload, and parameter capacities.
 //!
 //! MIDI 1 controller messages use every snapshotted input assignment, including one-to-many
 //! Mapping 2 assignments. Program changes prefer channel mappings and otherwise use the root
@@ -36,15 +36,22 @@ use crate::{
 pub struct RealtimeCapacities {
     /// Largest audio block accepted by [`RealtimePlugin::process`].
     pub max_block_frames: usize,
-    /// Largest number of incoming messages represented as VST3 events in one block.
+    /// Largest number of raw MIDI messages accepted in one block.
     ///
-    /// Notes and poly-aftertouch consume this capacity. CC, pitch bend, channel aftertouch, and
-    /// program changes use their plugin-provided parameter mappings and consume parameter capacity
-    /// instead; each target of a one-to-many mapping consumes a parameter point. Unmapped messages
-    /// consume neither capacity unless a program change has a valid root-unit fallback.
+    /// Every item passed in the `midi` slice consumes this bound, including controller messages
+    /// that map to parameter points and unmapped messages that produce no VST3 input. Notes and
+    /// poly-aftertouch also consume fixed VST3-event storage. Mapped controllers, pitch bend,
+    /// channel aftertouch, and program changes additionally consume parameter-point capacity for
+    /// each resolved mapping target.
     pub max_input_events: usize,
     /// Largest number of plugin-emitted events retained for one block.
     pub max_output_events: usize,
+    /// Largest copyable payload retained for each plugin-emitted output event.
+    ///
+    /// A value of zero disables payload-bearing output events. The default runner configuration
+    /// reserves 4096 bytes for each event. Storage covers both the current block and the public
+    /// 4096-event output queue; each slot's payload allocation is rounded up to two-byte alignment.
+    pub max_output_payload_bytes_per_event: usize,
     /// Largest total number of incoming parameter points in one block and, independently, the
     /// largest number of plugin-written output points retained for that block.
     pub max_parameter_changes: usize,
@@ -58,6 +65,13 @@ impl RealtimeCapacities {
             return Err(Error::Other(format!(
                 "hard-realtime max block {} must be in 1..={plugin_block_size}",
                 self.max_block_frames
+            )));
+        }
+        if self.max_output_payload_bytes_per_event > crate::midi::MAX_EVENT_PAYLOAD_BYTES {
+            return Err(Error::Other(format!(
+                "hard-realtime output payload capacity {} exceeds maximum {}",
+                self.max_output_payload_bytes_per_event,
+                crate::midi::MAX_EVENT_PAYLOAD_BYTES
             )));
         }
         if self.max_input_events == 0
@@ -105,8 +119,8 @@ pub struct RealtimeProcessReport {
     pub parameter_changes: usize,
     /// Distinct parameter queues visible to the processor.
     pub distinct_parameters: usize,
-    /// Plugin output events rejected because its fixed output list was full or their payload
-    /// required host-owned allocation while prepared realtime processing was active.
+    /// Plugin output events rejected because event storage was full, their payload exceeded its
+    /// prepared byte budget, or the event/payload was unsupported or invalid.
     pub output_event_overflows: usize,
     /// Plugin output parameter points/queues rejected because fixed storage was full.
     pub output_parameter_overflows: usize,
@@ -127,8 +141,8 @@ pub enum RealtimeProcessError {
     /// Requested frames or caller buffer lengths exceed prepared storage.
     #[error("the audio block exceeds prepared realtime storage")]
     InvalidAudioBlock,
-    /// Messages routed as VST3 events exceed `max_input_events`.
-    #[error("realtime input-event capacity was exceeded")]
+    /// Raw MIDI messages exceed `max_input_events`.
+    #[error("realtime raw MIDI-message capacity was exceeded")]
     InputEventCapacity,
     /// Parameter points exceed `max_parameter_changes`.
     #[error("realtime parameter-point capacity was exceeded")]
@@ -447,6 +461,7 @@ mod tests {
             max_block_frames: 64,
             max_input_events: 8,
             max_output_events: 8,
+            max_output_payload_bytes_per_event: 0,
             max_parameter_changes: 8,
             max_distinct_parameters: 4,
         }
@@ -500,6 +515,64 @@ mod tests {
             .iter()
             .flatten()
             .all(|sample| *sample == 0.0));
+    }
+
+    /// The raw MIDI budget bounds caller work before routing. In particular, unmapped
+    /// controllers cannot bypass the bound merely because they would not consume a VST3 event
+    /// or a parameter point.
+    #[test]
+    fn raw_midi_capacity_rejects_unmapped_messages_before_processing() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let plugin = plugin_with_internal(FakeInternal {
+            start_fails: false,
+            process_fails: false,
+            process_calls: calls.clone(),
+        });
+        let mut capacities = capacities();
+        capacities.max_input_events = 1;
+        let mut realtime = match plugin.try_into_realtime(capacities) {
+            Ok(realtime) => realtime,
+            Err(_) => panic!("fake backend supports prepared realtime"),
+        };
+        let mut buffers = AudioBuffers::new(0, 2, 64, 48_000.0);
+        for output in &mut buffers.outputs {
+            output.fill(1.0);
+        }
+        let midi = [
+            RealtimeMidiEvent {
+                event: MidiEvent::ControlChange {
+                    channel: MidiChannel::Ch1,
+                    controller: 7,
+                    value: 100,
+                },
+                sample_offset: 0,
+            },
+            RealtimeMidiEvent {
+                event: MidiEvent::ControlChange {
+                    channel: MidiChannel::Ch1,
+                    controller: 7,
+                    value: 99,
+                },
+                sample_offset: 1,
+            },
+        ];
+        assert_eq!(
+            realtime.process(&mut buffers, &midi, &[]),
+            Err(RealtimeProcessError::InputEventCapacity)
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(buffers
+            .outputs
+            .iter()
+            .flatten()
+            .all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn output_payload_capacity_cannot_exceed_the_protocol_limit() {
+        let mut capacities = capacities();
+        capacities.max_output_payload_bytes_per_event = crate::midi::MAX_EVENT_PAYLOAD_BYTES + 1;
+        assert!(matches!(capacities.validate(64), Err(Error::Other(_))));
     }
 
     /// Startup belongs to the ownership transaction: a backend start error returns the ordinary

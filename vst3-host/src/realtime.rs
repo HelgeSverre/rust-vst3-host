@@ -480,6 +480,7 @@ impl RealtimePluginRunner {
             max_block_frames: plugin.block_size,
             max_input_events: self.command_capacity,
             max_output_events: self.command_capacity,
+            max_output_payload_bytes_per_event: 4096,
             max_parameter_changes: max_points.max(self.command_capacity),
             max_distinct_parameters: max_points.max(self.command_capacity),
         })
@@ -501,6 +502,13 @@ impl RealtimePluginRunner {
             return Err(RealtimeProcessError::NotProcessing);
         }
         let frames = buffers.block_size;
+        // Bound caller-owned raw work before traversing any input collection. This includes
+        // unmapped controllers: they may emit no VST3 event or parameter point, but still cost
+        // routing time if allowed through.
+        if midi.len() > prepared.capacities.max_input_events {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::InputEventCapacity);
+        }
         if frames == 0
             || frames > prepared.capacities.max_block_frames
             || buffers.inputs.iter().any(|channel| channel.len() < frames)

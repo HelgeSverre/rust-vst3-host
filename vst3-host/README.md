@@ -141,9 +141,11 @@ fn main() -> vst3_host::Result<()> {
 For a sequencer or custom audio callback, `RealtimePluginRunner::process_direct` accepts MIDI
 and parameter slices using the same prepared engine as the queued `process` method.
 `start_with_capacities` sets explicit storage limits; `start` derives defaults from the command
-capacity and the plugin's cached MIDI mappings. Pause audio before starting, stopping, or
-recovering the plugin with `into_plugin`. See [audio processing](../docs/explanation/audio-processing.md)
-for the direct interface and its limits.
+capacity and the plugin's cached MIDI mappings. The input-event limit applies to every raw MIDI
+message, including unmapped controllers, so a block's host-side routing work remains bounded.
+An over-capacity block is silenced and rejected; the next valid block can run normally. Pause
+audio before starting, stopping, or recovering the plugin with `into_plugin`. See [audio
+processing](../docs/explanation/audio-processing.md) for the direct interface and its limits.
 
 ### Putting it all together
 

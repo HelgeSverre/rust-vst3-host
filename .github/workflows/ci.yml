@@ -29,6 +29,15 @@ jobs:
         run: |
           cargo build -p vst3-host-testplug --release
           bash scripts/bundle-test-plugin.sh
+      - name: Prepared realtime regressions (TestSynth)
+        run: |
+          test -n "$(find test_plugins/TestSynth.vst3 -type f -name 'TestSynth*' -print -quit)"
+          cargo test -p vst3-host --all-features --test alloc_tests exclusive_hard_realtime_lifecycle_is_allocation_free -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests rejected_runner_start_preserves_ordinary_queued_midi -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests realtime_runner_queue_and_direct_share_the_prepared_engine -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests realtime_runner_queue_reports_capacity_and_recovers -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests testsynth_raw_midi_capacity_is_bounded_and_recovers_without_allocation -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test realtime_payload_tests -- --ignored --nocapture --test-threads=1
       # The editor path is the one thing the normal suite cannot reach: it needs a real window on
       # the process main thread. The smoke example owns `main`, and against TestSynth it asserts
       # the whole handshake (attach, content scale, resizeView -> onSize) rather than just "it
@@ -61,6 +70,15 @@ jobs:
         run: |
           cargo build -p vst3-host-testplug --release
           bash scripts/bundle-test-plugin.sh
+      - name: Prepared realtime regressions (TestSynth)
+        run: |
+          test -n "$(find test_plugins/TestSynth.vst3 -type f -name 'TestSynth*' -print -quit)"
+          cargo test -p vst3-host --all-features --test alloc_tests exclusive_hard_realtime_lifecycle_is_allocation_free -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests rejected_runner_start_preserves_ordinary_queued_midi -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests realtime_runner_queue_and_direct_share_the_prepared_engine -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests realtime_runner_queue_reports_capacity_and_recovers -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests testsynth_raw_midi_capacity_is_bounded_and_recovers_without_allocation -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test realtime_payload_tests -- --ignored --nocapture --test-threads=1
       # The X11/XCB editor path only ever got compiled here. `xvfb-run` gives it a display so it
       # is actually exercised: window creation, X11EmbedWindowID attach, and the host's
       # ConfigureWindow answer to the plugin's resize request.
@@ -123,6 +141,16 @@ jobs:
         run: |
           cargo build -p vst3-host-testplug --release
           bash scripts/bundle-test-plugin.sh
+      - name: Prepared realtime regressions (TestSynth)
+        shell: bash
+        run: |
+          test -n "$(find test_plugins/TestSynth.vst3 -type f -name 'TestSynth*' -print -quit)"
+          cargo test -p vst3-host --all-features --test alloc_tests exclusive_hard_realtime_lifecycle_is_allocation_free -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests rejected_runner_start_preserves_ordinary_queued_midi -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests realtime_runner_queue_and_direct_share_the_prepared_engine -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests realtime_runner_queue_reports_capacity_and_recovers -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test alloc_tests testsynth_raw_midi_capacity_is_bounded_and_recovers_without_allocation -- --ignored --exact --nocapture --test-threads=1
+          cargo test -p vst3-host --all-features --test realtime_payload_tests -- --ignored --nocapture --test-threads=1
       # windows-latest runs the job in an interactive desktop session, so the HWND editor path
       # (CreateWindowExW, GetDpiForWindow, the plugin's resizeView answered with SetWindowPos)
       # runs for real rather than only compiling.

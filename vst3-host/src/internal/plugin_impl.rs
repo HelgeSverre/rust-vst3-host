@@ -1,5 +1,7 @@
 //! Internal VST3 plugin implementation
 
+#[cfg(test)]
+use crate::midi::PluginEventData;
 use crate::{
     audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
     error::{Error, Result},
@@ -7,7 +9,7 @@ use crate::{
         ControllerSyncStatus, RealtimeCapacities, RealtimeMidiEvent, RealtimeParameterChange,
         RealtimeProcessError, RealtimeProcessReport,
     },
-    midi::{MidiChannel, MidiEvent, PluginEvent, PluginEventData},
+    midi::{MidiChannel, MidiEvent, PluginEvent},
     parameters::{Parameter, ParameterChange},
     plugin::{
         decode_state_snapshot, encode_state_snapshot, PluginInfo, PluginInternal, StateContext,
@@ -39,6 +41,7 @@ use super::{
     module_loader::{load_module, VstModule},
     realtime_com::{RealtimeEventList, RealtimeParameterChanges},
     realtime_guard::ProcessThreadGuard,
+    realtime_output::{OutputEventItem, OutputEventQueue, PreparedEventPool},
 };
 
 /// Cap on the buffered output MIDI a plugin emits, so a host that never polls can't grow it
@@ -251,7 +254,7 @@ pub struct PluginImpl {
     // converted to MidiEvent), buffered for the host to poll. A lock-free bounded queue so the
     // audio thread can push without locking and a UI thread can drain concurrently; when full
     // the oldest event is dropped (bounded memory if the host never polls).
-    output_events_owned: Arc<ArrayQueue<PluginEvent>>,
+    output_events_owned: Arc<OutputEventQueue>,
 
     // Plugin view
     plugin_view: Option<ComPtr<IPlugView>>,
@@ -366,7 +369,9 @@ struct RealtimeState {
     /// Owning events displaced from the public newest-wins output queue while processing is
     /// sealed. They are retained until the paused, off-thread exit so their payloads are never
     /// freed by the audio callback.
-    retired_output_events: Vec<PluginEvent>,
+    retired_output_events: Vec<OutputEventItem>,
+    /// Retains the active pool through every callback, including queue displacement and clears.
+    output_event_pool: Arc<PreparedEventPool>,
     /// Immutable controller-to-parameter table captured before entering exclusive processing.
     /// Controller COM calls are forbidden on the realtime thread, so mappings remain fixed until
     /// the caller leaves realtime mode and services any deferred restart request.
@@ -1613,7 +1618,7 @@ impl PluginImpl {
                 input_events,
                 output_events,
                 chunk_events: Vec::with_capacity(MAX_QUEUED_EVENTS),
-                output_events_owned: Arc::new(ArrayQueue::new(MAX_OUTPUT_MIDI)),
+                output_events_owned: OutputEventQueue::new(MAX_OUTPUT_MIDI),
                 plugin_view: None,
                 editor_scale_factor: 1.0,
                 plug_frame,
@@ -2370,7 +2375,7 @@ impl PluginImpl {
             if !self.output_events.is_empty() {
                 let out = &self.output_events_owned;
                 self.output_events.drain_each(|event| {
-                    out.force_push(event);
+                    out.force_push_owned(event);
                 });
             }
 
@@ -2802,7 +2807,17 @@ impl PluginInternal for PluginImpl {
         })?;
 
         let input_events = ComWrapper::new(RealtimeEventList::new(capacities.max_input_events));
-        let output_events = ComWrapper::new(RealtimeEventList::new(capacities.max_output_events));
+        let output_slot_count = MAX_OUTPUT_MIDI
+            .checked_add(capacities.max_output_events)
+            .ok_or_else(|| Error::Other("hard-realtime output slot count overflow".to_string()))?;
+        let output_event_pool = PreparedEventPool::new(
+            output_slot_count,
+            capacities.max_output_payload_bytes_per_event,
+        );
+        let output_events = ComWrapper::new(RealtimeEventList::new_output(
+            capacities.max_output_events,
+            output_event_pool.clone(),
+        ));
         let input_parameters = ComWrapper::new(RealtimeParameterChanges::new(
             capacities.max_distinct_parameters,
             capacities.max_parameter_changes,
@@ -2849,6 +2864,7 @@ impl PluginInternal for PluginImpl {
             capacities,
             preflight_parameter_ids: Vec::with_capacity(capacities.max_parameter_changes),
             retired_output_events: Vec::with_capacity(MAX_OUTPUT_MIDI),
+            output_event_pool,
             midi_mapping,
             root_program_change,
         }));
@@ -2954,9 +2970,9 @@ impl PluginInternal for PluginImpl {
             .realtime_state
             .as_mut()
             .ok_or(RealtimeProcessError::UnsupportedBackend)?;
-        // Preserve fixed processor output for the ordinary lock-free drains as well. Keep the
-        // public newest-wins policy, but retain any displaced owning event until exit so its
-        // payload is never freed by this audio callback.
+        // Publish prepared slots without constructing owning payload vectors. The consumer makes
+        // its owned copy on its own thread. Retain pre-entry output displaced by the newest-wins
+        // queue until exit; its storage may belong to ordinary mode or an earlier prepared pool.
         let feedback = &self.output_param_feedback;
         state
             .output_parameters
@@ -2964,22 +2980,19 @@ impl PluginInternal for PluginImpl {
                 let _ = feedback.force_push((id, value));
             });
         let output_events = &self.output_events_owned;
-        state.output_events.drain_each(|event| {
-            if let Some(event) = realtime_event_to_plugin_event(&event) {
-                if let Some(displaced) = output_events.force_push(event) {
-                    if realtime_event_owns_payload(&displaced) {
-                        // At entry the public queue holds at most MAX_OUTPUT_MIDI events, and
-                        // fixed processing cannot create owning events. This reservation is
-                        // therefore sufficient for every owning event displaced while sealed.
-                        debug_assert!(state.retired_output_events.len() < MAX_OUTPUT_MIDI);
-                        if state.retired_output_events.len() < MAX_OUTPUT_MIDI {
-                            state.retired_output_events.push(displaced);
-                        } else {
-                            // Preserve the hard-realtime no-free guarantee even if a future
-                            // caller breaks the bound above; exit is the only reclaim point.
-                            std::mem::forget(displaced);
-                        }
-                    }
+        state.output_events.drain_prepared_each(|slot| {
+            if let Some(displaced) =
+                output_events.force_push_prepared(slot, &state.output_event_pool)
+            {
+                // Only the queue's at-most-MAX_OUTPUT_MIDI pre-entry items can need retirement.
+                // Current-pool items are recycled by the queue without freeing their storage.
+                debug_assert!(state.retired_output_events.len() < MAX_OUTPUT_MIDI);
+                if state.retired_output_events.len() < MAX_OUTPUT_MIDI {
+                    state.retired_output_events.push(displaced);
+                } else {
+                    // Preserve the no-free callback contract if a future producer breaks the
+                    // pre-entry bound. This branch is unreachable under exclusive processing.
+                    std::mem::forget(displaced);
                 }
             }
         });
@@ -3050,6 +3063,7 @@ impl PluginInternal for PluginImpl {
             .unwrap_or(ptr::null_mut());
         // Called only during the caller-paused reverse transition. Dropping fixed Vec/COM
         // allocations here is intentionally non-realtime and leaves ordinary structures intact.
+        self.output_events_owned.materialize_prepared_events(drop);
         self.realtime_state.take();
         Ok(())
     }
@@ -4134,7 +4148,7 @@ impl PluginInternal for PluginImpl {
 
     fn take_output_events(&self) -> Vec<PluginEvent> {
         let mut out = Vec::new();
-        while let Some(event) = self.output_events_owned.pop() {
+        while let Some(event) = self.output_events_owned.pop_event() {
             out.push(event);
         }
         out
@@ -5260,10 +5274,8 @@ fn route_realtime_midi(
     RealtimeMidiRoute::Event(vst_event)
 }
 
-/// Convert a fixed-storage VST3 output event into its owned host representation.
-///
-/// `RealtimeEventList` rejects pointer-backed event kinds before this is reached, so every
-/// accepted variant is copied directly without allocating in the audio callback.
+/// Convert copy-only VST3 events for the MIDI conversion regression tests.
+#[cfg(test)]
 #[allow(non_upper_case_globals)]
 // kNoteOnEvent etc. are VST3 SDK constants
 // SDK enum constants (event types, controller numbers) are generated as `i32` on some
@@ -5339,16 +5351,6 @@ fn realtime_event_to_plugin_event(e: &Event) -> Option<PluginEvent> {
             data,
         })
     }
-}
-
-fn realtime_event_owns_payload(event: &PluginEvent) -> bool {
-    matches!(
-        &event.data,
-        PluginEventData::Data { .. }
-            | PluginEventData::NoteExpressionText { .. }
-            | PluginEventData::Chord { .. }
-            | PluginEventData::Scale { .. }
-    )
 }
 
 /// Convert a raw VST3 `Event` (as a plugin emits into its output event list) into a safe
@@ -6385,6 +6387,7 @@ mod hard_realtime_routing_tests {
             max_block_frames: 64,
             max_input_events: events,
             max_output_events: 1,
+            max_output_payload_bytes_per_event: 0,
             max_parameter_changes: points,
             max_distinct_parameters: distinct,
         }

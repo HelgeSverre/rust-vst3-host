@@ -16,13 +16,21 @@ use std::{
 
 use vst3::{Class, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 
+use super::realtime_output::{PreparedEventPool, PreparedOutputEvent};
+
 const NONE: usize = usize::MAX;
 
 /// Fixed-capacity implementation of `IEventList` used only by an exclusively owned processor.
 pub(crate) struct RealtimeEventList {
-    events: UnsafeCell<Vec<Event>>,
+    events: UnsafeCell<Vec<RealtimeStoredEvent>>,
     capacity: usize,
     overflows: AtomicUsize,
+    output_pool: Option<Arc<PreparedEventPool>>,
+}
+
+enum RealtimeStoredEvent {
+    Inline(Event),
+    Prepared(PreparedOutputEvent),
 }
 
 // SAFETY: the VST3 process contract gives the list to one processor invocation at a time. The
@@ -36,13 +44,29 @@ impl RealtimeEventList {
             events: UnsafeCell::new(Vec::with_capacity(capacity)),
             capacity,
             overflows: AtomicUsize::new(0),
+            output_pool: None,
+        }
+    }
+
+    /// Allocates a list which copies plugin output into `pool` during `addEvent`.
+    pub(crate) fn new_output(capacity: usize, output_pool: Arc<PreparedEventPool>) -> Self {
+        Self {
+            events: UnsafeCell::new(Vec::with_capacity(capacity)),
+            capacity,
+            overflows: AtomicUsize::new(0),
+            output_pool: Some(output_pool),
         }
     }
 
     /// Clears the current block while retaining the backing allocation.
     pub(crate) fn clear(&self) {
         // SAFETY: callers obey the exclusive process-thread contract documented on the type.
-        unsafe { (&mut *self.events.get()).clear() };
+        let events = unsafe { &mut *self.events.get() };
+        for event in events.drain(..) {
+            if let RealtimeStoredEvent::Prepared(event) = event {
+                event.recycle();
+            }
+        }
     }
 
     /// Adds one host-created event without exceeding the prepared capacity.
@@ -53,7 +77,7 @@ impl RealtimeEventList {
             self.overflows.fetch_add(1, Ordering::Relaxed);
             return false;
         }
-        events.push(event);
+        events.push(RealtimeStoredEvent::Inline(event));
         true
     }
 
@@ -62,12 +86,14 @@ impl RealtimeEventList {
         self.overflows.load(Ordering::Relaxed)
     }
 
-    /// Move each fixed-size output event into `f`, retaining this list's allocation.
-    pub(crate) fn drain_each(&self, mut f: impl FnMut(Event)) {
+    /// Transfers prepared output slots to `f` without copying or allocating.
+    pub(crate) fn drain_prepared_each(&self, mut f: impl FnMut(PreparedOutputEvent)) {
         // SAFETY: callers obey the exclusive process-thread contract documented on the type.
         let events = unsafe { &mut *self.events.get() };
         for event in events.drain(..) {
-            f(event);
+            if let RealtimeStoredEvent::Prepared(event) = event {
+                f(event);
+            }
         }
     }
 }
@@ -86,8 +112,15 @@ impl IEventListTrait for RealtimeEventList {
             return kResultFalse;
         }
         match (&*self.events.get()).get(index as usize) {
-            Some(value) => {
+            Some(RealtimeStoredEvent::Inline(value)) => {
                 *event = *value;
+                kResultOk
+            }
+            Some(RealtimeStoredEvent::Prepared(value)) => {
+                let Some(raw) = value.raw_event() else {
+                    return kResultFalse;
+                };
+                *event = raw;
                 kResultOk
             }
             None => kResultFalse,
@@ -98,8 +131,24 @@ impl IEventListTrait for RealtimeEventList {
         if event.is_null() {
             return kResultFalse;
         }
-        // Pointer-backed payloads need an owned allocation before they can outlive the plugin's
-        // process call. The fixed realtime list deliberately accepts only copy-only events.
+        if let Some(pool) = &self.output_pool {
+            // SAFETY: the VST plugin owns `event` for this synchronous callback. The pool copies
+            // every pointer-backed payload before this method returns.
+            let events = &mut *self.events.get();
+            if events.len() == self.capacity {
+                self.overflows.fetch_add(1, Ordering::Relaxed);
+                return kResultFalse;
+            }
+            let Some(event) = pool.copy_event(&*event) else {
+                self.overflows.fetch_add(1, Ordering::Relaxed);
+                return kResultFalse;
+            };
+            events.push(RealtimeStoredEvent::Prepared(event));
+            return kResultOk;
+        }
+
+        // Input lists retain the original copy-only behavior; host-created input events are
+        // already owned by their staging queue.
         if !realtime_event_is_copy_only(&*event) {
             self.overflows.fetch_add(1, Ordering::Relaxed);
             return kResultFalse;

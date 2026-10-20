@@ -8,6 +8,7 @@ pub(crate) mod module_loader;
 pub(crate) mod plugin_impl;
 pub(crate) mod realtime_com;
 pub(crate) mod realtime_guard;
+pub(crate) mod realtime_output;
 pub(crate) mod utils;
 
 pub(crate) mod isolated_plugin_impl;

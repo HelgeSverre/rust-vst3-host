@@ -2487,7 +2487,9 @@ fn plugin_event_to_raw(event: &PluginEvent) -> std::result::Result<Event, ()> {
 }
 
 #[allow(non_upper_case_globals, clippy::unnecessary_cast)]
-unsafe fn raw_event_to_plugin_event(raw: &Event) -> std::result::Result<PluginEvent, ()> {
+pub(crate) unsafe fn raw_event_to_plugin_event(
+    raw: &Event,
+) -> std::result::Result<PluginEvent, ()> {
     use Event_::EventTypes_::*;
 
     unsafe fn copy_bytes(ptr: *const u8, len: usize) -> std::result::Result<Vec<u8>, ()> {

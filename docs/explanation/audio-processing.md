@@ -98,16 +98,30 @@ caller slices ───> runner.process_direct ┘                     │
 ordinary Plugin ──────────────────────────> ordinary queues ───┘
 ```
 
-Use `start_with_capacities` to choose explicit storage limits. Each target of a one-to-many
-MIDI mapping consumes a parameter point, while repeated parameter ids share one queue.
-When a block exceeds a prepared limit, processing returns an error and clears its audio
-outputs instead of growing storage. Caller buffers must already have enough samples for
-the requested block, whose size must not exceed the configured maximum.
+Use `start_with_capacities` to choose explicit storage limits. `max_input_events` limits
+*every* raw MIDI message in a block before the host starts routing it, including unmapped
+controllers. Notes and poly-aftertouch also consume fixed VST event storage; each target of a
+one-to-many MIDI mapping consumes a parameter point, while repeated parameter ids share one
+queue. This bounds input validation and routing work even when a caller accidentally supplies a
+long list of MIDI messages that would otherwise be ignored.
+
+When a block exceeds a prepared limit, processing returns an error and clears its audio outputs
+instead of growing storage. The next valid block can be processed normally. Caller buffers must
+already have enough samples for the requested block, whose size must not exceed the configured
+maximum.
 
 The host's prepared processing path performs no allocation, deallocation, logging, or mutex
-locking, including its first block. This guarantee covers the host code; a third-party
-plugin can still allocate or lock inside its own processor. Process-isolated plugins are
-rejected during preparation because their IPC implementation cannot provide this guarantee.
+locking, including its first block. The test suite exercises that promise with a deterministic
+test plugin on the supported CI platforms. This guarantee covers the host code; a third-party
+plugin can still allocate or lock inside its own processor, and passing an allocation test does
+not prove that a plugin will meet every audio deadline. Process-isolated plugins are rejected
+during preparation because their IPC implementation cannot provide this guarantee.
+
+For a local timing diagnostic, build TestSynth with `just test-plugin`, then run
+`cargo test -p vst3-host --release --test alloc_tests testsynth_small_block_realtime_timing_measurement -- --ignored --exact --nocapture`.
+It reports p99 and maximum callback time against the 64-frame block budget under repeated note
+churn, mapped controllers, and automation. It measures the host plus TestSynth on the current
+machine; CI runs deterministic allocation regressions without a scheduling-sensitive time limit.
 
 The runner owns the lifecycle: create it, start it off-thread, process blocks, then stop the
 audio callback before stopping or recovering the ordinary `Plugin`. The
@@ -121,8 +135,15 @@ after the failed start and flush it through ordinary processing. Commands queued
 `RtControl` are retained for the runner's first block.
 
 Copy-only output events and processor parameter feedback reach the plugin's bounded output
-queues. SysEx, text, chord, and scale output payloads require owned storage and are refused by
-the fixed event list; `RealtimeProcessReport::output_event_overflows` includes those refusals.
+queues. SysEx, text, chord, and scale output events are copied into a preallocated per-event
+payload buffer, then become ordinary owned output events when another thread drains them.
+`max_output_payload_bytes_per_event` selects that buffer's limit; zero disables payload-bearing
+output events, and the default runner configuration reserves 4096 bytes per event. An output
+event beyond that size, or beyond the configured event capacity, is refused and counted in
+`RealtimeProcessReport::output_event_overflows` rather than causing callback-time allocation.
+The pool covers the current block plus the 4096-event output queue. For example, 1024 output
+events per block at 4096 bytes per event reserve about 20 MiB for payloads; set the payload limit
+to zero when only fixed-size MIDI output is needed.
 Take an output consumer before moving the plugin into the runner if another thread needs to
 drain emitted events. A full host output queue keeps the newest feedback. Any displaced owned
 payload from ordinary processing is retained in preallocated storage until off-thread teardown.
