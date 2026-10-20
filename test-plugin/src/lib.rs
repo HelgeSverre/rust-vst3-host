@@ -107,6 +107,15 @@ const CH2_LEVEL_PARAM_ID: u32 = 16;
 /// separate buses for per-part effects.
 const CH1_LEVEL_PARAM_ID: u32 = 17;
 
+/// MIDI channel 16 note 119 is reserved for the fixture's pointer-backed output-event probe.
+/// The synth filters this one note before voice creation, so tests can request payload output
+/// without changing rendered audio. Velocity 1 emits one event of each supported pointer-backed
+/// kind; velocity 2 emits an intentionally 17-byte SysEx event for capacity rejection tests.
+const PAYLOAD_PROBE_CHANNEL: i16 = 15;
+const PAYLOAD_PROBE_NOTE: i16 = 119;
+const PAYLOAD_PROBE_NORMAL: u8 = 1;
+const PAYLOAD_PROBE_OVERSIZED: u8 = 2;
+
 const PARAM_COUNT: i32 = 18;
 
 /// Parameter names and defaults, indexed by parameter id.
@@ -602,6 +611,11 @@ enum ParsedEvent {
     },
 }
 
+fn payload_probe_mode(event: NoteOnEvent) -> Option<u8> {
+    (event.channel == PAYLOAD_PROBE_CHANNEL && event.pitch == PAYLOAD_PROBE_NOTE)
+        .then(|| (event.velocity * 127.0).round().clamp(0.0, 127.0) as u8)
+}
+
 impl SynthState {
     /// Route one normalized parameter value; a program change fans out into its preset.
     fn set_param(&mut self, id: u32, value: f64) {
@@ -1054,6 +1068,9 @@ unsafe fn process_synth_block(state: &Mutex<SynthState>, data: &ProcessData) -> 
             let parsed = match ev.r#type as u32 {
                 t if t == Event_::EventTypes_::kNoteOnEvent as u32 => {
                     let n = ev.__field0.noteOn;
+                    if payload_probe_mode(n).is_some() {
+                        continue;
+                    }
                     ParsedEvent::NoteOn {
                         note_id: n.noteId,
                         pitch: n.pitch,
@@ -1201,6 +1218,99 @@ unsafe fn process_synth_block(state: &Mutex<SynthState>, data: &ProcessData) -> 
         .voices
         .retain(|v| v.gate || v.amp_env.level > ENV_SILENCE);
     kResultOk
+}
+
+/// Emit the TestSynth's bounded-payload conformance probe when its reserved note is
+/// present in this block. The payloads are stack-backed and overwritten immediately after
+/// `addEvent`: a host that merely retains their pointer instead of copying during that call will
+/// expose the corruption to the test. Normal synthesis filters this note before voice creation.
+///
+/// # Safety
+/// `data` must be the live process data for this callback.
+unsafe fn emit_payload_probe_events(data: &ProcessData) {
+    let Some(input) = ComRef::from_raw(data.inputEvents) else {
+        return;
+    };
+    let mut mode = 0u8;
+    for index in 0..input.getEventCount() {
+        let mut event: Event = std::mem::zeroed();
+        if input.getEvent(index, &mut event) != kResultOk
+            || event.r#type as u32 != Event_::EventTypes_::kNoteOnEvent as u32
+        {
+            continue;
+        }
+        if let Some(probe_mode) = payload_probe_mode(event.__field0.noteOn) {
+            mode = probe_mode;
+        }
+    }
+    let Some(output) = ComRef::from_raw(data.outputEvents) else {
+        return;
+    };
+
+    match mode {
+        PAYLOAD_PROBE_NORMAL => {
+            let mut sysex = [0xf0, 0x7d, 0x54, 0x53, 0x01, 0xf7];
+            let mut note_text = [b'N' as u16, b'E' as u16, b'X' as u16, b'T' as u16];
+            let mut chord_text = [b'C' as u16, b'7' as u16, 0];
+            let mut scale_text = [b'M' as u16, b'a' as u16];
+
+            let mut event: Event = std::mem::zeroed();
+            event.r#type = Event_::EventTypes_::kDataEvent as u16;
+            event.__field0.data = DataEvent {
+                size: sysex.len() as u32,
+                r#type: DataEvent_::DataTypes_::kMidiSysEx as u32,
+                bytes: sysex.as_ptr(),
+            };
+            let _ = output.addEvent(&mut event);
+            sysex.fill(0xee);
+
+            event.r#type = Event_::EventTypes_::kNoteExpressionTextEvent as u16;
+            event.__field0.noteExpressionText = NoteExpressionTextEvent {
+                typeId: 0x5453_0001,
+                noteId: 71,
+                textLen: note_text.len() as u32,
+                text: note_text.as_ptr(),
+            };
+            let _ = output.addEvent(&mut event);
+            note_text.fill(0xffff);
+
+            event.r#type = Event_::EventTypes_::kChordEvent as u16;
+            event.__field0.chord = ChordEvent {
+                root: 0,
+                bassNote: 0,
+                mask: 0b0000_0100_1001,
+                textLen: chord_text.len() as u16,
+                text: chord_text.as_ptr(),
+            };
+            let _ = output.addEvent(&mut event);
+            chord_text.fill(0xffff);
+
+            event.r#type = Event_::EventTypes_::kScaleEvent as u16;
+            event.__field0.scale = ScaleEvent {
+                root: 0,
+                mask: 0b0000_1010_1101,
+                textLen: scale_text.len() as u16,
+                text: scale_text.as_ptr(),
+            };
+            let _ = output.addEvent(&mut event);
+            scale_text.fill(0xffff);
+        }
+        PAYLOAD_PROBE_OVERSIZED => {
+            let mut sysex = [0x5a; 17];
+            sysex[0] = 0xf0;
+            sysex[16] = 0xf7;
+            let mut event: Event = std::mem::zeroed();
+            event.r#type = Event_::EventTypes_::kDataEvent as u16;
+            event.__field0.data = DataEvent {
+                size: sysex.len() as u32,
+                r#type: DataEvent_::DataTypes_::kMidiSysEx as u32,
+                bytes: sysex.as_ptr(),
+            };
+            let _ = output.addEvent(&mut event);
+            sysex.fill(0xee);
+        }
+        _ => {}
+    }
 }
 
 /// Render one parameter's value the way the plugin itself would display it.
@@ -1480,6 +1590,7 @@ impl IAudioProcessorTrait for TestSynthProcessor {
                 }
             }
         }
+        emit_payload_probe_events(data);
         process_synth_block(&self.state, data)
     }
     unsafe fn getTailSamples(&self) -> u32 {
@@ -2437,7 +2548,9 @@ impl IAudioProcessorTrait for TestSynthSingle {
         kResultOk
     }
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
-        process_synth_block(&self.state, &*data)
+        let data = &*data;
+        emit_payload_probe_events(data);
+        process_synth_block(&self.state, data)
     }
     unsafe fn getTailSamples(&self) -> u32 {
         0

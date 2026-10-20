@@ -16,13 +16,21 @@ use std::{
 
 use vst3::{Class, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 
+use super::realtime_output::{PreparedEventPool, PreparedOutputEvent};
+
 const NONE: usize = usize::MAX;
 
 /// Fixed-capacity implementation of `IEventList` used only by an exclusively owned processor.
 pub(crate) struct RealtimeEventList {
-    events: UnsafeCell<Vec<Event>>,
+    events: UnsafeCell<Vec<RealtimeStoredEvent>>,
     capacity: usize,
     overflows: AtomicUsize,
+    output_pool: Option<Arc<PreparedEventPool>>,
+}
+
+enum RealtimeStoredEvent {
+    Inline(Event),
+    Prepared(PreparedOutputEvent),
 }
 
 // SAFETY: the VST3 process contract gives the list to one processor invocation at a time. The
@@ -36,13 +44,29 @@ impl RealtimeEventList {
             events: UnsafeCell::new(Vec::with_capacity(capacity)),
             capacity,
             overflows: AtomicUsize::new(0),
+            output_pool: None,
+        }
+    }
+
+    /// Allocates a list which copies plugin output into `pool` during `addEvent`.
+    pub(crate) fn new_output(capacity: usize, output_pool: Arc<PreparedEventPool>) -> Self {
+        Self {
+            events: UnsafeCell::new(Vec::with_capacity(capacity)),
+            capacity,
+            overflows: AtomicUsize::new(0),
+            output_pool: Some(output_pool),
         }
     }
 
     /// Clears the current block while retaining the backing allocation.
     pub(crate) fn clear(&self) {
         // SAFETY: callers obey the exclusive process-thread contract documented on the type.
-        unsafe { (&mut *self.events.get()).clear() };
+        let events = unsafe { &mut *self.events.get() };
+        for event in events.drain(..) {
+            if let RealtimeStoredEvent::Prepared(event) = event {
+                event.recycle();
+            }
+        }
     }
 
     /// Adds one host-created event without exceeding the prepared capacity.
@@ -53,13 +77,24 @@ impl RealtimeEventList {
             self.overflows.fetch_add(1, Ordering::Relaxed);
             return false;
         }
-        events.push(event);
+        events.push(RealtimeStoredEvent::Inline(event));
         true
     }
 
     /// Returns the number of rejected pushes since construction.
     pub(crate) fn overflow_count(&self) -> usize {
         self.overflows.load(Ordering::Relaxed)
+    }
+
+    /// Transfers prepared output slots to `f` without copying or allocating.
+    pub(crate) fn drain_prepared_each(&self, mut f: impl FnMut(PreparedOutputEvent)) {
+        // SAFETY: callers obey the exclusive process-thread contract documented on the type.
+        let events = unsafe { &mut *self.events.get() };
+        for event in events.drain(..) {
+            if let RealtimeStoredEvent::Prepared(event) = event {
+                f(event);
+            }
+        }
     }
 }
 
@@ -77,8 +112,15 @@ impl IEventListTrait for RealtimeEventList {
             return kResultFalse;
         }
         match (&*self.events.get()).get(index as usize) {
-            Some(value) => {
+            Some(RealtimeStoredEvent::Inline(value)) => {
                 *event = *value;
+                kResultOk
+            }
+            Some(RealtimeStoredEvent::Prepared(value)) => {
+                let Some(raw) = value.raw_event() else {
+                    return kResultFalse;
+                };
+                *event = raw;
                 kResultOk
             }
             None => kResultFalse,
@@ -87,6 +129,28 @@ impl IEventListTrait for RealtimeEventList {
 
     unsafe fn addEvent(&self, event: *mut Event) -> i32 {
         if event.is_null() {
+            return kResultFalse;
+        }
+        if let Some(pool) = &self.output_pool {
+            // SAFETY: the VST plugin owns `event` for this synchronous callback. The pool copies
+            // every pointer-backed payload before this method returns.
+            let events = &mut *self.events.get();
+            if events.len() == self.capacity {
+                self.overflows.fetch_add(1, Ordering::Relaxed);
+                return kResultFalse;
+            }
+            let Some(event) = pool.copy_event(&*event) else {
+                self.overflows.fetch_add(1, Ordering::Relaxed);
+                return kResultFalse;
+            };
+            events.push(RealtimeStoredEvent::Prepared(event));
+            return kResultOk;
+        }
+
+        // Input lists retain the original copy-only behavior; host-created input events are
+        // already owned by their staging queue.
+        if !realtime_event_is_copy_only(&*event) {
+            self.overflows.fetch_add(1, Ordering::Relaxed);
             return kResultFalse;
         }
         if self.push(*event) {
@@ -335,6 +399,34 @@ impl RealtimeParameterChanges {
     pub(crate) fn overflow_count(&self) -> usize {
         self.overflows.load(Ordering::Relaxed)
     }
+
+    /// Visit every point accepted for the current block without allocating.
+    pub(crate) fn for_each_active_point(&self, mut f: impl FnMut(u32, i32, f64)) {
+        let used = self.used.load(Ordering::Relaxed);
+        for queue in &self.queues[..used] {
+            let id = queue.param_id.load(Ordering::Relaxed);
+            let count = queue.count.load(Ordering::Relaxed);
+            for index in 0..count {
+                if let Some(point) = queue.point_at(index) {
+                    f(id, point.sample_offset, point.value);
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::unnecessary_cast)]
+fn realtime_event_is_copy_only(event: &Event) -> bool {
+    use Event_::EventTypes_::*;
+
+    !matches!(
+        event.r#type as u32,
+        kind
+            if kind == kDataEvent as u32
+                || kind == kNoteExpressionTextEvent as u32
+                || kind == kChordEvent as u32
+                || kind == kScaleEvent as u32
+    )
 }
 
 impl Class for RealtimeParameterChanges {
@@ -390,6 +482,16 @@ mod tests {
     }
 
     #[test]
+    fn output_event_list_rejects_pointer_backed_events() {
+        let list = RealtimeEventList::new(1);
+        let mut event: Event = unsafe { std::mem::zeroed() };
+        event.r#type = Event_::EventTypes_::kDataEvent as u16;
+
+        assert_eq!(unsafe { list.addEvent(&mut event) }, kResultFalse);
+        assert_eq!(list.overflow_count(), 1);
+    }
+
+    #[test]
     fn parameter_arena_groups_orders_and_clears_blocks() {
         let changes = RealtimeParameterChanges::new(2, 3);
         assert!(changes.enqueue(7, 64, 0.9));
@@ -404,5 +506,17 @@ mod tests {
         changes.clear();
         assert_eq!(changes.distinct_count(), 0);
         assert!(changes.enqueue(9, 1, 0.2));
+    }
+
+    #[test]
+    fn parameter_changes_visit_active_points_in_queue_order() {
+        let changes = RealtimeParameterChanges::new(2, 3);
+        assert!(changes.enqueue(7, 64, 0.9));
+        assert!(changes.enqueue(7, 0, 0.1));
+        assert!(changes.enqueue(3, 8, 0.5));
+
+        let mut visited = Vec::new();
+        changes.for_each_active_point(|id, offset, value| visited.push((id, offset, value)));
+        assert_eq!(visited, vec![(7, 0, 0.1), (7, 64, 0.9), (3, 8, 0.5)]);
     }
 }

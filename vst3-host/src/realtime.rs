@@ -33,7 +33,16 @@
 //! # }
 //! ```
 
-use crate::{audio::AudioBuffers, error::Result, midi::MidiEvent, plugin::Plugin};
+use crate::{
+    audio::{AudioBuffers, BusDirection},
+    error::{Error, Result},
+    hard_realtime::{
+        ControllerSyncStatus, RealtimeCapacities, RealtimeMidiEvent, RealtimeParameterChange,
+        RealtimeProcessError, RealtimeProcessReport,
+    },
+    midi::MidiEvent,
+    plugin::Plugin,
+};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
     mem::ManuallyDrop,
@@ -126,38 +135,62 @@ enum RtCommand {
 ///
 /// # Real-time safety
 ///
-/// In steady state [`process`](Self::process) is **allocation-free and `Drop`-free**: once
-/// warmed up it performs no heap allocation, reallocation, or free per block, even while
-/// parameter changes and MIDI (in and out) are flowing. This holds under two conditions:
+/// After off-thread preparation, [`process`](Self::process) and
+/// [`process_direct`](Self::process_direct) perform no host heap allocation, reallocation,
+/// deallocation, logging, or mutex locking, including their first block. This holds under
+/// two conditions:
 ///
 /// - **Fixed buffer size** — pass an [`AudioBuffers`] sized to the configured block size and
 ///   don't resize it between calls (a smaller block is fine; growth reallocates).
-/// - **In-process** — the runner hosts the plugin in-process; the process-isolation path
-///   marshals audio over IPC and is not allocation-free.
+/// - **In-process** — unsupported backends, including process isolation, are rejected by
+///   [`start`](Self::start) before live processing begins.
 ///
 /// This is verified by `tests/alloc_tests.rs` (a counting global allocator asserts zero
-/// alloc/realloc/free over a steady-state run driving parameters and MIDI). The host cannot
+/// alloc/realloc/free from the first block while driving parameters and MIDI). The host cannot
 /// guarantee the *plugin's* own `process()` is allocation-free — that is the plugin's
 /// responsibility; the guarantee is about the host code around it.
 ///
 /// # Threading model
 ///
-/// Queued parameter and mapped-MIDI commands populate the processor's input parameter queues on
-/// the audio thread and park the same values for `IEditController`, which is a main-thread-domain
-/// interface: the plugin applies them when a control thread next touches it (see
-/// [`RtControl::set_parameter`]). No controller call is ever made from this runner.
+/// Queued parameter and mapped-MIDI commands populate fixed processor queues on the audio
+/// thread. Accepted values enter a bounded controller-feedback queue; controller synchronization
+/// happens when its control thread next reads or services the plugin, or recovers ownership.
+/// No controller call is made from either process method.
 ///
-/// It is **not yet fully lock-free**: `process` still takes a few short, uncontended mutexes
-/// per block (the parameter-change and event queues, and the level meter). They are uncontended
-/// while the runner owns the plugin, but a hard-real-time deployment should treat lock removal
-/// as pending work. Output MIDI is already lock-free, though: take a
+/// Mutex-backed editor callbacks and metering are bypassed during prepared processing. Fixed
+/// output events and parameter feedback use bounded lock-free queues. Take a
 /// [`OutputMidiConsumer`](crate::OutputMidiConsumer) via
 /// [`Plugin::output_midi_handle`](crate::Plugin::output_midi_handle) before moving the plugin
 /// into the runner, then drain emitted events from your UI thread while the audio thread pushes.
 pub struct RealtimePluginRunner {
     plugin: Option<Plugin>,
     rx: Consumer<RtCommand>,
-    teardown_tx: SyncSender<ManuallyDrop<Plugin>>,
+    teardown_tx: SyncSender<ManuallyDrop<RunnerTeardown>>,
+    command_capacity: usize,
+    mode: RunnerMode,
+}
+
+/// Lifecycle state owned by the runner. The prepared variant is deliberately private: callers
+/// choose it through `start_with_capacities`, while every process entry point shares the same
+/// prepared backend.
+enum RunnerMode {
+    Unprepared,
+    Prepared(PreparedRunner),
+}
+
+struct PreparedRunner {
+    capacities: RealtimeCapacities,
+    final_parameters: Vec<(u32, f64)>,
+    queued_midi: Vec<RealtimeMidiEvent>,
+    queued_parameters: Vec<RealtimeParameterChange>,
+    faulted: bool,
+}
+
+/// Everything whose destruction is deferred to the control thread when a runner is dropped from
+/// an audio callback. Prepared scratch vectors belong here too: dropping them is a deallocation.
+struct RunnerTeardown {
+    _plugin: Plugin,
+    _mode: RunnerMode,
 }
 
 /// A `Send` handle for pushing MIDI and parameter changes to a [`RealtimePluginRunner`]
@@ -168,7 +201,7 @@ pub struct RtControl {
     tx: Producer<RtCommand>,
     /// Count of commands dropped because the queue was full (observability).
     dropped: u64,
-    teardown: OwnerThreadTeardown<Plugin>,
+    teardown: OwnerThreadTeardown<RunnerTeardown>,
 }
 
 /// The receive half of a one-slot teardown handoff.
@@ -246,6 +279,8 @@ impl RealtimePluginRunner {
                 plugin: Some(plugin),
                 rx,
                 teardown_tx,
+                command_capacity: command_capacity.max(1),
+                mode: RunnerMode::Unprepared,
             },
             RtControl {
                 tx,
@@ -255,23 +290,81 @@ impl RealtimePluginRunner {
         )
     }
 
-    /// Begin processing. Call once before the first [`process`](Self::process).
+    /// Begin prepared in-process processing with capacities derived from the command ring.
+    ///
+    /// This is the compatibility entry point. New applications should make their fixed realtime
+    /// contract explicit with [`Self::start_with_capacities`]. No ordinary processing fallback is
+    /// used: unsupported backends fail before an audio callback begins.
     pub fn start(&mut self) -> Result<()> {
-        self.plugin
+        if matches!(self.mode, RunnerMode::Prepared(_)) {
+            self.plugin_mut()?.start_processing()?;
+            if let RunnerMode::Prepared(prepared) = &mut self.mode {
+                prepared.faulted = false;
+            }
+            return Ok(());
+        }
+        let capacities = self.default_capacities()?;
+        self.start_with_capacities(capacities)
+    }
+
+    /// Prepare fixed in-process storage and begin processing.
+    ///
+    /// Preparation runs on the caller's control thread. It snapshots mapping metadata and
+    /// reserves the queue-drain scratch space, so [`process`](Self::process) and
+    /// [`process_direct`](Self::process_direct) only use the same prepared engine. Process
+    /// isolation and other unsupported backends return an error here.
+    pub fn start_with_capacities(&mut self, capacities: RealtimeCapacities) -> Result<()> {
+        if let RunnerMode::Prepared(prepared) = &self.mode {
+            if prepared.capacities != capacities {
+                return Err(Error::Other(
+                    "cannot change realtime capacities without restoring the plugin".to_string(),
+                ));
+            }
+            self.plugin_mut()?.start_processing()?;
+            if let RunnerMode::Prepared(prepared) = &mut self.mode {
+                prepared.faulted = false;
+            }
+            return Ok(());
+        }
+
+        let plugin = self.plugin_mut()?;
+        capacities.validate(plugin.block_size)?;
+        plugin.stop_processing()?;
+        let mut final_parameters: Vec<_> = plugin
+            .get_parameters()?
+            .into_iter()
+            .map(|parameter| (parameter.id, parameter.value))
+            .collect();
+        final_parameters.sort_unstable_by_key(|(id, _)| *id);
+
+        plugin
+            .internal
             .as_mut()
-            .expect("runner plugin missing")
-            .start_processing()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .prepare_hard_realtime(capacities)?;
+        if let Err(error) = plugin.start_processing() {
+            if let Some(internal) = plugin.internal.as_mut() {
+                let _ = internal.leave_hard_realtime();
+            }
+            return Err(error);
+        }
+
+        self.mode = RunnerMode::Prepared(PreparedRunner {
+            capacities,
+            final_parameters,
+            queued_midi: Vec::with_capacity(self.command_capacity),
+            queued_parameters: Vec::with_capacity(self.command_capacity),
+            faulted: false,
+        });
+        Ok(())
     }
 
     /// Stop processing.
     pub fn stop(&mut self) -> Result<()> {
-        self.plugin
-            .as_mut()
-            .expect("runner plugin missing")
-            .stop_processing()
+        self.plugin_mut()?.stop_processing()
     }
 
-    /// Drain queued control commands and render one block.
+    /// Drain queued control commands and render one prepared block.
     ///
     /// Call this from the audio thread (e.g. inside your device callback). It performs only
     /// the lock-free queue drain plus the plugin's own processing — it never blocks on a lock
@@ -281,20 +374,68 @@ impl RealtimePluginRunner {
     /// tight loop refills the queue as fast as this drains it, so an unbounded drain would pin
     /// the audio callback; anything still queued is applied on the next block instead.
     pub fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
-        let plugin = self.plugin.as_mut().expect("runner plugin missing");
-        let rx = &mut self.rx;
+        let Self {
+            plugin, rx, mode, ..
+        } = self;
+        let Some(plugin) = plugin.as_mut() else {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::UnsupportedBackend.into());
+        };
+        let RunnerMode::Prepared(prepared) = mode else {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::NotProcessing.into());
+        };
+        if prepared.faulted {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::Faulted.into());
+        }
+        if !plugin.is_processing {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::NotProcessing.into());
+        }
+        prepared.queued_midi.clear();
+        prepared.queued_parameters.clear();
         drain_commands(rx, |command| match command {
-            RtCommand::Midi { event, offset } => {
-                let _ = plugin.send_midi_event_at(event, offset);
-            }
+            RtCommand::Midi { event, offset } => prepared.queued_midi.push(RealtimeMidiEvent {
+                event,
+                sample_offset: offset.max(0) as usize,
+            }),
             RtCommand::Param { id, value } => {
-                let _ = plugin.queue_processor_parameter_at(id, value, 0);
+                prepared.queued_parameters.push(RealtimeParameterChange {
+                    id,
+                    value,
+                    sample_offset: 0,
+                });
             }
-            RtCommand::Transport(change) => {
-                change.apply(plugin);
-            }
+            RtCommand::Transport(change) => change.apply(plugin),
         });
-        plugin.process_audio(buffers)
+        let midi = std::mem::take(&mut prepared.queued_midi);
+        let parameters = std::mem::take(&mut prepared.queued_parameters);
+        let result = Self::process_prepared(plugin, prepared, buffers, &midi, &parameters);
+        prepared.queued_midi = midi;
+        prepared.queued_parameters = parameters;
+        result.map(|_| ()).map_err(Into::into)
+    }
+
+    /// Render one prepared block from caller-owned, sample-accurate inputs.
+    ///
+    /// This bypasses the queued control ring; callers that use both APIs must define their own
+    /// block ordering. It is intended for sequencers that already hold fixed input slices.
+    pub fn process_direct(
+        &mut self,
+        buffers: &mut AudioBuffers,
+        midi: &[RealtimeMidiEvent],
+        parameters: &[RealtimeParameterChange],
+    ) -> std::result::Result<RealtimeProcessReport, RealtimeProcessError> {
+        let Some(plugin) = self.plugin.as_mut() else {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::UnsupportedBackend);
+        };
+        let RunnerMode::Prepared(prepared) = &mut self.mode else {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::NotProcessing);
+        };
+        Self::process_prepared(plugin, prepared, buffers, midi, parameters)
     }
 
     /// Borrow the underlying plugin (e.g. to read parameters or info). Do **not** call this
@@ -304,8 +445,195 @@ impl RealtimePluginRunner {
     }
 
     /// Recover the owned plugin, consuming the runner.
+    ///
+    /// When the runner is prepared this attempts the reversible stop, fixed-storage teardown, and
+    /// controller synchronization sequence before returning. It keeps the historical infallible
+    /// signature, so a teardown failure is best-effort; use [`Plugin::try_into_realtime`]
+    /// together with [`crate::RealtimePlugin::try_into_plugin`] when recovery must be retried.
+    /// Call this only after the audio callback has stopped and the runner is back on its control
+    /// thread.
     pub fn into_plugin(mut self) -> Plugin {
+        let _ = self.restore_prepared();
         self.plugin.take().expect("runner plugin missing")
+    }
+
+    fn plugin_mut(&mut self) -> Result<&mut Plugin> {
+        self.plugin
+            .as_mut()
+            .ok_or_else(|| Error::Other("RealtimePluginRunner no longer owns a plugin".to_string()))
+    }
+
+    fn default_capacities(&self) -> Result<RealtimeCapacities> {
+        let plugin = self.plugin();
+        let mappings = plugin.midi_controller_assignments(BusDirection::Input)?;
+        let mut fanouts = std::collections::HashMap::new();
+        let mut max_fanout = 1;
+        for assignment in mappings {
+            let count = fanouts
+                .entry((assignment.bus, assignment.channel, assignment.controller))
+                .or_insert(0usize);
+            *count += 1;
+            max_fanout = max_fanout.max(*count);
+        }
+        let max_points = self.command_capacity.saturating_mul(max_fanout.max(1));
+        Ok(RealtimeCapacities {
+            max_block_frames: plugin.block_size,
+            max_input_events: self.command_capacity,
+            max_output_events: self.command_capacity,
+            max_output_payload_bytes_per_event: 4096,
+            max_parameter_changes: max_points.max(self.command_capacity),
+            max_distinct_parameters: max_points.max(self.command_capacity),
+        })
+    }
+
+    fn process_prepared(
+        plugin: &mut Plugin,
+        prepared: &mut PreparedRunner,
+        buffers: &mut AudioBuffers,
+        midi: &[RealtimeMidiEvent],
+        parameters: &[RealtimeParameterChange],
+    ) -> std::result::Result<RealtimeProcessReport, RealtimeProcessError> {
+        if prepared.faulted {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::Faulted);
+        }
+        if !plugin.is_processing {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::NotProcessing);
+        }
+        let frames = buffers.block_size;
+        // Bound caller-owned raw work before traversing any input collection. This includes
+        // unmapped controllers: they may emit no VST3 event or parameter point, but still cost
+        // routing time if allowed through.
+        if midi.len() > prepared.capacities.max_input_events {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::InputEventCapacity);
+        }
+        if frames == 0
+            || frames > prepared.capacities.max_block_frames
+            || buffers.inputs.iter().any(|channel| channel.len() < frames)
+            || buffers.outputs.iter().any(|channel| channel.len() < frames)
+        {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::InvalidAudioBlock);
+        }
+        if parameters.len() > prepared.capacities.max_parameter_changes {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::ParameterPointCapacity);
+        }
+        if parameters.iter().any(|change| !change.value.is_finite()) {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::InvalidParameterValue);
+        }
+        if midi
+            .iter()
+            .any(|scheduled| !realtime_midi_data_is_valid(scheduled.event))
+        {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::InvalidMidiData);
+        }
+        let distinct = parameters
+            .iter()
+            .enumerate()
+            .filter(|(index, parameter)| {
+                !parameters[..*index]
+                    .iter()
+                    .any(|seen| seen.id == parameter.id)
+            })
+            .count();
+        if distinct > prepared.capacities.max_distinct_parameters {
+            clear_outputs(buffers);
+            return Err(RealtimeProcessError::DistinctParameterCapacity);
+        }
+        let result = plugin
+            .internal
+            .as_mut()
+            .ok_or(RealtimeProcessError::UnsupportedBackend)
+            .and_then(|internal| internal.process_hard_realtime(buffers, midi, parameters));
+        match result {
+            Ok(report) => {
+                for parameter in parameters {
+                    if let Ok(index) = prepared
+                        .final_parameters
+                        .binary_search_by_key(&parameter.id, |(id, _)| *id)
+                    {
+                        prepared.final_parameters[index].1 = parameter.value.clamp(0.0, 1.0);
+                    }
+                }
+                Ok(report)
+            }
+            Err(error) => {
+                clear_outputs(buffers);
+                if matches!(error, RealtimeProcessError::ProcessorFailed(_)) {
+                    prepared.faulted = true;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn prepared_capacities(&self) -> Option<RealtimeCapacities> {
+        match self.mode {
+            RunnerMode::Unprepared => None,
+            RunnerMode::Prepared(ref prepared) => Some(prepared.capacities),
+        }
+    }
+
+    pub(crate) fn try_restore_prepared(
+        mut self,
+    ) -> std::result::Result<(Plugin, ControllerSyncStatus), Box<(Self, Error)>> {
+        match self.restore_prepared() {
+            Ok(controller_sync) => {
+                let plugin = self.plugin.take().expect("runner plugin missing");
+                Ok((plugin, controller_sync))
+            }
+            Err(error) => Err(Box::new((self, error))),
+        }
+    }
+
+    fn restore_prepared(&mut self) -> Result<ControllerSyncStatus> {
+        let RunnerMode::Prepared(prepared) = &self.mode else {
+            return Ok(ControllerSyncStatus::Unsupported);
+        };
+        let final_parameters = prepared.final_parameters.clone();
+        let plugin = self.plugin_mut()?;
+        plugin.stop_processing()?;
+        let controller_sync = plugin
+            .internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .leave_hard_realtime()
+            .map(|_| {
+                plugin
+                    .internal
+                    .as_mut()
+                    .map(|internal| internal.sync_controller_after_realtime(&final_parameters))
+                    .unwrap_or(ControllerSyncStatus::Unsupported)
+            })?;
+        self.mode = RunnerMode::Unprepared;
+        Ok(controller_sync)
+    }
+}
+
+fn clear_outputs(buffers: &mut AudioBuffers) {
+    for output in &mut buffers.outputs {
+        output.fill(0.0);
+    }
+}
+
+/// Validate every MIDI payload without constructing a formatted error on the process thread.
+pub(crate) fn realtime_midi_data_is_valid(event: MidiEvent) -> bool {
+    match event {
+        MidiEvent::NoteOn { note, velocity, .. } | MidiEvent::NoteOff { note, velocity, .. } => {
+            note <= 127 && velocity <= 127
+        }
+        MidiEvent::ControlChange {
+            controller, value, ..
+        } => controller <= 127 && value <= 127,
+        MidiEvent::ProgramChange { program, .. } => program <= 127,
+        MidiEvent::PitchBend { value, .. } => value <= 16_383,
+        MidiEvent::ChannelAftertouch { pressure, .. } => pressure <= 127,
+        MidiEvent::PolyAftertouch { note, pressure, .. } => note <= 127 && pressure <= 127,
     }
 }
 
@@ -317,7 +645,14 @@ impl Drop for RealtimePluginRunner {
         // Never destroy the plugin on this (possibly real-time) thread. The bounded handoff is
         // nonblocking; a disconnected/full queue leaks rather than running COM termination or
         // unloading executable code here.
-        let _ = try_handoff_teardown(&self.teardown_tx, plugin);
+        let mode = std::mem::replace(&mut self.mode, RunnerMode::Unprepared);
+        let _ = try_handoff_teardown(
+            &self.teardown_tx,
+            RunnerTeardown {
+                _plugin: plugin,
+                _mode: mode,
+            },
+        );
     }
 }
 
@@ -347,16 +682,19 @@ impl RtControl {
         self.teardown.service_one()
     }
 
-    /// Queue a MIDI event for the next block (at block start). Returns `false` if the command
-    /// queue is full (the event is dropped rather than blocking the caller).
+    /// Queue a MIDI event for the next block (at block start). Returns `false` for invalid
+    /// MIDI data or a full command queue; the caller never blocks.
     pub fn send_midi(&mut self, event: MidiEvent) -> bool {
         self.send_midi_at(event, 0)
     }
 
     /// Queue a MIDI event scheduled at `sample_offset` samples into the next block, for
     /// sample-accurate sequencing. A negative offset is floored to `0`; `process()` clamps it
-    /// into the actual (possibly shorter) block. Returns `false` if the queue is full.
+    /// into the actual (possibly shorter) block. Returns `false` for invalid data or a full queue.
     pub fn send_midi_at(&mut self, event: MidiEvent, sample_offset: i32) -> bool {
+        if !realtime_midi_data_is_valid(event) {
+            return false;
+        }
         let ok = self
             .tx
             .push(RtCommand::Midi {
@@ -374,17 +712,11 @@ impl RtControl {
     ///
     /// # The editor catches up later
     ///
-    /// The audio thread applies the value to the plugin's DSP, but `IEditController` belongs to
-    /// the main-thread domain, so the plugin's *own editor* (and
-    /// [`Plugin::get_parameter`](crate::Plugin::get_parameter),
-    /// [`format_parameter`](crate::Plugin::format_parameter) and saved state) is updated from
-    /// the control thread instead. That happens the next time the control thread touches the
-    /// plugin — reading a parameter, draining
-    /// [`Plugin::get_parameter_changes`](crate::Plugin::get_parameter_changes), or calling
-    /// [`Plugin::service_host_requests`](crate::Plugin::service_host_requests). A host that
-    /// polls the plugin every UI frame (the usual editor loop) never notices the gap; a host
-    /// that never calls back in will see a stale editor. The queue is bounded and drops its
-    /// oldest entry when full, so the newest value for a parameter always wins.
+    /// The audio thread applies the value to the plugin's DSP and queues controller feedback.
+    /// `IEditController` belongs to the main-thread domain: pause processing before inspecting
+    /// the runner's plugin on that thread, or recover ordinary ownership with `into_plugin`.
+    /// Controller reads and servicing apply the pending feedback off the audio thread; recovery
+    /// also transfers the component's authoritative current state.
     pub fn set_parameter(&mut self, id: u32, value: f64) -> bool {
         if !is_normalized(value) {
             return false;
@@ -543,6 +875,31 @@ mod tests {
     /// `set_parameter` documents normalized values. A NaN or a `7.3` that reached the ring is
     /// rejected on the *audio* thread — allocating an error string there and vanishing silently
     /// after the caller was told the change succeeded.
+    #[test]
+    fn invalid_midi_is_rejected_before_it_can_poison_a_queued_block() {
+        let (tx, mut rx) = RingBuffer::new(2);
+        let mut control = test_control(tx);
+        assert!(!control.send_midi(MidiEvent::NoteOn {
+            channel: MidiChannel::Ch1,
+            note: 128,
+            velocity: 100,
+        }));
+        assert!(control.send_midi(MidiEvent::NoteOff {
+            channel: MidiChannel::Ch1,
+            note: 60,
+            velocity: 0,
+        }));
+        assert!(matches!(
+            rx.pop(),
+            Ok(RtCommand::Midi {
+                event: MidiEvent::NoteOff { .. },
+                ..
+            })
+        ));
+        assert!(rx.pop().is_err());
+        assert_eq!(control.dropped_command_count(), 0);
+    }
+
     #[test]
     fn out_of_range_parameter_values_are_rejected_not_queued() {
         let (tx, mut rx) = RingBuffer::<RtCommand>::new(8);

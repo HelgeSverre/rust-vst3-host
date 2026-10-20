@@ -59,6 +59,11 @@ pub enum Error {
     #[error("Plugin is not processing")]
     NotProcessing,
 
+    /// A copy-only failure from the prepared realtime process path. Keeping this structured
+    /// avoids formatting or allocating an error on the audio thread.
+    #[error(transparent)]
+    RealtimeProcess(#[from] crate::hard_realtime::RealtimeProcessError),
+
     /// Other errors
     #[error("{0}")]
     Other(String),

@@ -12,6 +12,7 @@ use vst3_host::{
     audio::AudioBuffers,
     hard_realtime::{
         ControllerSyncStatus, RealtimeCapacities, RealtimeMidiEvent, RealtimeParameterChange,
+        RealtimeProcessError,
     },
     midi::{MidiChannel, MidiEvent},
     realtime::RealtimePluginRunner,
@@ -208,6 +209,7 @@ fn exclusive_hard_realtime_lifecycle_is_allocation_free() {
         max_block_frames: 0,
         max_input_events: 16,
         max_output_events: 16,
+        max_output_payload_bytes_per_event: 0,
         max_parameter_changes: 32,
         max_distinct_parameters: 16,
     };
@@ -230,6 +232,7 @@ fn exclusive_hard_realtime_lifecycle_is_allocation_free() {
         max_block_frames: 512,
         max_input_events: 16,
         max_output_events: 16,
+        max_output_payload_bytes_per_event: 0,
         max_parameter_changes: 32,
         max_distinct_parameters: 16,
     };
@@ -413,4 +416,707 @@ fn exclusive_hard_realtime_lifecycle_is_allocation_free() {
     assert_eq!(plugin.transport_position().unwrap(), stopped_position);
     plugin.reconfigure(44_100.0, 256).unwrap();
     assert_eq!(plugin.transport_position().unwrap(), stopped_position);
+}
+
+/// The queued runner API and the direct slice API are two presentations of one prepared process
+/// engine. They must therefore produce the same TestSynth block from a cold start, including a
+/// sample-offset note, Mapping 2's CC75 two-parameter fan-out, an explicit parameter point, and
+/// queued transport setup. This also makes the allocation contract stronger than a warmed-up
+/// loop: the first block after `start_with_capacities` and the first block after a restart must
+/// not allocate, reallocate, or free host memory.
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn realtime_runner_queue_and_direct_share_the_prepared_engine() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    const BLOCK: usize = 512;
+    const SAMPLE_RATE: f64 = 48_000.0;
+    const RESONANCE: f64 = 0.73;
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_plugins/TestSynth.vst3"
+    );
+    assert!(
+        std::path::Path::new(path).exists(),
+        "build TestSynth before running this regression: just test-plugin"
+    );
+
+    let capacities = RealtimeCapacities {
+        max_block_frames: BLOCK,
+        max_input_events: 3,
+        max_output_events: 8,
+        max_output_payload_bytes_per_event: 0,
+        // CC75 expands to cutoff and resonance, then the explicit resonance point joins that
+        // queue. Leave room for the two same-id resonance points as distinct queue points.
+        max_parameter_changes: 3,
+        max_distinct_parameters: 2,
+    };
+    let position = vst3_host::TransportPosition {
+        samples: -512,
+        quarter_notes: -0.5,
+    };
+    let midi = [
+        RealtimeMidiEvent {
+            event: MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 100,
+            },
+            sample_offset: 64,
+        },
+        RealtimeMidiEvent {
+            event: MidiEvent::ControlChange {
+                channel: MidiChannel::Ch1,
+                controller: 75,
+                value: 63,
+            },
+            sample_offset: 180,
+        },
+        RealtimeMidiEvent {
+            event: MidiEvent::NoteOff {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 0,
+            },
+            sample_offset: 400,
+        },
+    ];
+    let parameters = [RealtimeParameterChange {
+        id: 4,
+        value: RESONANCE,
+        sample_offset: 0,
+    }];
+
+    // The direct caller configures transport before ownership crosses into the audio runner.
+    // The queued caller applies the exact same configuration as its first control batch below.
+    let mut direct_host = Vst3Host::builder()
+        .sample_rate(SAMPLE_RATE)
+        .block_size(BLOCK)
+        .build()
+        .expect("build direct host");
+    let mut direct_plugin = direct_host
+        .load_plugin(path)
+        .expect("load direct TestSynth");
+    direct_plugin
+        .set_transport_position(position)
+        .expect("seed direct position");
+    direct_plugin.set_tempo(60.0).expect("seed direct tempo");
+    direct_plugin
+        .set_playing(true)
+        .expect("seed direct playing state");
+    let (mut direct, _direct_control) = RealtimePluginRunner::new(direct_plugin, 8);
+    direct
+        .start_with_capacities(capacities)
+        .expect("prepare direct runner");
+    let mut direct_buffers = AudioBuffers::new(0, 2, BLOCK, SAMPLE_RATE);
+
+    ALLOCS.store(0, Ordering::Relaxed);
+    ON.store(true, Ordering::Relaxed);
+    let direct_first = direct.process_direct(&mut direct_buffers, &midi, &parameters);
+    ON.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCS.load(Ordering::Relaxed),
+        0,
+        "the first direct prepared block allocated, reallocated, or freed memory"
+    );
+    let direct_first = direct_first.expect("process first direct block");
+    assert_eq!(direct_first.input_events, 2);
+    assert_eq!(direct_first.parameter_changes, 3);
+    assert_eq!(direct_first.distinct_parameters, 2);
+    assert!(
+        (direct
+            .plugin()
+            .get_parameter(4)
+            .expect("read direct resonance after processing")
+            - 63.0 / 127.0)
+            .abs()
+            < 1e-9,
+        "the direct path must synchronize CC75's later resonance point before exit"
+    );
+    assert!(
+        (direct
+            .plugin()
+            .get_parameter(0)
+            .expect("read direct cutoff after processing")
+            - 63.0 / 127.0)
+            .abs()
+            < 1e-9,
+        "the direct path must synchronize CC75's cutoff fan-out before exit"
+    );
+    let direct_audio = direct_buffers.outputs.clone();
+    assert!(
+        direct_audio
+            .iter()
+            .flatten()
+            .take(64)
+            .all(|sample| *sample == 0.0),
+        "the direct path lost the note's sample offset"
+    );
+    assert!(
+        direct_audio
+            .iter()
+            .flatten()
+            .skip(64)
+            .any(|sample| sample.abs() > 1e-5),
+        "the direct path produced no audio after the scheduled note"
+    );
+
+    direct.stop().expect("stop direct runner");
+    direct
+        .start_with_capacities(capacities)
+        .expect("restart direct runner");
+    ALLOCS.store(0, Ordering::Relaxed);
+    ON.store(true, Ordering::Relaxed);
+    let direct_restart = direct.process_direct(&mut direct_buffers, &[], &[]);
+    ON.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCS.load(Ordering::Relaxed),
+        0,
+        "the first direct block after restart allocated, reallocated, or freed memory"
+    );
+    direct_restart.expect("process direct block after restart");
+    let direct_plugin = direct.into_plugin();
+    let direct_position = direct_plugin.transport_position().expect("direct position");
+    let direct_cutoff = direct_plugin.get_parameter(0).expect("direct cutoff");
+    let direct_resonance = direct_plugin.get_parameter(4).expect("direct resonance");
+    // TestSynth's instrumentation is process-global, so destroy the first COM instance before
+    // loading the independently initialized queued comparison instance.
+    drop(direct_plugin);
+    drop(direct_host);
+
+    let mut queued_host = Vst3Host::builder()
+        .sample_rate(SAMPLE_RATE)
+        .block_size(BLOCK)
+        .build()
+        .expect("build queued host");
+    let queued_plugin = queued_host
+        .load_plugin(path)
+        .expect("load queued TestSynth");
+    let (mut queued, mut control) = RealtimePluginRunner::new(queued_plugin, 8);
+    queued
+        .start_with_capacities(capacities)
+        .expect("prepare queued runner");
+    assert!(control.set_transport_position(position));
+    assert!(control.set_tempo(60.0));
+    assert!(control.set_playing(true));
+    assert!(control.set_parameter(4, RESONANCE));
+    for scheduled in midi {
+        assert!(control.send_midi_at(
+            scheduled.event,
+            scheduled.sample_offset.try_into().expect("offset fits i32"),
+        ));
+    }
+    let mut queued_buffers = AudioBuffers::new(0, 2, BLOCK, SAMPLE_RATE);
+
+    ALLOCS.store(0, Ordering::Relaxed);
+    ON.store(true, Ordering::Relaxed);
+    let queued_first = queued.process(&mut queued_buffers);
+    ON.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCS.load(Ordering::Relaxed),
+        0,
+        "the first queued prepared block allocated, reallocated, or freed memory"
+    );
+    queued_first.expect("process first queued block");
+    assert!(
+        (queued
+            .plugin()
+            .get_parameter(4)
+            .expect("read queued resonance after processing")
+            - 63.0 / 127.0)
+            .abs()
+            < 1e-9,
+        "the queued path must synchronize CC75's later resonance point before exit"
+    );
+    assert!(
+        (queued
+            .plugin()
+            .get_parameter(0)
+            .expect("read queued cutoff after processing")
+            - 63.0 / 127.0)
+            .abs()
+            < 1e-9,
+        "the queued path must synchronize CC75's cutoff fan-out before exit"
+    );
+    assert_eq!(
+        queued_buffers.outputs, direct_audio,
+        "queued and direct processing must render the same first block"
+    );
+
+    queued.stop().expect("stop queued runner");
+    queued
+        .start_with_capacities(capacities)
+        .expect("restart queued runner");
+    ALLOCS.store(0, Ordering::Relaxed);
+    ON.store(true, Ordering::Relaxed);
+    let queued_restart = queued.process(&mut queued_buffers);
+    ON.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCS.load(Ordering::Relaxed),
+        0,
+        "the first queued block after restart allocated, reallocated, or freed memory"
+    );
+    queued_restart.expect("process queued block after restart");
+    let queued_plugin = queued.into_plugin();
+    assert_eq!(
+        queued_plugin.transport_position().expect("queued position"),
+        direct_position,
+        "queued transport setup must reach the same recovered position as direct processing"
+    );
+    assert!(
+        (queued_plugin.get_parameter(0).expect("queued cutoff") - direct_cutoff).abs() < 1e-9,
+        "CC75 fan-out must survive queued processing and recovery"
+    );
+    assert!(
+        (queued_plugin.get_parameter(4).expect("queued resonance") - direct_resonance).abs() < 1e-9,
+        "explicit parameter changes must survive queued processing and recovery"
+    );
+}
+
+/// Queue commands must be validated against the prepared engine's event capacity instead of
+/// being silently truncated by a runner-side scratch vector. A rejected batch clears cleanly so
+/// the next single command can still be rendered. The final CC75 block also proves an input-event
+/// capacity of one does not reject Mapping 2 fan-out: its two resulting parameter points use the
+/// parameter capacities.
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn realtime_runner_queue_reports_capacity_and_recovers() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    const BLOCK: usize = 512;
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_plugins/TestSynth.vst3"
+    );
+    assert!(
+        std::path::Path::new(path).exists(),
+        "build TestSynth before running this regression: just test-plugin"
+    );
+    let mut host = Vst3Host::builder()
+        .sample_rate(48_000.0)
+        .block_size(BLOCK)
+        .build()
+        .expect("build host");
+    let plugin = host.load_plugin(path).expect("load TestSynth");
+    let (mut runner, mut control) = RealtimePluginRunner::new(plugin, 8);
+    runner
+        .start_with_capacities(RealtimeCapacities {
+            max_block_frames: BLOCK,
+            max_input_events: 1,
+            max_output_events: 8,
+            max_output_payload_bytes_per_event: 0,
+            max_parameter_changes: 2,
+            max_distinct_parameters: 2,
+        })
+        .expect("prepare runner");
+    let mut buffers = AudioBuffers::new(0, 2, BLOCK, 48_000.0);
+
+    assert!(control.send_midi(MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 100,
+    }));
+    assert!(control.send_midi(MidiEvent::NoteOff {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 0,
+    }));
+    assert!(
+        runner.process(&mut buffers).is_err(),
+        "a two-event queued batch must be rejected when only one input event was prepared"
+    );
+    assert!(
+        buffers
+            .outputs
+            .iter()
+            .flatten()
+            .all(|sample| *sample == 0.0),
+        "a rejected batch must clear output rather than render a truncated prefix"
+    );
+
+    // A stopped runner rejects on the audio side before draining its control ring. The note must
+    // therefore remain queued for the first block after restart instead of disappearing while
+    // the output is being cleared for the rejected call.
+    runner.stop().expect("stop runner");
+    assert!(control.send_midi(MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 64,
+        velocity: 100,
+    }));
+    assert!(matches!(
+        runner.process(&mut buffers),
+        Err(vst3_host::Error::RealtimeProcess(
+            RealtimeProcessError::NotProcessing
+        ))
+    ));
+    assert!(
+        buffers
+            .outputs
+            .iter()
+            .flatten()
+            .all(|sample| *sample == 0.0),
+        "a stopped runner must clear output"
+    );
+    runner
+        .start_with_capacities(RealtimeCapacities {
+            max_block_frames: BLOCK,
+            max_input_events: 1,
+            max_output_events: 8,
+            max_output_payload_bytes_per_event: 0,
+            max_parameter_changes: 2,
+            max_distinct_parameters: 2,
+        })
+        .expect("restart runner");
+    runner
+        .process(&mut buffers)
+        .expect("the queued note must render after restart");
+    assert!(
+        buffers
+            .outputs
+            .iter()
+            .flatten()
+            .any(|sample| sample.abs() > 1e-5),
+        "the stopped runner must retain, not discard, queued input"
+    );
+
+    assert!(control.send_midi(MidiEvent::ControlChange {
+        channel: MidiChannel::Ch1,
+        controller: 75,
+        value: 63,
+    }));
+    runner
+        .process(&mut buffers)
+        .expect("a valid queued CC75 block must recover after capacity rejection");
+    let plugin = runner.into_plugin();
+    assert!(
+        (plugin.get_parameter(0).expect("cutoff") - 63.0 / 127.0).abs() < 1e-6,
+        "CC75's cutoff target must fit in parameter capacity independently of event capacity"
+    );
+    assert!(
+        (plugin.get_parameter(4).expect("resonance") - 63.0 / 127.0).abs() < 1e-6,
+        "CC75's resonance target must fit in parameter capacity independently of event capacity"
+    );
+}
+
+/// Entering the fixed engine with ordinary queued input is intentionally rejected: silently
+/// translating unbounded ordinary queues would lose work or allocate on the audio thread. The
+/// failed runner must nevertheless return the same ordinary owner with its queued note intact.
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn rejected_runner_start_preserves_ordinary_queued_midi() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    const BLOCK: usize = 512;
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_plugins/TestSynth.vst3"
+    );
+    assert!(
+        std::path::Path::new(path).exists(),
+        "build TestSynth before running this regression: just test-plugin"
+    );
+    let mut host = Vst3Host::builder()
+        .sample_rate(48_000.0)
+        .block_size(BLOCK)
+        .build()
+        .expect("build host");
+    let mut plugin = host.load_plugin(path).expect("load TestSynth");
+    plugin
+        .send_midi_note(60, 100, MidiChannel::Ch1)
+        .expect("queue ordinary note");
+
+    let (mut runner, _control) = RealtimePluginRunner::new(plugin, 8);
+    assert!(
+        runner
+            .start_with_capacities(RealtimeCapacities {
+                max_block_frames: BLOCK,
+                max_input_events: 8,
+                max_output_events: 8,
+                max_output_payload_bytes_per_event: 0,
+                max_parameter_changes: 8,
+                max_distinct_parameters: 8,
+            })
+            .is_err(),
+        "the fixed runner must reject pending ordinary input"
+    );
+
+    let mut plugin = runner.into_plugin();
+    plugin
+        .start_processing()
+        .expect("start recovered ordinary plugin");
+    let mut buffers = AudioBuffers::new(0, 2, BLOCK, 48_000.0);
+    plugin
+        .process_audio(&mut buffers)
+        .expect("process recovered queued note");
+    assert!(
+        buffers
+            .outputs
+            .iter()
+            .flatten()
+            .any(|sample| sample.abs() > 1e-5),
+        "the rejected transition lost the ordinary queued note"
+    );
+}
+
+/// `max_input_events` bounds every raw MIDI message, including ignored controllers. Both runner
+/// entry points reject an oversized small-block batch before routing it, clear the output, and
+/// remain usable for the next in-capacity note without allocating on either path.
+#[test]
+#[ignore = "Requires the bundled TestSynth (just test-plugin)"]
+fn testsynth_raw_midi_capacity_is_bounded_and_recovers_without_allocation() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    const BLOCK: usize = 32;
+    const SAMPLE_RATE: f64 = 48_000.0;
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_plugins/TestSynth.vst3"
+    );
+    assert!(
+        std::path::Path::new(path).exists(),
+        "build TestSynth before running this regression: just test-plugin"
+    );
+    let capacities = RealtimeCapacities {
+        max_block_frames: BLOCK,
+        max_input_events: 2,
+        max_output_events: 8,
+        max_output_payload_bytes_per_event: 0,
+        max_parameter_changes: 4,
+        max_distinct_parameters: 4,
+    };
+    let ignored = RealtimeMidiEvent {
+        event: MidiEvent::ControlChange {
+            channel: MidiChannel::Ch1,
+            controller: 7,
+            value: 100,
+        },
+        sample_offset: 0,
+    };
+    let too_many_ignored = [ignored; 8];
+    let note = [RealtimeMidiEvent {
+        event: MidiEvent::NoteOn {
+            channel: MidiChannel::Ch1,
+            note: 60,
+            velocity: 100,
+        },
+        sample_offset: 0,
+    }];
+
+    let mut direct_host = Vst3Host::builder()
+        .sample_rate(SAMPLE_RATE)
+        .block_size(BLOCK)
+        .build()
+        .expect("build direct host");
+    let direct_plugin = direct_host
+        .load_plugin(path)
+        .expect("load direct TestSynth");
+    let (mut direct, _direct_control) = RealtimePluginRunner::new(direct_plugin, 16);
+    direct
+        .start_with_capacities(capacities)
+        .expect("prepare direct runner");
+    let mut direct_buffers = AudioBuffers::new(0, 2, BLOCK, SAMPLE_RATE);
+    for output in &mut direct_buffers.outputs {
+        output.fill(1.0);
+    }
+
+    ALLOCS.store(0, Ordering::Relaxed);
+    ON.store(true, Ordering::Relaxed);
+    let direct_overflow = direct.process_direct(&mut direct_buffers, &too_many_ignored, &[]);
+    ON.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCS.load(Ordering::Relaxed),
+        0,
+        "direct raw-MIDI capacity rejection allocated, reallocated, or freed memory"
+    );
+    assert_eq!(
+        direct_overflow,
+        Err(RealtimeProcessError::InputEventCapacity)
+    );
+    assert!(
+        direct_buffers
+            .outputs
+            .iter()
+            .flatten()
+            .all(|sample| *sample == 0.0),
+        "direct raw-MIDI capacity rejection must silence output"
+    );
+
+    ALLOCS.store(0, Ordering::Relaxed);
+    ON.store(true, Ordering::Relaxed);
+    let direct_recovery = direct.process_direct(&mut direct_buffers, &note, &[]);
+    ON.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCS.load(Ordering::Relaxed),
+        0,
+        "direct small-block recovery allocated, reallocated, or freed memory"
+    );
+    direct_recovery.expect("process direct small-block recovery note");
+    assert!(
+        direct_buffers
+            .outputs
+            .iter()
+            .flatten()
+            .any(|sample| sample.abs() > 1e-5),
+        "direct small-block recovery did not render its in-capacity note"
+    );
+    drop(direct.into_plugin());
+    drop(direct_host);
+
+    let mut queued_host = Vst3Host::builder()
+        .sample_rate(SAMPLE_RATE)
+        .block_size(BLOCK)
+        .build()
+        .expect("build queued host");
+    let queued_plugin = queued_host
+        .load_plugin(path)
+        .expect("load queued TestSynth");
+    let (mut queued, mut control) = RealtimePluginRunner::new(queued_plugin, 16);
+    queued
+        .start_with_capacities(capacities)
+        .expect("prepare queued runner");
+    for scheduled in too_many_ignored {
+        assert!(control.send_midi_at(
+            scheduled.event,
+            scheduled.sample_offset.try_into().expect("offset fits i32"),
+        ));
+    }
+    let mut queued_buffers = AudioBuffers::new(0, 2, BLOCK, SAMPLE_RATE);
+    for output in &mut queued_buffers.outputs {
+        output.fill(1.0);
+    }
+
+    ALLOCS.store(0, Ordering::Relaxed);
+    ON.store(true, Ordering::Relaxed);
+    let queued_overflow = queued.process(&mut queued_buffers);
+    ON.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCS.load(Ordering::Relaxed),
+        0,
+        "queued raw-MIDI capacity rejection allocated, reallocated, or freed memory"
+    );
+    assert!(matches!(
+        queued_overflow,
+        Err(vst3_host::Error::RealtimeProcess(
+            RealtimeProcessError::InputEventCapacity
+        ))
+    ));
+    assert!(
+        queued_buffers
+            .outputs
+            .iter()
+            .flatten()
+            .all(|sample| *sample == 0.0),
+        "queued raw-MIDI capacity rejection must silence output"
+    );
+
+    assert!(control.send_midi(note[0].event));
+    ALLOCS.store(0, Ordering::Relaxed);
+    ON.store(true, Ordering::Relaxed);
+    let queued_recovery = queued.process(&mut queued_buffers);
+    ON.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCS.load(Ordering::Relaxed),
+        0,
+        "queued small-block recovery allocated, reallocated, or freed memory"
+    );
+    queued_recovery.expect("process queued small-block recovery note");
+    assert!(
+        queued_buffers
+            .outputs
+            .iter()
+            .flatten()
+            .any(|sample| sample.abs() > 1e-5),
+        "queued small-block recovery did not render its in-capacity note"
+    );
+    drop(queued.into_plugin());
+    drop(queued_host);
+}
+
+/// Measures small-block direct processing with mixed note, mapped-controller, and parameter
+/// input. This opt-in diagnostic reports host-plus-TestSynth timing for the current machine; it
+/// is intentionally not a hard-realtime proof and has no wall-clock assertion.
+#[test]
+#[ignore = "Opt-in TestSynth timing measurement; run explicitly after `just test-plugin`"]
+fn testsynth_small_block_realtime_timing_measurement() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    const BLOCK: usize = 64;
+    const SAMPLE_RATE: f64 = 48_000.0;
+    const BLOCKS: usize = 512;
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_plugins/TestSynth.vst3"
+    );
+    assert!(
+        std::path::Path::new(path).exists(),
+        "build TestSynth before running this measurement: just test-plugin"
+    );
+    let mut host = Vst3Host::builder()
+        .sample_rate(SAMPLE_RATE)
+        .block_size(BLOCK)
+        .build()
+        .expect("build host");
+    let plugin = host.load_plugin(path).expect("load TestSynth");
+    let (mut runner, control) = RealtimePluginRunner::new(plugin, 8);
+    runner
+        .start_with_capacities(RealtimeCapacities {
+            max_block_frames: BLOCK,
+            max_input_events: 3,
+            max_output_events: 8,
+            max_output_payload_bytes_per_event: 0,
+            max_parameter_changes: 3,
+            max_distinct_parameters: 2,
+        })
+        .expect("prepare runner");
+    let midi = [
+        RealtimeMidiEvent {
+            event: MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 100,
+            },
+            sample_offset: 0,
+        },
+        RealtimeMidiEvent {
+            event: MidiEvent::ControlChange {
+                channel: MidiChannel::Ch1,
+                controller: 75,
+                value: 63,
+            },
+            sample_offset: 16,
+        },
+        RealtimeMidiEvent {
+            event: MidiEvent::NoteOff {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 0,
+            },
+            sample_offset: 48,
+        },
+    ];
+    let parameters = [RealtimeParameterChange {
+        id: 4,
+        value: 0.73,
+        sample_offset: 8,
+    }];
+    let mut buffers = AudioBuffers::new(0, 2, BLOCK, SAMPLE_RATE);
+    let mut timings = Vec::with_capacity(BLOCKS);
+    for _ in 0..BLOCKS {
+        let started = std::time::Instant::now();
+        runner
+            .process_direct(&mut buffers, &midi, &parameters)
+            .expect("process mixed small block");
+        timings.push(started.elapsed());
+    }
+    timings.sort_unstable();
+    let p99 = timings[(BLOCKS * 99).div_ceil(100) - 1];
+    let max = *timings.last().expect("timings are populated");
+    let budget = std::time::Duration::from_secs_f64(BLOCK as f64 / SAMPLE_RATE);
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    println!(
+        "TestSynth {BLOCK}-frame mixed direct processing ({profile} host, {BLOCKS} blocks of repeated note churn): p99={p99:?}, max={max:?}, block budget={budget:?}, p99/budget={:.3}, max/budget={:.3}; host + fixture measurement only, not a hard-realtime guarantee",
+        p99.as_secs_f64() / budget.as_secs_f64(),
+        max.as_secs_f64() / budget.as_secs_f64(),
+    );
+    drop(runner.into_plugin());
+    drop(control);
 }
