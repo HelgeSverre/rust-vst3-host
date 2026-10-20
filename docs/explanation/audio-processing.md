@@ -81,20 +81,58 @@ audio.control().send_midi(MidiEvent::NoteOn { channel: MidiChannel::Ch1, note: 6
 # }
 ```
 
-### Still correctness-first, not fully RT-audited
+### One prepared engine for queued commands and direct slices
 
-Even the lock-free runner isn't a fully hardened RT engine yet:
+`RealtimePluginRunner::start` prepares fixed-capacity event lists, parameter queues, and
+audio storage off the audio thread. `process` drains at most one command ring's capacity
+and sends the resulting inputs through that prepared engine. `process_direct` accepts MIDI
+and parameter slices instead, without draining the command ring. Both interfaces use the
+same MIDI mappings, capacity checks, audio conversion, silence flags, transport, and VST
+processor call.
 
-- **Steady-state `process` is allocation-free** — the host preallocates its buffers and
-  channel-pointer arrays once, and a counting-allocator test asserts zero heap allocations
-  per block (with a well-behaved plugin). Sending new parameter/MIDI commands can still grow
-  the queues, and a plugin may allocate internally on note-ons.
-- **The plugin's internal event list still uses an (uncontended) mutex.** Only the audio
-  thread touches it under the runner, so there's no cross-thread contention, but it isn't
-  strictly lock-free internally.
+```text
+RtControl queue ─> runner.process ────────┐
+                                       ├─> fixed collections ─┐
+caller slices ───> runner.process_direct ┘                     │
+                                                             ├─> shared process core ─> VST process()
+ordinary Plugin ──────────────────────────> ordinary queues ───┘
+```
 
-The runner removes the *cross-thread* lock (the big win) and the per-block allocations; the
-remaining item is the internal uncontended mutex.
+Use `start_with_capacities` to choose explicit storage limits. Each target of a one-to-many
+MIDI mapping consumes a parameter point, while repeated parameter ids share one queue.
+When a block exceeds a prepared limit, processing returns an error and clears its audio
+outputs instead of growing storage. Caller buffers must already have enough samples for
+the requested block, whose size must not exceed the configured maximum.
+
+The host's prepared processing path performs no allocation, deallocation, logging, or mutex
+locking, including its first block. This guarantee covers the host code; a third-party
+plugin can still allocate or lock inside its own processor. Process-isolated plugins are
+rejected during preparation because their IPC implementation cannot provide this guarantee.
+
+The runner owns the lifecycle: create it, start it off-thread, process blocks, then stop the
+audio callback before stopping or recovering the ordinary `Plugin`. The
+`Plugin::try_into_realtime` / `RealtimePlugin` interface remains available as a thin adapter
+over the same runner. New callers can use direct slices on the runner without learning a
+second ownership transition.
+
+Preparation also rejects pending input from the ordinary plugin interface, including editor
+edits. Process that input before moving the plugin into the runner, or recover the plugin
+after the failed start and flush it through ordinary processing. Commands queued through
+`RtControl` are retained for the runner's first block.
+
+Copy-only output events and processor parameter feedback reach the plugin's bounded output
+queues. SysEx, text, chord, and scale output payloads require owned storage and are refused by
+the fixed event list; `RealtimeProcessReport::output_event_overflows` includes those refusals.
+Take an output consumer before moving the plugin into the runner if another thread needs to
+drain emitted events. A full host output queue keeps the newest feedback. Any displaced owned
+payload from ordinary processing is retained in preallocated storage until off-thread teardown.
+Accepted parameter and mapped-MIDI values also enter the controller's bounded feedback queue;
+control-thread reads or servicing apply them while processing is paused. No controller call
+runs inside either process method.
+
+The ordinary `Plugin::process_audio` path shares the prepared audio-processing implementation
+and process-data graph, with its editor and dynamically sized event/parameter handling around
+that core. Its mutex-backed control services retain their ordinary threading requirements.
 
 **Denormals are flushed** during processing: the host enables flush-to-zero / denormals-are-zero
 (MXCSR on x86, FPCR on ARM) for the span of each `process` call and restores the prior FPU
@@ -103,6 +141,8 @@ CPU spikes.
 
 ## Metering
 
-After each block, [`get_output_levels`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.Plugin.html#method.get_output_levels)
+After each ordinary `Plugin::process_audio` block, [`get_output_levels`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.Plugin.html#method.get_output_levels)
 returns per-channel peak/RMS/peak-hold. It recovers gracefully if the audio thread panicked
 while holding the levels lock, so polling it from a UI thread can't itself cause a panic.
+The prepared runner bypasses this mutex-backed meter; custom realtime callers can calculate
+levels from the output buffers and publish them through their own bounded channel.

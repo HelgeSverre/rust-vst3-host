@@ -12,17 +12,24 @@
 //!
 //! The public audio surface stays flat: active buses are concatenated in bus-index/channel order,
 //! inactive buses are omitted, and a processor negotiated for 64-bit samples is converted through
-//! preallocated storage. Plugin-emitted events and automation live only in the fixed output
-//! collections for the current block; [`RealtimeProcessReport`] reports rejected output writes but
-//! does not expose their payloads. Ordinary output drains therefore do not replay data emitted
-//! while the plugin was sealed in realtime mode.
+//! preallocated storage. Copy-only plugin output events and automation are retained through the
+//! ordinary bounded output queues; payloads requiring host-owned allocation are refused.
+//! [`RealtimeProcessReport`] counts writes rejected by the fixed collections, including those
+//! unsupported payloads.
 //!
 //! MIDI 1 controller messages use every snapshotted input assignment, including one-to-many
 //! Mapping 2 assignments. Program changes prefer channel mappings and otherwise use the root
 //! unit's program list. The current tempo, playing state, and seek position carry into realtime
 //! mode; processing advances the same transport, and the reverse transition preserves its endpoint.
 
-use crate::{audio::AudioBuffers, error::Error, midi::MidiEvent, plugin::Plugin, Result};
+use crate::{
+    audio::AudioBuffers,
+    error::Error,
+    midi::MidiEvent,
+    plugin::Plugin,
+    realtime::{RealtimePluginRunner, RtControl},
+    Result,
+};
 
 /// Fixed storage bounds prepared before a plugin enters hard-realtime mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,7 +53,7 @@ pub struct RealtimeCapacities {
 }
 
 impl RealtimeCapacities {
-    fn validate(self, plugin_block_size: usize) -> Result<()> {
+    pub(crate) fn validate(self, plugin_block_size: usize) -> Result<()> {
         if self.max_block_frames == 0 || self.max_block_frames > plugin_block_size {
             return Err(Error::Other(format!(
                 "hard-realtime max block {} must be in 1..={plugin_block_size}",
@@ -98,34 +105,45 @@ pub struct RealtimeProcessReport {
     pub parameter_changes: usize,
     /// Distinct parameter queues visible to the processor.
     pub distinct_parameters: usize,
-    /// Plugin output events rejected because its fixed output list was full.
+    /// Plugin output events rejected because its fixed output list was full or their payload
+    /// required host-owned allocation while prepared realtime processing was active.
     pub output_event_overflows: usize,
     /// Plugin output parameter points/queues rejected because fixed storage was full.
     pub output_parameter_overflows: usize,
 }
 
 /// Copy-only failures returned from the hard-realtime process path.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum RealtimeProcessError {
     /// The backend is process-isolated or does not implement the in-process realtime path.
+    #[error("the plugin backend does not support prepared realtime processing")]
     UnsupportedBackend,
     /// Processing has not been started.
+    #[error("the plugin is not processing")]
     NotProcessing,
     /// A previous processor error faulted this owner.
+    #[error("the prepared realtime owner is faulted")]
     Faulted,
     /// Requested frames or caller buffer lengths exceed prepared storage.
+    #[error("the audio block exceeds prepared realtime storage")]
     InvalidAudioBlock,
     /// Messages routed as VST3 events exceed `max_input_events`.
+    #[error("realtime input-event capacity was exceeded")]
     InputEventCapacity,
     /// Parameter points exceed `max_parameter_changes`.
+    #[error("realtime parameter-point capacity was exceeded")]
     ParameterPointCapacity,
     /// Distinct parameter ids exceed `max_distinct_parameters`.
+    #[error("realtime distinct-parameter capacity was exceeded")]
     DistinctParameterCapacity,
     /// A parameter value was NaN or infinite.
+    #[error("a realtime parameter value was not finite")]
     InvalidParameterValue,
     /// A MIDI data field was outside its 7-bit or 14-bit protocol range.
+    #[error("realtime MIDI data was invalid")]
     InvalidMidiData,
     /// The plugin processor returned a non-success VST3 result code.
+    #[error("the plugin processor failed: {0:#x}")]
     ProcessorFailed(i32),
 }
 
@@ -134,7 +152,7 @@ pub enum RealtimeProcessError {
 pub enum ControllerSyncStatus {
     /// A separate controller accepted current component state, including its live parameters.
     StateAndParameters,
-    /// Component-state transfer was unavailable; cached explicit parameter values were applied.
+    /// Component-state transfer was unavailable; bounded parameter feedback updated the controller.
     ParametersOnly,
     /// The component and controller are the same object and already share the live state.
     SingleComponent,
@@ -185,17 +203,16 @@ impl RealtimeExitFailure {
     }
 }
 
-/// Exclusively owned in-process plugin whose host-side process path uses only fixed storage.
+/// Compatibility wrapper around the canonical prepared [`RealtimePluginRunner`].
 ///
-/// Process-isolated and other unsupported backends fail the forward transition and return the
-/// original [`Plugin`] through [`RealtimeTransitionFailure`]. While sealed, allocation- or
-/// lock-backed host callbacks are refused or acknowledged without recording; restart flags are
-/// retained atomically for the restored control-thread API.
+/// New hosts can use [`RealtimePluginRunner::start_with_capacities`] and
+/// [`RealtimePluginRunner::process_direct`] directly. This type preserves the original
+/// reversible ownership API.
 pub struct RealtimePlugin {
-    plugin: Plugin,
-    capacities: RealtimeCapacities,
-    final_parameters: Vec<(u32, f64)>,
-    faulted: bool,
+    runner: RealtimePluginRunner,
+    // This private handle owns the control-thread teardown receiver. It is intentionally kept
+    // with the wrapper so an accidental audio-thread drop remains non-destructive.
+    _control: RtControl,
 }
 
 impl Plugin {
@@ -208,59 +225,22 @@ impl Plugin {
     /// restored and serviced on its control thread. On failure the returned
     /// [`RealtimeTransitionFailure`] owns the ordinary plugin so no instance is lost.
     pub fn try_into_realtime(
-        mut self,
+        self,
         capacities: RealtimeCapacities,
     ) -> std::result::Result<RealtimePlugin, RealtimeTransitionFailure> {
-        if let Err(error) = capacities.validate(self.block_size) {
+        let (mut runner, control) =
+            RealtimePluginRunner::new(self, capacities.max_parameter_changes);
+        if let Err(error) = runner.start_with_capacities(capacities) {
+            let plugin = runner.into_plugin();
             return Err(RealtimeTransitionFailure {
-                plugin: Box::new(self),
+                plugin: Box::new(plugin),
                 error,
             });
         }
-        if let Err(error) = self.stop_processing() {
-            return Err(RealtimeTransitionFailure {
-                plugin: Box::new(self),
-                error,
-            });
-        }
-        let mut final_parameters: Vec<(u32, f64)> = self
-            .get_parameters()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|parameter| (parameter.id, parameter.value))
-            .collect();
-        final_parameters.sort_unstable_by_key(|(id, _)| *id);
-        let result = self
-            .internal
-            .as_mut()
-            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))
-            .and_then(|internal| internal.prepare_hard_realtime(capacities));
-        match result {
-            Ok(()) => {
-                // Starting is part of the off-thread transaction. If activation/setup fails,
-                // remove the prepared structures and return the same ordinary owner rather than
-                // exposing a half-started realtime value to callers.
-                if let Err(error) = self.start_processing() {
-                    if let Some(internal) = self.internal.as_mut() {
-                        let _ = internal.leave_hard_realtime();
-                    }
-                    return Err(RealtimeTransitionFailure {
-                        plugin: Box::new(self),
-                        error,
-                    });
-                }
-                Ok(RealtimePlugin {
-                    plugin: self,
-                    capacities,
-                    final_parameters,
-                    faulted: false,
-                })
-            }
-            Err(error) => Err(RealtimeTransitionFailure {
-                plugin: Box::new(self),
-                error,
-            }),
-        }
+        Ok(RealtimePlugin {
+            runner,
+            _control: control,
+        })
     }
 }
 
@@ -271,16 +251,12 @@ impl RealtimePlugin {
     /// this is normally a no-op. It remains available for an off-thread retry after an explicit
     /// [`Self::stop`].
     pub fn start(&mut self) -> Result<()> {
-        if !self.plugin.is_processing {
-            self.plugin.start_processing()?;
-        }
-        self.faulted = false;
-        Ok(())
+        self.runner.start()
     }
 
     /// Stops processing. This is a lifecycle operation and is not realtime-safe.
     pub fn stop(&mut self) -> Result<()> {
-        self.plugin.stop_processing()
+        self.runner.stop()
     }
 
     /// Processes one block without host-side allocation, deallocation, logging, or mutex locking.
@@ -297,87 +273,14 @@ impl RealtimePlugin {
         midi: &[RealtimeMidiEvent],
         parameters: &[RealtimeParameterChange],
     ) -> std::result::Result<RealtimeProcessReport, RealtimeProcessError> {
-        let clear_outputs = |buffers: &mut AudioBuffers| {
-            for output in &mut buffers.outputs {
-                output.fill(0.0);
-            }
-        };
-        if self.faulted {
-            clear_outputs(buffers);
-            return Err(RealtimeProcessError::Faulted);
-        }
-        if !self.plugin.is_processing {
-            clear_outputs(buffers);
-            return Err(RealtimeProcessError::NotProcessing);
-        }
-        let frames = buffers.block_size;
-        if frames == 0
-            || frames > self.capacities.max_block_frames
-            || buffers.inputs.iter().any(|channel| channel.len() < frames)
-            || buffers.outputs.iter().any(|channel| channel.len() < frames)
-        {
-            clear_outputs(buffers);
-            return Err(RealtimeProcessError::InvalidAudioBlock);
-        }
-        if parameters.len() > self.capacities.max_parameter_changes {
-            clear_outputs(buffers);
-            return Err(RealtimeProcessError::ParameterPointCapacity);
-        }
-        if parameters.iter().any(|change| !change.value.is_finite()) {
-            clear_outputs(buffers);
-            return Err(RealtimeProcessError::InvalidParameterValue);
-        }
-        if midi
-            .iter()
-            .any(|scheduled| !realtime_midi_data_is_valid(scheduled.event))
-        {
-            clear_outputs(buffers);
-            return Err(RealtimeProcessError::InvalidMidiData);
-        }
-        let mut distinct = 0usize;
-        for (index, parameter) in parameters.iter().enumerate() {
-            if !parameters[..index]
-                .iter()
-                .any(|seen| seen.id == parameter.id)
-            {
-                distinct += 1;
-            }
-        }
-        if distinct > self.capacities.max_distinct_parameters {
-            clear_outputs(buffers);
-            return Err(RealtimeProcessError::DistinctParameterCapacity);
-        }
-        let result = self
-            .plugin
-            .internal
-            .as_mut()
-            .ok_or(RealtimeProcessError::UnsupportedBackend)
-            .and_then(|internal| internal.process_hard_realtime(buffers, midi, parameters));
-        match result {
-            Ok(report) => {
-                for parameter in parameters {
-                    if let Ok(index) = self
-                        .final_parameters
-                        .binary_search_by_key(&parameter.id, |(id, _)| *id)
-                    {
-                        self.final_parameters[index].1 = parameter.value.clamp(0.0, 1.0);
-                    }
-                }
-                Ok(report)
-            }
-            Err(error) => {
-                clear_outputs(buffers);
-                if matches!(error, RealtimeProcessError::ProcessorFailed(_)) {
-                    self.faulted = true;
-                }
-                Err(error)
-            }
-        }
+        self.runner.process_direct(buffers, midi, parameters)
     }
 
     /// Returns the fixed capacities prepared for this owner.
-    pub const fn capacities(&self) -> RealtimeCapacities {
-        self.capacities
+    pub fn capacities(&self) -> RealtimeCapacities {
+        self.runner
+            .prepared_capacities()
+            .expect("RealtimePlugin always owns a prepared runner")
     }
 
     /// Reverses live mode and returns the same ordinary plugin instance.
@@ -388,49 +291,19 @@ impl RealtimePlugin {
     /// report and do not prevent the editor-capable plugin from being returned. Output event and
     /// automation payloads produced while sealed are not replayed into the ordinary drains.
     pub fn try_into_plugin(
-        mut self,
+        self,
     ) -> std::result::Result<(Plugin, RealtimeExitReport), RealtimeExitFailure> {
-        if let Err(error) = self.stop() {
-            return Err(RealtimeExitFailure {
-                plugin: Box::new(self),
-                error,
-            });
+        let Self { runner, _control } = self;
+        match runner.try_restore_prepared() {
+            Ok((plugin, controller_sync)) => Ok((plugin, RealtimeExitReport { controller_sync })),
+            Err(error) => {
+                let (runner, error) = *error;
+                Err(RealtimeExitFailure {
+                    plugin: Box::new(RealtimePlugin { runner, _control }),
+                    error,
+                })
+            }
         }
-        let leave = self
-            .plugin
-            .internal
-            .as_mut()
-            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))
-            .and_then(|internal| internal.leave_hard_realtime());
-        if let Err(error) = leave {
-            return Err(RealtimeExitFailure {
-                plugin: Box::new(self),
-                error,
-            });
-        }
-        let controller_sync = self
-            .plugin
-            .internal
-            .as_mut()
-            .map(|internal| internal.sync_controller_after_realtime(&self.final_parameters))
-            .unwrap_or(ControllerSyncStatus::Unsupported);
-        Ok((self.plugin, RealtimeExitReport { controller_sync }))
-    }
-}
-
-/// Validate every data field without formatting an error or allocating on the process thread.
-fn realtime_midi_data_is_valid(event: MidiEvent) -> bool {
-    match event {
-        MidiEvent::NoteOn { note, velocity, .. } | MidiEvent::NoteOff { note, velocity, .. } => {
-            note <= 127 && velocity <= 127
-        }
-        MidiEvent::ControlChange {
-            controller, value, ..
-        } => controller <= 127 && value <= 127,
-        MidiEvent::ProgramChange { program, .. } => program <= 127,
-        MidiEvent::PitchBend { value, .. } => value <= 16_383,
-        MidiEvent::ChannelAftertouch { pressure, .. } => pressure <= 127,
-        MidiEvent::PolyAftertouch { note, pressure, .. } => note <= 127 && pressure <= 127,
     }
 }
 
@@ -596,11 +469,15 @@ mod tests {
     /// every caller output is silenced on that error path.
     #[test]
     fn invalid_midi_data_is_rejected_and_clears_outputs() {
-        let mut realtime = RealtimePlugin {
-            plugin: unloaded_plugin(true),
-            capacities: capacities(),
-            final_parameters: Vec::new(),
-            faulted: false,
+        let calls = Arc::new(AtomicUsize::new(0));
+        let plugin = plugin_with_internal(FakeInternal {
+            start_fails: false,
+            process_fails: false,
+            process_calls: calls,
+        });
+        let mut realtime = match plugin.try_into_realtime(capacities()) {
+            Ok(realtime) => realtime,
+            Err(_) => panic!("fake backend supports prepared realtime"),
         };
         let mut buffers = AudioBuffers::new(0, 2, 64, 48_000.0);
         for output in &mut buffers.outputs {
@@ -659,9 +536,7 @@ mod tests {
             Ok(realtime) => realtime,
             Err(_) => panic!("fake backend supports realtime mode"),
         };
-        assert!(realtime.plugin.is_processing());
         realtime.stop().unwrap();
-        assert!(!realtime.plugin.is_processing());
         realtime.start().unwrap();
         let mut buffers = AudioBuffers::new(0, 2, 64, 48_000.0);
         realtime.process(&mut buffers, &[], &[]).unwrap();

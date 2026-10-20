@@ -7,7 +7,7 @@ use crate::{
         ControllerSyncStatus, RealtimeCapacities, RealtimeMidiEvent, RealtimeParameterChange,
         RealtimeProcessError, RealtimeProcessReport,
     },
-    midi::{MidiChannel, MidiEvent, PluginEvent},
+    midi::{MidiChannel, MidiEvent, PluginEvent, PluginEventData},
     parameters::{Parameter, ParameterChange},
     plugin::{
         decode_state_snapshot, encode_state_snapshot, PluginInfo, PluginInternal, StateContext,
@@ -209,10 +209,8 @@ pub struct PluginImpl {
 
     // Host data structures
     process_data: Option<Box<HostProcessData>>,
-    /// Separately allocated process data and fixed COM collections used only while the same
-    /// plugin instance is sealed behind `RealtimePlugin`. Keeping this beside, rather than in
-    /// place of, `process_data` preserves all ordinary editor/automation structures for the
-    /// reversible off-thread handoff back to configuration mode.
+    /// Fixed COM collections temporarily wired into the single prepared process graph while
+    /// the plugin is sealed behind `RealtimePlugin`.
     realtime_state: Option<Box<RealtimeState>>,
     component_handler: Option<ComWrapper<ComponentHandler>>,
     connection: Option<ConnectionPair>,
@@ -358,12 +356,17 @@ struct AppliedSetup {
 /// `ProcessData` retains their interface pointers until the caller pauses audio and tears this
 /// value down. Only the one thread holding `&mut RealtimePlugin` may access these collections.
 struct RealtimeState {
-    data: Box<HostProcessData>,
     input_events: ComWrapper<RealtimeEventList>,
     output_events: ComWrapper<RealtimeEventList>,
     input_parameters: ComWrapper<RealtimeParameterChanges>,
     output_parameters: ComWrapper<RealtimeParameterChanges>,
     capacities: RealtimeCapacities,
+    /// Reused id scratch keeps distinct-queue counting independent of mapping-table scans.
+    preflight_parameter_ids: Vec<u32>,
+    /// Owning events displaced from the public newest-wins output queue while processing is
+    /// sealed. They are retained until the paused, off-thread exit so their payloads are never
+    /// freed by the audio callback.
+    retired_output_events: Vec<PluginEvent>,
     /// Immutable controller-to-parameter table captured before entering exclusive processing.
     /// Controller COM calls are forbidden on the realtime thread, so mappings remain fixed until
     /// the caller leaves realtime mode and services any deferred restart request.
@@ -427,6 +430,13 @@ fn restore_process_audio_io(process_data: &mut ProcessData, saved: Option<SavedP
         process_data.inputs = saved.inputs;
         process_data.outputs = saved.outputs;
     }
+}
+
+/// Whether processor callbacks execute under the hard-realtime callback guard.
+#[derive(Clone, Copy)]
+enum ProcessCallbackMode {
+    Ordinary,
+    Realtime,
 }
 
 fn build_typed_sample_buffers<T: Default + Clone>(
@@ -1016,15 +1026,6 @@ impl PluginImpl {
                 data.process_context.tempo = bpm;
             }
         }
-        if let Some(ref mut state) = self.realtime_state {
-            state.data.transport_tempo = bpm;
-            if process_context_needs(
-                state.data.process_context_requirements,
-                IProcessContextRequirements_::Flags_::kNeedTempo as u32,
-            ) {
-                state.data.process_context.tempo = bpm;
-            }
-        }
     }
 
     /// Update the transport time signature for the **next** processed block, even while
@@ -1042,15 +1043,6 @@ impl PluginImpl {
                 data.process_context.timeSigDenominator = denominator;
             }
         }
-        if let Some(ref mut state) = self.realtime_state {
-            if process_context_needs(
-                state.data.process_context_requirements,
-                IProcessContextRequirements_::Flags_::kNeedTimeSignature as u32,
-            ) {
-                state.data.process_context.timeSigNumerator = numerator;
-                state.data.process_context.timeSigDenominator = denominator;
-            }
-        }
     }
 
     /// Toggle the transport playing state (`kPlaying`) for the **next** processed block, even
@@ -1060,10 +1052,6 @@ impl PluginImpl {
         if let Some(ref mut data) = self.process_data {
             data.process_context.state =
                 process_context_state(data.process_context_requirements, playing);
-        }
-        if let Some(ref mut state) = self.realtime_state {
-            state.data.process_context.state =
-                process_context_state(state.data.process_context_requirements, playing);
         }
     }
 
@@ -2178,6 +2166,95 @@ impl PluginImpl {
 }
 
 impl PluginImpl {
+    /// Run one block through the one prepared VST processing graph.
+    ///
+    /// Input staging and post-call queue draining belong to the caller, because ordinary and
+    /// fixed realtime ownership use different COM collections. The audio conversion, silence
+    /// flags, process context, data exchange bracket, processor invocation, transport advance,
+    /// and output copy intentionally live here so the two entry points cannot drift.
+    unsafe fn process_prepared_block(
+        &mut self,
+        data: &mut HostProcessData,
+        buffers: &mut CallerAudioBuffers<'_>,
+        frame_offset: usize,
+        frames: usize,
+        callback_mode: ProcessCallbackMode,
+    ) -> tresult {
+        data.process_data.numSamples = frames as i32;
+        match buffers {
+            CallerAudioBuffers::Flat(buffers) => {
+                data.sample_buffers
+                    .copy_inputs_from(&buffers.inputs, frame_offset, frames)
+            }
+            CallerAudioBuffers::Buses(buffers) => data.sample_buffers.copy_inputs_from_buses(
+                &buffers.inputs,
+                frame_offset,
+                frames,
+                &data.input_bus_buffers,
+                &self.bus_activation.audio_inputs,
+            ),
+        }
+        data.sample_buffers.clear_outputs();
+        data.sample_buffers.update_input_silence_flags(
+            &mut data.input_bus_buffers,
+            &self.bus_activation.audio_inputs,
+            frames,
+        );
+        prepare_output_silence_flags(
+            &mut data.output_bus_buffers,
+            &self.bus_activation.audio_outputs,
+        );
+
+        let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
+        if data.process_context.state & PROCESS_CONTEXT_SYSTEM_TIME_VALID != 0 {
+            data.process_context.systemTime = current_system_time_nanos();
+        }
+        let _process_guard = match callback_mode {
+            ProcessCallbackMode::Ordinary => None,
+            ProcessCallbackMode::Realtime => Some(ProcessThreadGuard::enter()),
+        };
+        self._host_app.enter_data_exchange_process();
+        let process_result = self.processor.process(&mut data.process_data);
+        self._host_app.leave_data_exchange_process();
+        restore_process_audio_io(&mut data.process_data, saved_audio_io);
+
+        advance_process_context(
+            &mut data.process_context,
+            data.process_context_requirements,
+            data.transport_tempo,
+            frames as i64,
+        );
+        self.position.samples = data.process_context.projectTimeSamples;
+        self.position.quarter_notes = data.process_context.projectTimeMusic;
+        self.continuous_samples = data.process_context.continousTimeSamples;
+
+        if process_result == kResultOk {
+            data.sample_buffers.update_output_silence_flags(
+                &mut data.output_bus_buffers,
+                &self.bus_activation.audio_outputs,
+                frames,
+            );
+            match buffers {
+                CallerAudioBuffers::Flat(buffers) => data.sample_buffers.copy_outputs_to(
+                    &mut buffers.outputs,
+                    frame_offset,
+                    frames,
+                    &data.output_bus_buffers,
+                    &self.bus_activation.audio_outputs,
+                ),
+                CallerAudioBuffers::Buses(buffers) => data.sample_buffers.copy_outputs_to_buses(
+                    &mut buffers.outputs,
+                    frame_offset,
+                    frames,
+                    &data.output_bus_buffers,
+                    &self.bus_activation.audio_outputs,
+                ),
+            }
+        }
+
+        process_result
+    }
+
     /// Process exactly `frames` samples starting at `frame_offset` within the caller's
     /// buffers. `frames` is always <= the configured `block_size`, which is what the plugin
     /// was set up to accept; `process` splits a larger caller block into successive chunks.
@@ -2193,195 +2270,119 @@ impl PluginImpl {
         frames: usize,
         is_last: bool,
     ) -> Result<()> {
-        let result = if let Some(ref mut data) = self.process_data {
-            unsafe {
-                // Clear output events only - input events should be preserved for processing
-                self.output_events.clear();
+        let Some(mut data) = self.process_data.take() else {
+            return Err(Error::Other("Process data not initialized".to_string()));
+        };
+        let result = unsafe {
+            // Clear output events only - input events should be preserved for processing
+            self.output_events.clear();
 
-                // Clear the output parameter queue too. VST3's ProcessData::outputParameterChanges
-                // describes changes for the *current* processing block only (see
-                // Steinberg::Vst::ProcessData / IParameterChanges docs); the reference
-                // ParameterChanges host helper exposes clearQueue() for exactly this reset.
-                // Without this, addParameterData()/addPoint() would keep appending to queues
-                // from prior blocks, mixing stale points into new ones, growing point storage
-                // unbounded, and risking a reallocation on the audio thread long after warm-up.
-                data.output_param_changes.clear_all();
+            // Clear the output parameter queue too. VST3's ProcessData::outputParameterChanges
+            // describes changes for the *current* processing block only (see
+            // Steinberg::Vst::ProcessData / IParameterChanges docs); the reference
+            // ParameterChanges host helper exposes clearQueue() for exactly this reset.
+            // Without this, addParameterData()/addPoint() would keep appending to queues
+            // from prior blocks, mixing stale points into new ones, growing point storage
+            // unbounded, and risking a reallocation on the audio thread long after warm-up.
+            data.output_param_changes.clear_all();
 
-                // VST3 allows numSamples to vary up to the maximum given to setupProcessing; the
-                // caller's block may be shorter (BufferSize::Default gives variable sizes) or, if
-                // it was longer, `process` has already split it into chunks of at most that
-                // maximum.
-                let frames = frames.min(self.block_size);
-                data.process_data.numSamples = frames as i32;
+            // VST3 allows numSamples to vary up to the maximum given to setupProcessing; the
+            // caller's block may be shorter (BufferSize::Default gives variable sizes) or, if
+            // it was longer, `process` has already split it into chunks of at most that
+            // maximum.
+            let frames = frames.min(self.block_size);
+            data.process_data.numSamples = frames as i32;
 
-                // Feed the queued parameter changes that belong to this chunk into the
-                // processor's input queue, rebased to the chunk — the same routing the events
-                // got in `stage_chunk_events`, so automation and MIDI stay aligned across a
-                // split block.
-                for pc in &self.pending_param_changes {
-                    if let Some(off) = chunk_offset(pc.sample_offset, frame_offset, frames, is_last)
-                    {
-                        data.input_param_changes.enqueue(pc.id, off, pc.value);
-                    }
-                }
-
-                // Route parameter edits the plugin's *own editor* reported via performEdit into
-                // the processor too, so turning a knob in the plugin GUI affects the audio — not
-                // just the host's display. (Some plugins relay editor→processor internally over
-                // the component/controller connection; others rely on the host to do this. We do
-                // it unconditionally; a plugin that also self-relays just gets the same value
-                // twice in the same block, which is idempotent.) Drained here at offset 0 and
-                // stashed for the host's display poll (get_parameter_changes).
-                if let Some(ref handler) = self.component_handler {
-                    if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
-                        if !gui_changes.is_empty() {
-                            for &(id, value) in gui_changes.iter() {
-                                data.input_param_changes.enqueue(id, 0, value);
-                            }
-                            if let Ok(mut stash) = self.gui_param_changes_for_host.lock() {
-                                // Bounded: nothing drains the stash unless the host polls
-                                // `get_parameter_changes`, and the realtime runner never does, so
-                                // an unbounded append here would grow forever and reallocate on
-                                // the audio thread. Both buffers are pre-reserved to the cap, so
-                                // the steady-state append allocates nothing.
-                                let room = MAX_EDITOR_FEEDBACK.saturating_sub(stash.len());
-                                if room >= gui_changes.len() {
-                                    stash.append(&mut gui_changes);
-                                } else {
-                                    stash.extend(gui_changes.drain(..room));
-                                    gui_changes.clear();
-                                }
-                            } else {
-                                gui_changes.clear();
-                            }
-                        }
-                    }
-                }
-
-                match buffers {
-                    CallerAudioBuffers::Flat(buffers) => {
-                        data.sample_buffers
-                            .copy_inputs_from(&buffers.inputs, frame_offset, frames)
-                    }
-                    CallerAudioBuffers::Buses(buffers) => {
-                        data.sample_buffers.copy_inputs_from_buses(
-                            &buffers.inputs,
-                            frame_offset,
-                            frames,
-                            &data.input_bus_buffers,
-                            &self.bus_activation.audio_inputs,
-                        )
-                    }
-                }
-                data.sample_buffers.clear_outputs();
-                data.sample_buffers.update_input_silence_flags(
-                    &mut data.input_bus_buffers,
-                    &self.bus_activation.audio_inputs,
-                    frames,
-                );
-                prepare_output_silence_flags(
-                    &mut data.output_bus_buffers,
-                    &self.bus_activation.audio_outputs,
-                );
-
-                // Channel pointers and process-data input/output pointers were wired once in
-                // prepare_buffers (buffer addresses are stable), so there's nothing to rebuild
-                // here — keeping the steady-state path allocation-free.
-
-                // A zero-sample flush carries events/parameter queues only. The VST3 process
-                // contract requires no audio buses or pointers for that call.
-                let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
-                if data.process_context.state & PROCESS_CONTEXT_SYSTEM_TIME_VALID != 0 {
-                    data.process_context.systemTime = current_system_time_nanos();
-                }
-                self._host_app.enter_data_exchange_process();
-                let process_result = self.processor.process(&mut data.process_data);
-                self._host_app.leave_data_exchange_process();
-                restore_process_audio_io(&mut data.process_data, saved_audio_io);
-
-                // Everything from here to the output copy is per-block cleanup and MUST run even
-                // when the plugin reported failure. Returning early instead would leave this
-                // block's events and parameter changes queued, so the next block would re-deliver
-                // every one of them — re-triggering held notes and growing the queues without
-                // bound for as long as the plugin keeps failing.
-
-                // Advance the transport so tempo-synced DSP (LFOs, sync'd delays/arps) sees
-                // a moving playhead instead of a frozen time-0. The context describes the
-                // block that was just processed; advancing here means the next block starts
-                // at the new sample position.
-                advance_process_context(
-                    &mut data.process_context,
-                    data.process_context_requirements,
-                    data.transport_tempo,
-                    frames as i64,
-                );
-                self.position.samples = data.process_context.projectTimeSamples;
-                self.position.quarter_notes = data.process_context.projectTimeMusic;
-                self.continuous_samples = data.process_context.continousTimeSamples;
-
-                // Clear the staged input events AFTER processing, so the plugin got to see them
-                // and the next chunk starts from an empty list.
-                self.input_events.clear();
-                // Clear the input parameter queue too, so this block's values don't
-                // re-stick on the next block.
-                data.input_param_changes.clear_all();
-
-                // Processor-originated automation belongs to this block. Copy it into a
-                // bounded lock-free feedback queue, then clear it on both success and failure
-                // so stale points can never be re-reported.
-                let feedback = &self.output_param_feedback;
-                data.output_param_changes
-                    .for_each_active_point(|id, _offset, value| {
-                        feedback.force_push((id, value));
-                    });
-                data.output_param_changes.clear_all();
-
-                // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
-                // Drain the event list in place (no `mem::take`) and push each converted event
-                // into the lock-free output queue with `force_push`, which drops the oldest event
-                // when full. No lock and no allocation on the audio thread even while MIDI flows.
-                if !self.output_events.is_empty() {
-                    let out = &self.output_events_owned;
-                    self.output_events.drain_each(|event| {
-                        out.force_push(event);
-                    });
-                }
-
-                if process_result != kResultOk {
-                    // Leave the caller's buffers as they were (the playback bridges pre-fill them
-                    // with silence) rather than copying out whatever the failed call left behind.
-                    Err(Error::ProcessFailed(process_result))
-                } else {
-                    data.sample_buffers.update_output_silence_flags(
-                        &mut data.output_bus_buffers,
-                        &self.bus_activation.audio_outputs,
-                        frames,
-                    );
-                    match buffers {
-                        CallerAudioBuffers::Flat(buffers) => data.sample_buffers.copy_outputs_to(
-                            &mut buffers.outputs,
-                            frame_offset,
-                            frames,
-                            &data.output_bus_buffers,
-                            &self.bus_activation.audio_outputs,
-                        ),
-                        CallerAudioBuffers::Buses(buffers) => {
-                            data.sample_buffers.copy_outputs_to_buses(
-                                &mut buffers.outputs,
-                                frame_offset,
-                                frames,
-                                &data.output_bus_buffers,
-                                &self.bus_activation.audio_outputs,
-                            )
-                        }
-                    }
-                    Ok(())
+            // Feed the queued parameter changes that belong to this chunk into the
+            // processor's input queue, rebased to the chunk — the same routing the events
+            // got in `stage_chunk_events`, so automation and MIDI stay aligned across a
+            // split block.
+            for pc in &self.pending_param_changes {
+                if let Some(off) = chunk_offset(pc.sample_offset, frame_offset, frames, is_last) {
+                    data.input_param_changes.enqueue(pc.id, off, pc.value);
                 }
             }
-        } else {
-            Err(Error::Other("Process data not initialized".to_string()))
-        };
 
+            // Route parameter edits the plugin's *own editor* reported via performEdit into
+            // the processor too, so turning a knob in the plugin GUI affects the audio — not
+            // just the host's display. (Some plugins relay editor→processor internally over
+            // the component/controller connection; others rely on the host to do this. We do
+            // it unconditionally; a plugin that also self-relays just gets the same value
+            // twice in the same block, which is idempotent.) Drained here at offset 0 and
+            // stashed for the host's display poll (get_parameter_changes).
+            if let Some(ref handler) = self.component_handler {
+                if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
+                    if !gui_changes.is_empty() {
+                        for &(id, value) in gui_changes.iter() {
+                            data.input_param_changes.enqueue(id, 0, value);
+                        }
+                        if let Ok(mut stash) = self.gui_param_changes_for_host.lock() {
+                            // Bounded: nothing drains the stash unless the host polls
+                            // `get_parameter_changes`, and the realtime runner never does, so
+                            // an unbounded append here would grow forever and reallocate on
+                            // the audio thread. Both buffers are pre-reserved to the cap, so
+                            // the steady-state append allocates nothing.
+                            let room = MAX_EDITOR_FEEDBACK.saturating_sub(stash.len());
+                            if room >= gui_changes.len() {
+                                stash.append(&mut gui_changes);
+                            } else {
+                                stash.extend(gui_changes.drain(..room));
+                                gui_changes.clear();
+                            }
+                        } else {
+                            gui_changes.clear();
+                        }
+                    }
+                }
+            }
+
+            // The common prepared engine owns audio conversion, silence flags, VST process
+            // context, data exchange, invocation, transport advance, and output copy.
+            let process_result = self.process_prepared_block(
+                &mut data,
+                buffers,
+                frame_offset,
+                frames,
+                ProcessCallbackMode::Ordinary,
+            );
+
+            // Clear the staged input events AFTER processing, so the plugin got to see them
+            // and the next chunk starts from an empty list.
+            self.input_events.clear();
+            // Clear the input parameter queue too, so this block's values don't
+            // re-stick on the next block.
+            data.input_param_changes.clear_all();
+
+            // Processor-originated automation belongs to this block. Copy it into a
+            // bounded lock-free feedback queue, then clear it on both success and failure
+            // so stale points can never be re-reported.
+            let feedback = &self.output_param_feedback;
+            data.output_param_changes
+                .for_each_active_point(|id, _offset, value| {
+                    feedback.force_push((id, value));
+                });
+            data.output_param_changes.clear_all();
+
+            // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
+            // Drain the event list in place (no `mem::take`) and push each converted event
+            // into the lock-free output queue with `force_push`, which drops the oldest event
+            // when full. No lock and no allocation on the audio thread even while MIDI flows.
+            if !self.output_events.is_empty() {
+                let out = &self.output_events_owned;
+                self.output_events.drain_each(|event| {
+                    out.force_push(event);
+                });
+            }
+
+            if process_result != kResultOk {
+                // Leave the caller's buffers as they were (the playback bridges pre-fill them
+                // with silence) rather than copying out whatever the failed call left behind.
+                Err(Error::ProcessFailed(process_result))
+            } else {
+                Ok(())
+            }
+        };
+        self.process_data = Some(data);
         result
     }
 
@@ -2752,15 +2753,51 @@ impl PluginInternal for PluginImpl {
             ));
         }
 
-        // Build a second complete ProcessData graph off-thread. `create_process_data` installs
-        // its result in the ordinary slot, so temporarily remove and then restore that slot. On
-        // every error path the original ordinary graph is put back unchanged.
-        let ordinary_data = self.process_data.take();
-        let create_result = self.create_process_data();
-        let prepared_data = self.process_data.take();
-        self.process_data = ordinary_data;
-        create_result?;
-        let mut data = prepared_data.ok_or_else(|| {
+        // The fixed engine accepts its complete first-block input explicitly. Moving ordinary
+        // queued work across would either require unbounded conversion or silently drop it, so
+        // make the lifecycle boundary explicit while the caller can still flush normally.
+        let has_editor_input = self.component_handler.as_ref().is_some_and(|handler| {
+            handler
+                .parameter_changes
+                .lock()
+                .map(|changes| !changes.is_empty())
+                .unwrap_or(false)
+        });
+        if !self.input_events.is_empty()
+            || !self.chunk_events.is_empty()
+            || !self.pending_param_changes.is_empty()
+            || has_editor_input
+        {
+            return Err(Error::Other(
+                "cannot enter hard-realtime mode with queued ordinary input; process or clear it first"
+                    .to_string(),
+            ));
+        }
+
+        if self.is_processing {
+            return Err(Error::Other(
+                "cannot prepare hard-realtime processing while the plugin is running".to_string(),
+            ));
+        }
+
+        // `Plugin::set_audio_config` commonly changes the load-time defaults before a runner
+        // starts. Build that current graph now, before installing fixed endpoints: otherwise
+        // `start_processing` would call `setupProcessing` afterwards and replace this graph,
+        // leaving ProcessData with ordinary collection pointers again.
+        if self.applied_setup != Some(self.current_setup()) || self.process_data.is_none() {
+            if self.is_active {
+                let result = self.set_component_active(false);
+                if result != kResultOk && result != kResultTrue {
+                    return Err(Error::Other(format!(
+                        "failed to deactivate before hard-realtime setup: {result:#x}"
+                    )));
+                }
+                self.is_active = false;
+            }
+            self.setup_processing()?;
+        }
+
+        let data = self.process_data.as_mut().ok_or_else(|| {
             Error::Other("hard-realtime process data was not initialized".to_string())
         })?;
 
@@ -2775,8 +2812,9 @@ impl PluginInternal for PluginImpl {
             capacities.max_parameter_changes,
         ));
 
-        // Interface pointers refer to COM allocations owned by the wrappers below; moving the
-        // wrappers into `RealtimeState` does not move those allocations.
+        // Interface pointers refer to COM allocations owned by the wrappers below. Replace only
+        // the collection endpoints: the VST process data, audio buffers, bus topology, and
+        // transport context remain the ordinary graph prepared at setup time.
         data.process_data.inputEvents = input_events
             .as_com_ref::<IEventList>()
             .map(|value| value.as_ptr())
@@ -2794,17 +2832,23 @@ impl PluginInternal for PluginImpl {
             .map(|value| value.as_ptr())
             .unwrap_or(ptr::null_mut());
 
+        // The transition was rejected above if ordinary input was queued, so no input can be
+        // replayed after restoring the ordinary collection endpoints.
+        data.input_param_changes.clear_all();
+        data.output_param_changes.clear_all();
+
         // MIDI mapping and program metadata are controller-derived. Snapshot both while still on
         // the control thread so the realtime callback performs only immutable table lookups.
         let midi_mapping = self.midi_mapping_cache.clone();
         let root_program_change = self.cached_program_change(0);
         self.realtime_state = Some(Box::new(RealtimeState {
-            data,
             input_events,
             output_events,
             input_parameters,
             output_parameters,
             capacities,
+            preflight_parameter_ids: Vec::with_capacity(capacities.max_parameter_changes),
+            retired_output_events: Vec::with_capacity(MAX_OUTPUT_MIDI),
             midi_mapping,
             root_program_change,
         }));
@@ -2824,122 +2868,133 @@ impl PluginInternal for PluginImpl {
         if !self.is_active || !self.is_processing {
             return Err(RealtimeProcessError::NotProcessing);
         }
-        let state = self
-            .realtime_state
-            .as_mut()
-            .ok_or(RealtimeProcessError::UnsupportedBackend)?;
         let frames = buffers.block_size;
-        if frames == 0 || frames > state.capacities.max_block_frames {
-            return Err(RealtimeProcessError::InvalidAudioBlock);
-        }
+        let (counts, output_event_overflows_before, output_parameter_overflows_before) = {
+            let state = self
+                .realtime_state
+                .as_mut()
+                .ok_or(RealtimeProcessError::UnsupportedBackend)?;
+            if frames == 0 || frames > state.capacities.max_block_frames {
+                return Err(RealtimeProcessError::InvalidAudioBlock);
+            }
 
-        let counts = preflight_realtime_inputs(
-            midi,
-            parameters,
-            frames,
-            &state.midi_mapping,
-            state.root_program_change,
-            state.capacities,
-        )?;
-        let route = |scheduled: &RealtimeMidiEvent| {
-            route_realtime_midi(
-                scheduled.event,
-                realtime_sample_offset(scheduled.sample_offset, frames),
+            let counts = preflight_realtime_inputs_with_scratch(
+                midi,
+                parameters,
+                frames,
                 &state.midi_mapping,
                 state.root_program_change,
-            )
-        };
+                state.capacities,
+                &mut state.preflight_parameter_ids,
+            )?;
+            state.clear_process_collections();
+            let output_event_overflows_before = state.output_events.overflow_count();
+            let output_parameter_overflows_before = state.output_parameters.overflow_count();
 
-        state.clear_process_collections();
-        let output_event_overflows_before = state.output_events.overflow_count();
-        let output_parameter_overflows_before = state.output_parameters.overflow_count();
-
-        for scheduled in midi {
-            let routed = route(scheduled);
-            if let RealtimeMidiRoute::Event(event) = routed {
-                if !state.input_events.push(event) {
-                    state.clear_process_collections();
-                    return Err(RealtimeProcessError::InputEventCapacity);
+            for scheduled in midi {
+                let routed = route_realtime_midi(
+                    scheduled.event,
+                    realtime_sample_offset(scheduled.sample_offset, frames),
+                    &state.midi_mapping,
+                    state.root_program_change,
+                );
+                if let RealtimeMidiRoute::Event(event) = routed {
+                    if !state.input_events.push(event) {
+                        state.clear_process_collections();
+                        return Err(RealtimeProcessError::InputEventCapacity);
+                    }
+                }
+                for (id, offset, value) in routed.parameter_points(&state.midi_mapping) {
+                    if !state.input_parameters.enqueue(id, offset, value) {
+                        state.clear_process_collections();
+                        return Err(RealtimeProcessError::ParameterPointCapacity);
+                    }
                 }
             }
-            for (id, offset, value) in routed.parameter_points(&state.midi_mapping) {
-                if !state.input_parameters.enqueue(id, offset, value) {
+            for parameter in parameters {
+                if !parameter.value.is_finite() {
+                    state.clear_process_collections();
+                    return Err(RealtimeProcessError::InvalidParameterValue);
+                }
+                let offset = realtime_sample_offset(parameter.sample_offset, frames);
+                if !state.input_parameters.enqueue(
+                    parameter.id,
+                    offset,
+                    parameter.value.clamp(0.0, 1.0),
+                ) {
                     state.clear_process_collections();
                     return Err(RealtimeProcessError::ParameterPointCapacity);
                 }
             }
-        }
-        for parameter in parameters {
-            if !parameter.value.is_finite() {
-                state.clear_process_collections();
-                return Err(RealtimeProcessError::InvalidParameterValue);
-            }
-            let offset = realtime_sample_offset(parameter.sample_offset, frames);
-            if !state.input_parameters.enqueue(
-                parameter.id,
-                offset,
-                parameter.value.clamp(0.0, 1.0),
-            ) {
-                state.clear_process_collections();
-                return Err(RealtimeProcessError::ParameterPointCapacity);
-            }
-        }
-
-        let data = &mut state.data;
-        data.process_data.numSamples = frames as i32;
-        data.sample_buffers
-            .copy_inputs_from(&buffers.inputs, 0, frames);
-        data.sample_buffers.clear_outputs();
-        data.sample_buffers.update_input_silence_flags(
-            &mut data.input_bus_buffers,
-            &self.bus_activation.audio_inputs,
-            frames,
-        );
-        prepare_output_silence_flags(
-            &mut data.output_bus_buffers,
-            &self.bus_activation.audio_outputs,
-        );
-        if data.process_context.state & PROCESS_CONTEXT_SYSTEM_TIME_VALID != 0 {
-            data.process_context.systemTime = current_system_time_nanos();
-        }
-
-        // The guard is active only while third-party code can synchronously call back into host
-        // COM objects. All host validation and collection preparation above remains ordinary
-        // Rust code with Copy-only errors, and every collection is cleared after the call.
-        let process_result = {
-            let _denormal = crate::internal::denormal::DenormalGuard::new();
-            let _process_guard = ProcessThreadGuard::enter();
-            self._host_app.enter_data_exchange_process();
-            let result = unsafe { self.processor.process(&mut data.process_data) };
-            self._host_app.leave_data_exchange_process();
-            result
+            (
+                counts,
+                output_event_overflows_before,
+                output_parameter_overflows_before,
+            )
         };
-        advance_process_context(
-            &mut data.process_context,
-            data.process_context_requirements,
-            data.transport_tempo,
-            frames as i64,
-        );
-        self.position.samples = data.process_context.projectTimeSamples;
-        self.position.quarter_notes = data.process_context.projectTimeMusic;
-        self.continuous_samples = data.process_context.continousTimeSamples;
+
+        let Some(mut data) = self.process_data.take() else {
+            if let Some(state) = self.realtime_state.as_ref() {
+                state.clear_process_collections();
+            }
+            return Err(RealtimeProcessError::UnsupportedBackend);
+        };
+        let process_result = unsafe {
+            let _denormal = crate::internal::denormal::DenormalGuard::new();
+            self.process_prepared_block(
+                &mut data,
+                &mut CallerAudioBuffers::Flat(buffers),
+                0,
+                frames,
+                ProcessCallbackMode::Realtime,
+            )
+        };
+        self.process_data = Some(data);
+        let state = self
+            .realtime_state
+            .as_mut()
+            .ok_or(RealtimeProcessError::UnsupportedBackend)?;
+        // Preserve fixed processor output for the ordinary lock-free drains as well. Keep the
+        // public newest-wins policy, but retain any displaced owning event until exit so its
+        // payload is never freed by this audio callback.
+        let feedback = &self.output_param_feedback;
+        state
+            .output_parameters
+            .for_each_active_point(|id, _offset, value| {
+                let _ = feedback.force_push((id, value));
+            });
+        let output_events = &self.output_events_owned;
+        state.output_events.drain_each(|event| {
+            if let Some(event) = realtime_event_to_plugin_event(&event) {
+                if let Some(displaced) = output_events.force_push(event) {
+                    if realtime_event_owns_payload(&displaced) {
+                        // At entry the public queue holds at most MAX_OUTPUT_MIDI events, and
+                        // fixed processing cannot create owning events. This reservation is
+                        // therefore sufficient for every owning event displaced while sealed.
+                        debug_assert!(state.retired_output_events.len() < MAX_OUTPUT_MIDI);
+                        if state.retired_output_events.len() < MAX_OUTPUT_MIDI {
+                            state.retired_output_events.push(displaced);
+                        } else {
+                            // Preserve the hard-realtime no-free guarantee even if a future
+                            // caller breaks the bound above; exit is the only reclaim point.
+                            std::mem::forget(displaced);
+                        }
+                    }
+                }
+            }
+        });
         if process_result != kResultOk {
             state.clear_process_collections();
             return Err(RealtimeProcessError::ProcessorFailed(process_result));
         }
-
-        data.sample_buffers.update_output_silence_flags(
-            &mut data.output_bus_buffers,
-            &self.bus_activation.audio_outputs,
-            frames,
-        );
-        data.sample_buffers.copy_outputs_to(
-            &mut buffers.outputs,
-            0,
-            frames,
-            &data.output_bus_buffers,
-            &self.bus_activation.audio_outputs,
-        );
+        if !self.single_component {
+            let deferred = &self.deferred_controller_sync;
+            state
+                .input_parameters
+                .for_each_active_point(|id, _offset, value| {
+                    deferred.force_push((id, value));
+                });
+        }
         let report = RealtimeProcessReport {
             input_events: counts.input_events,
             parameter_changes: counts.parameter_points,
@@ -2961,11 +3016,38 @@ impl PluginInternal for PluginImpl {
     /// must be stopped and exclusively owned; the next ordinary block resumes at the realtime
     /// endpoint, including continuous time while the project transport was stopped.
     fn leave_hard_realtime(&mut self) -> Result<()> {
-        if let Some(data) = self.process_data.as_mut() {
-            data.process_context.projectTimeSamples = self.position.samples;
-            data.process_context.projectTimeMusic = self.position.quarter_notes;
-            data.process_context.continousTimeSamples = self.continuous_samples;
-        }
+        let input_events = self
+            .input_events
+            .as_com_ref::<IEventList>()
+            .map(|value| value.as_ptr())
+            .unwrap_or(ptr::null_mut());
+        let output_events = self
+            .output_events
+            .as_com_ref::<IEventList>()
+            .map(|value| value.as_ptr())
+            .unwrap_or(ptr::null_mut());
+        let Some(data) = self.process_data.as_mut() else {
+            return Err(Error::Other(
+                "hard-realtime process data was not initialized".to_string(),
+            ));
+        };
+        data.process_context.projectTimeSamples = self.position.samples;
+        data.process_context.projectTimeMusic = self.position.quarter_notes;
+        data.process_context.continousTimeSamples = self.continuous_samples;
+        // Reinstall the ordinary collections before the fixed wrappers are dropped. The audio
+        // graph itself was never replaced, so its buffers and transport context remain intact.
+        data.process_data.inputEvents = input_events;
+        data.process_data.outputEvents = output_events;
+        data.process_data.inputParameterChanges = data
+            .input_param_changes
+            .as_com_ref::<IParameterChanges>()
+            .map(|value| value.as_ptr())
+            .unwrap_or(ptr::null_mut());
+        data.process_data.outputParameterChanges = data
+            .output_param_changes
+            .as_com_ref::<IParameterChanges>()
+            .map(|value| value.as_ptr())
+            .unwrap_or(ptr::null_mut());
         // Called only during the caller-paused reverse transition. Dropping fixed Vec/COM
         // allocations here is intentionally non-realtime and leaves ordinary structures intact.
         self.realtime_state.take();
@@ -2974,8 +3056,16 @@ impl PluginInternal for PluginImpl {
 
     fn sync_controller_after_realtime(
         &mut self,
-        final_parameters: &[(u32, f64)],
+        _final_parameters: &[(u32, f64)],
     ) -> ControllerSyncStatus {
+        // Empty the callback-thread queue before restoring control-side state. A later ordinary
+        // `get_parameter()` must never replay a stale mapped/program value over the processor
+        // state that this exit just made authoritative.
+        let mut deferred = Vec::with_capacity(self.deferred_controller_sync.capacity());
+        while let Some(change) = self.deferred_controller_sync.pop() {
+            deferred.push(change);
+        }
+
         let Some(controller) = self.controller.as_ref() else {
             return ControllerSyncStatus::Unsupported;
         };
@@ -2983,8 +3073,17 @@ impl PluginInternal for PluginImpl {
         if self.single_component {
             // The processor is also the controller, so its live state is already authoritative.
             // Replaying the entry snapshot here would roll back mapped MIDI and could let a
-            // program parameter fan out over later automation.
+            // program parameter fan out over later automation. `deferred` was deliberately
+            // cleared above for the same reason.
             return ControllerSyncStatus::SingleComponent;
+        }
+
+        // Apply queued live values before component-state transfer. A successful transfer below
+        // supersedes them. If transfer is unavailable, this leaves the controller at the latest
+        // live values; an entry snapshot would be stale for any mapped point a control read had
+        // already drained during realtime processing.
+        for &(id, value) in &deferred {
+            self.apply_controller_parameter(id, value);
         }
 
         // A separate controller receives the processor's current state, but the component must
@@ -3020,14 +3119,8 @@ impl PluginInternal for PluginImpl {
             // overwrite values that changed only inside the processor during realtime tenure.
             ControllerSyncStatus::StateAndParameters
         } else {
-            // Some processors cannot serialize component state. Preserve the explicit parameter
-            // changes the public realtime API observed; mapped MIDI cannot be reconstructed here
-            // without controller access on the process thread.
-            for &(id, value) in final_parameters {
-                unsafe {
-                    controller.setParamNormalized(id, value);
-                }
-            }
+            // Some processors cannot serialize component state. The live values above are the
+            // complete host-side record; replaying the entry snapshot could roll them back.
             ControllerSyncStatus::ParametersOnly
         }
     }
@@ -4962,11 +5055,64 @@ fn realtime_sample_offset(requested: usize, frames: usize) -> i32 {
 
 /// Count the actual VST3 inputs after MIDI mapping and reject any fixed-capacity overflow.
 ///
-/// The scans are deliberately quadratic in the number of points rather than using a temporary
-/// set: caller-provided block slices are bounded, and avoiding allocation is the stronger realtime
-/// invariant. Every one-to-many assignment consumes a point; duplicate parameter ids across
-/// mappings, messages, and explicit automation consume only one queue slot. No collections or
-/// plugin state are changed on rejection.
+/// Map each message once into preallocated id storage, then count distinct queues in that
+/// bounded slice. Restarting the mapping iterator for every pair of ids would multiply the
+/// quadratic distinct scan by the plugin's entire mapping-table size. No plugin-facing
+/// collections or processor state are changed on rejection.
+fn preflight_realtime_inputs_with_scratch(
+    midi: &[RealtimeMidiEvent],
+    parameters: &[RealtimeParameterChange],
+    frames: usize,
+    midi_mapping: &MidiMappingCache,
+    root_program_change: Option<ProgramChangeMapping>,
+    capacities: RealtimeCapacities,
+    parameter_ids: &mut Vec<u32>,
+) -> std::result::Result<RealtimeInputCounts, RealtimeProcessError> {
+    parameter_ids.clear();
+    if parameters.len() > capacities.max_parameter_changes {
+        return Err(RealtimeProcessError::ParameterPointCapacity);
+    }
+    parameter_ids.extend(parameters.iter().map(|parameter| parameter.id));
+    let mut input_events = 0;
+    for scheduled in midi {
+        let routed = route_realtime_midi(
+            scheduled.event,
+            realtime_sample_offset(scheduled.sample_offset, frames),
+            midi_mapping,
+            root_program_change,
+        );
+        if matches!(routed, RealtimeMidiRoute::Event(_)) {
+            input_events += 1;
+            if input_events > capacities.max_input_events {
+                return Err(RealtimeProcessError::InputEventCapacity);
+            }
+        }
+        for (id, _, _) in routed.parameter_points(midi_mapping) {
+            if parameter_ids.len() == capacities.max_parameter_changes {
+                return Err(RealtimeProcessError::ParameterPointCapacity);
+            }
+            parameter_ids.push(id);
+        }
+    }
+
+    let mut distinct_parameters = 0usize;
+    for (index, id) in parameter_ids.iter().enumerate() {
+        if !parameter_ids[..index].contains(id) {
+            distinct_parameters += 1;
+            if distinct_parameters > capacities.max_distinct_parameters {
+                return Err(RealtimeProcessError::DistinctParameterCapacity);
+            }
+        }
+    }
+
+    Ok(RealtimeInputCounts {
+        input_events,
+        parameter_points: parameter_ids.len(),
+        distinct_parameters,
+    })
+}
+
+#[cfg(test)]
 fn preflight_realtime_inputs(
     midi: &[RealtimeMidiEvent],
     parameters: &[RealtimeParameterChange],
@@ -4975,54 +5121,15 @@ fn preflight_realtime_inputs(
     root_program_change: Option<ProgramChangeMapping>,
     capacities: RealtimeCapacities,
 ) -> std::result::Result<RealtimeInputCounts, RealtimeProcessError> {
-    let route = |scheduled: &RealtimeMidiEvent| {
-        route_realtime_midi(
-            scheduled.event,
-            realtime_sample_offset(scheduled.sample_offset, frames),
-            midi_mapping,
-            root_program_change,
-        )
-    };
-    let parameter_ids = || {
-        parameters
-            .iter()
-            .map(|parameter| parameter.id)
-            .chain(midi.iter().flat_map(|scheduled| {
-                route(scheduled)
-                    .parameter_points(midi_mapping)
-                    .map(|(id, _, _)| id)
-            }))
-    };
-    let input_events = midi
-        .iter()
-        .filter(|scheduled| matches!(route(scheduled), RealtimeMidiRoute::Event(_)))
-        .count();
-    if input_events > capacities.max_input_events {
-        return Err(RealtimeProcessError::InputEventCapacity);
-    }
-    // Stop as soon as capacity is exceeded, before the quadratic distinct-id scan.
-    let parameter_points = parameter_ids()
-        .take(capacities.max_parameter_changes.saturating_add(1))
-        .count();
-    if parameter_points > capacities.max_parameter_changes {
-        return Err(RealtimeProcessError::ParameterPointCapacity);
-    }
-
-    let mut distinct_parameters = 0usize;
-    for (index, id) in parameter_ids().enumerate() {
-        if !parameter_ids().take(index).any(|earlier| earlier == id) {
-            distinct_parameters += 1;
-        }
-    }
-    if distinct_parameters > capacities.max_distinct_parameters {
-        return Err(RealtimeProcessError::DistinctParameterCapacity);
-    }
-
-    Ok(RealtimeInputCounts {
-        input_events,
-        parameter_points,
-        distinct_parameters,
-    })
+    preflight_realtime_inputs_with_scratch(
+        midi,
+        parameters,
+        frames,
+        midi_mapping,
+        root_program_change,
+        capacities,
+        &mut Vec::with_capacity(capacities.max_parameter_changes),
+    )
 }
 
 /// Route one already-validated MIDI message without controller access, allocation, or logging.
@@ -5153,9 +5260,10 @@ fn route_realtime_midi(
     RealtimeMidiRoute::Event(vst_event)
 }
 
-/// Convert a raw VST3 `Event` (as a plugin emits into its output event list) into a safe
-/// [`MidiEvent`]. Returns `None` for event types this library doesn't model.
-#[cfg(test)]
+/// Convert a fixed-storage VST3 output event into its owned host representation.
+///
+/// `RealtimeEventList` rejects pointer-backed event kinds before this is reached, so every
+/// accepted variant is copied directly without allocating in the audio callback.
 #[allow(non_upper_case_globals)]
 // kNoteOnEvent etc. are VST3 SDK constants
 // SDK enum constants (event types, controller numbers) are generated as `i32` on some
@@ -5163,58 +5271,150 @@ fn route_realtime_midi(
 // where `c_char` is `i8`. We match the `u32` scrutinee against `<const> as u32` and allow
 // the cast clippy flags as redundant on the targets where it already matches.
 #[allow(clippy::unnecessary_cast)]
-pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
+fn realtime_event_to_plugin_event(e: &Event) -> Option<PluginEvent> {
     unsafe {
-        match e.r#type as u32 {
+        let data = match e.r#type as u32 {
             t if t == kNoteOnEvent as u32 => {
                 let n = &e.__field0.noteOn;
-                Some(MidiEvent::NoteOn {
-                    channel: MidiChannel::from_index(n.channel as u8)?,
-                    note: (n.pitch.clamp(0, 127)) as u8,
-                    velocity: (n.velocity * 127.0).round().clamp(0.0, 127.0) as u8,
-                })
+                PluginEventData::NoteOn {
+                    channel: n.channel,
+                    pitch: n.pitch,
+                    tuning: n.tuning,
+                    velocity: n.velocity,
+                    length: n.length,
+                    note_id: n.noteId,
+                }
             }
             t if t == kNoteOffEvent as u32 => {
                 let n = &e.__field0.noteOff;
-                Some(MidiEvent::NoteOff {
-                    channel: MidiChannel::from_index(n.channel as u8)?,
-                    note: (n.pitch.clamp(0, 127)) as u8,
-                    velocity: (n.velocity * 127.0).round().clamp(0.0, 127.0) as u8,
-                })
+                PluginEventData::NoteOff {
+                    channel: n.channel,
+                    pitch: n.pitch,
+                    velocity: n.velocity,
+                    note_id: n.noteId,
+                    tuning: n.tuning,
+                }
             }
             t if t == kPolyPressureEvent as u32 => {
                 let p = &e.__field0.polyPressure;
-                Some(MidiEvent::PolyAftertouch {
-                    channel: MidiChannel::from_index(p.channel as u8)?,
-                    note: (p.pitch.clamp(0, 127)) as u8,
-                    pressure: (p.pressure * 127.0).round().clamp(0.0, 127.0) as u8,
-                })
+                PluginEventData::PolyPressure {
+                    channel: p.channel,
+                    pitch: p.pitch,
+                    pressure: p.pressure,
+                    note_id: p.noteId,
+                }
+            }
+            t if t == kNoteExpressionValueEvent as u32 => {
+                let value = &e.__field0.noteExpressionValue;
+                PluginEventData::NoteExpressionValue {
+                    type_id: value.typeId,
+                    note_id: value.noteId,
+                    value: value.value,
+                }
+            }
+            t if t == kNoteExpressionIntValueEvent as u32 => {
+                let value = &e.__field0.noteExpressionIntValue;
+                PluginEventData::NoteExpressionIntValue {
+                    type_id: value.typeId,
+                    note_id: value.noteId,
+                    value: value.value,
+                }
             }
             t if t == kLegacyMIDICCOutEvent as u32 => {
                 let c = &e.__field0.midiCCOut;
-                let channel = MidiChannel::from_index(c.channel as u8)?;
-                let value = (c.value as u8) & 0x7F;
-                match c.controlNumber as u32 {
-                    n if n == ControllerNumbers_::kPitchBend as u32 => Some(MidiEvent::PitchBend {
-                        channel,
-                        value: (((c.value2 as u16) & 0x7F) << 7) | value as u16,
-                    }),
-                    n if n == ControllerNumbers_::kAfterTouch as u32 => {
-                        Some(MidiEvent::ChannelAftertouch {
-                            channel,
-                            pressure: value,
-                        })
-                    }
-                    cc if cc < 128 => Some(MidiEvent::ControlChange {
-                        channel,
-                        controller: cc as u8,
-                        value,
-                    }),
-                    _ => None,
+                PluginEventData::LegacyMidiCcOut {
+                    control_number: c.controlNumber,
+                    channel: c.channel as i8,
+                    value: c.value as u8,
+                    value2: c.value2 as u8,
                 }
             }
-            _ => None,
+            _ => return None,
+        };
+        Some(PluginEvent {
+            bus_index: e.busIndex,
+            sample_offset: e.sampleOffset,
+            ppq_position: e.ppqPosition,
+            flags: e.flags,
+            data,
+        })
+    }
+}
+
+fn realtime_event_owns_payload(event: &PluginEvent) -> bool {
+    matches!(
+        &event.data,
+        PluginEventData::Data { .. }
+            | PluginEventData::NoteExpressionText { .. }
+            | PluginEventData::Chord { .. }
+            | PluginEventData::Scale { .. }
+    )
+}
+
+/// Convert a raw VST3 `Event` (as a plugin emits into its output event list) into a safe
+/// [`MidiEvent`]. Returns `None` for event types this library doesn't model.
+#[cfg(test)]
+#[allow(clippy::unnecessary_cast)]
+pub(crate) fn event_to_midi(e: &Event) -> Option<MidiEvent> {
+    let event = realtime_event_to_plugin_event(e)?;
+    match event.data {
+        PluginEventData::NoteOn {
+            channel,
+            pitch,
+            velocity,
+            ..
+        } => Some(MidiEvent::NoteOn {
+            channel: MidiChannel::from_index(channel as u8)?,
+            note: pitch.clamp(0, 127) as u8,
+            velocity: (velocity * 127.0).round().clamp(0.0, 127.0) as u8,
+        }),
+        PluginEventData::NoteOff {
+            channel,
+            pitch,
+            velocity,
+            ..
+        } => Some(MidiEvent::NoteOff {
+            channel: MidiChannel::from_index(channel as u8)?,
+            note: pitch.clamp(0, 127) as u8,
+            velocity: (velocity * 127.0).round().clamp(0.0, 127.0) as u8,
+        }),
+        PluginEventData::PolyPressure {
+            channel,
+            pitch,
+            pressure,
+            ..
+        } => Some(MidiEvent::PolyAftertouch {
+            channel: MidiChannel::from_index(channel as u8)?,
+            note: pitch.clamp(0, 127) as u8,
+            pressure: (pressure * 127.0).round().clamp(0.0, 127.0) as u8,
+        }),
+        PluginEventData::LegacyMidiCcOut {
+            control_number,
+            channel,
+            value,
+            value2,
+        } => {
+            let channel = MidiChannel::from_index(channel as u8)?;
+            match control_number as u32 {
+                n if n == ControllerNumbers_::kPitchBend as u32 => Some(MidiEvent::PitchBend {
+                    channel,
+                    value: ((u16::from(value2 & 0x7F)) << 7) | u16::from(value & 0x7F),
+                }),
+                n if n == ControllerNumbers_::kAfterTouch as u32 => {
+                    Some(MidiEvent::ChannelAftertouch {
+                        channel,
+                        pressure: value & 0x7F,
+                    })
+                }
+                cc if cc < 128 => Some(MidiEvent::ControlChange {
+                    channel,
+                    controller: cc as u8,
+                    value: value & 0x7F,
+                }),
+                _ => None,
+            }
         }
+        _ => None,
     }
 }
 

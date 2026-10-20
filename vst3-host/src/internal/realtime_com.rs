@@ -61,6 +61,15 @@ impl RealtimeEventList {
     pub(crate) fn overflow_count(&self) -> usize {
         self.overflows.load(Ordering::Relaxed)
     }
+
+    /// Move each fixed-size output event into `f`, retaining this list's allocation.
+    pub(crate) fn drain_each(&self, mut f: impl FnMut(Event)) {
+        // SAFETY: callers obey the exclusive process-thread contract documented on the type.
+        let events = unsafe { &mut *self.events.get() };
+        for event in events.drain(..) {
+            f(event);
+        }
+    }
 }
 
 impl Class for RealtimeEventList {
@@ -87,6 +96,12 @@ impl IEventListTrait for RealtimeEventList {
 
     unsafe fn addEvent(&self, event: *mut Event) -> i32 {
         if event.is_null() {
+            return kResultFalse;
+        }
+        // Pointer-backed payloads need an owned allocation before they can outlive the plugin's
+        // process call. The fixed realtime list deliberately accepts only copy-only events.
+        if !realtime_event_is_copy_only(&*event) {
+            self.overflows.fetch_add(1, Ordering::Relaxed);
             return kResultFalse;
         }
         if self.push(*event) {
@@ -335,6 +350,34 @@ impl RealtimeParameterChanges {
     pub(crate) fn overflow_count(&self) -> usize {
         self.overflows.load(Ordering::Relaxed)
     }
+
+    /// Visit every point accepted for the current block without allocating.
+    pub(crate) fn for_each_active_point(&self, mut f: impl FnMut(u32, i32, f64)) {
+        let used = self.used.load(Ordering::Relaxed);
+        for queue in &self.queues[..used] {
+            let id = queue.param_id.load(Ordering::Relaxed);
+            let count = queue.count.load(Ordering::Relaxed);
+            for index in 0..count {
+                if let Some(point) = queue.point_at(index) {
+                    f(id, point.sample_offset, point.value);
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::unnecessary_cast)]
+fn realtime_event_is_copy_only(event: &Event) -> bool {
+    use Event_::EventTypes_::*;
+
+    !matches!(
+        event.r#type as u32,
+        kind
+            if kind == kDataEvent as u32
+                || kind == kNoteExpressionTextEvent as u32
+                || kind == kChordEvent as u32
+                || kind == kScaleEvent as u32
+    )
 }
 
 impl Class for RealtimeParameterChanges {
@@ -390,6 +433,16 @@ mod tests {
     }
 
     #[test]
+    fn output_event_list_rejects_pointer_backed_events() {
+        let list = RealtimeEventList::new(1);
+        let mut event: Event = unsafe { std::mem::zeroed() };
+        event.r#type = Event_::EventTypes_::kDataEvent as u16;
+
+        assert_eq!(unsafe { list.addEvent(&mut event) }, kResultFalse);
+        assert_eq!(list.overflow_count(), 1);
+    }
+
+    #[test]
     fn parameter_arena_groups_orders_and_clears_blocks() {
         let changes = RealtimeParameterChanges::new(2, 3);
         assert!(changes.enqueue(7, 64, 0.9));
@@ -404,5 +457,17 @@ mod tests {
         changes.clear();
         assert_eq!(changes.distinct_count(), 0);
         assert!(changes.enqueue(9, 1, 0.2));
+    }
+
+    #[test]
+    fn parameter_changes_visit_active_points_in_queue_order() {
+        let changes = RealtimeParameterChanges::new(2, 3);
+        assert!(changes.enqueue(7, 64, 0.9));
+        assert!(changes.enqueue(7, 0, 0.1));
+        assert!(changes.enqueue(3, 8, 0.5));
+
+        let mut visited = Vec::new();
+        changes.for_each_active_point(|id, offset, value| visited.push((id, offset, value)));
+        assert_eq!(visited, vec![(7, 0, 0.1), (7, 64, 0.9), (3, 8, 0.5)]);
     }
 }

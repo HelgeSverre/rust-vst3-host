@@ -46,8 +46,8 @@ All VST3 COM interaction is contained behind a safe API. The public surface has 
 
 The core is working and exercised against real plugins on macOS. Known limitations — see
 [Platform support](docs/reference/platform-support.md) and each guide: the default audio path
-is correctness-first (a lock-free `play_realtime` path also exists, though neither is a fully
-RT-audited engine yet), process isolation is opt-in, and editor embedding into egui
+is correctness-first; `play_realtime` prepares fixed-capacity storage for host-side processing
+without allocation or mutex locking. Process isolation is opt-in, and editor embedding into egui
 (`EmbeddedEditor`) works on macOS — the Windows/Linux window code compiles but isn't yet
 runtime-verified.
 

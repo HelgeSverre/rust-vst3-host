@@ -117,7 +117,8 @@ fn main() -> vst3_host::Result<()> {
 ```
 
 **Real-time, lock-free playback.** `play_realtime` hands the plugin to the audio thread and
-sends control over a lock-free SPSC ring, so the callback never blocks on your thread:
+sends control over a lock-free SPSC ring. The runner prepares fixed event, parameter, and
+audio storage before processing, so the host callback takes no mutex and does not allocate:
 
 ```rust
 use vst3_host::{Vst3Host, midi::{MidiEvent, MidiChannel}};
@@ -136,6 +137,13 @@ fn main() -> vst3_host::Result<()> {
     Ok(())
 }
 ```
+
+For a sequencer or custom audio callback, `RealtimePluginRunner::process_direct` accepts MIDI
+and parameter slices using the same prepared engine as the queued `process` method.
+`start_with_capacities` sets explicit storage limits; `start` derives defaults from the command
+capacity and the plugin's cached MIDI mappings. Pause audio before starting, stopping, or
+recovering the plugin with `into_plugin`. See [audio processing](../docs/explanation/audio-processing.md)
+for the direct interface and its limits.
 
 ### Putting it all together
 
@@ -229,8 +237,9 @@ vst3-host = "0.10"
 The core is working and exercised against real plugins on macOS. What to be aware of:
 
 - The default `play` audio path is correctness-first (it locks on the audio callback). For a
-  lock-free path use `play_realtime` / `RealtimePluginRunner`; even that isn't a fully
-  RT-audited (zero-allocation) engine yet.
+  prepared, fixed-capacity path use `play_realtime` / `RealtimePluginRunner`. Host-side
+  processing takes no mutex and does not allocate; the hosted plugin's own code is outside
+  that guarantee. This path requires an in-process plugin.
 - Process isolation is opt-in (`Vst3Host::builder().with_process_isolation(true)`); crashes
   surface as `Error::PluginCrashed` and `Plugin::recover()` reloads. The editor opens across
   the boundary on macOS (helper-owned window); Windows/Linux not yet.
