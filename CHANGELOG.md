@@ -4,6 +4,15 @@ All notable changes to `vst3-host` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: new features bump the minor version).
 
+## [Unreleased]
+
+### Fixed
+
+- Plugins whose compatibility metadata is broken load again: a factory whose
+  `IPluginCompatibility::getCompatibilityJSON` fails (Kontakt 8 returns `kResultFalse`) loads
+  without old-class-id mappings, and a mapping to a class the module does not export (Spitfire's
+  BBC Symphony Orchestra) is skipped with a warning instead of failing the whole module.
+
 ## [0.10.0] - 2026-10-09
 
 ### Added
