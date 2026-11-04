@@ -313,9 +313,13 @@ pub(crate) fn read_factory_compatibility(
         })?;
         let result = compatibility.getCompatibilityJSON(stream_ptr.as_ptr());
         if result != kResultOk && result != kResultTrue {
-            return Err(Error::PluginLoadFailed(format!(
-                "IPluginCompatibility::getCompatibilityJSON failed: {result:#x}"
-            )));
+            // Kontakt 8 returns kResultFalse here. Compatibility data only maps old
+            // class ids, so a plugin without it still loads by its own class id.
+            log::warn!(
+                "IPluginCompatibility::getCompatibilityJSON failed: {result:#x}; \
+                 loading without compatibility mappings"
+            );
+            return Ok(Vec::new());
         }
         let bytes = stream.to_vec();
         if bytes.len() as u64 > MAX_MODULE_INFO_BYTES {
@@ -580,9 +584,14 @@ fn validate_compatibility(
         let prefix = format!("Compatibility[{index}]");
         let new_class_id = normalize_uid(&format!("{prefix}.New"), &mapping.new_class_id)?;
         if !valid_new_class_ids.contains(&new_class_id) {
-            return invalid(format!(
-                "{prefix}.New references class {new_class_id}, which is not a current audio class"
-            ));
+            // Shipping plugins do this (Spitfire's BBC Symphony Orchestra names a
+            // class it does not export). The mapping can never resolve, so it is
+            // dropped rather than failing the whole module.
+            log::warn!(
+                "{prefix}.New references class {new_class_id}, which is not a current audio \
+                 class; ignoring this mapping"
+            );
+            continue;
         }
         if mapping.old_class_ids.len() > MAX_OLD_IDS_PER_ENTRY {
             return invalid(format!(
@@ -931,6 +940,27 @@ mod tests {
             PathBuf::from("moduleinfo.json"),
         );
         assert!(duplicate.is_err());
+    }
+
+    #[test]
+    fn ignores_a_mapping_to_a_class_the_module_does_not_export() {
+        let info = validate(
+            raw_module(vec![
+                RawCompatibility {
+                    new_class_id: "56534553616E746262632073796D7068".to_string(),
+                    old_class_ids: vec![OLD_UID.to_string()],
+                },
+                RawCompatibility {
+                    new_class_id: CURRENT_UID.to_string(),
+                    old_class_ids: vec![OLD_UID.to_string()],
+                },
+            ]),
+            PathBuf::from("moduleinfo.json"),
+        )
+        .expect("an unknown target class does not fail the module")
+        .expect("module info");
+        assert_eq!(info.compatibility.len(), 1);
+        assert_eq!(info.resolve_class_id(OLD_UID), Some(CURRENT_UID));
     }
 
     #[test]
