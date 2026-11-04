@@ -15,6 +15,13 @@ ignore = [
     # the published `vst3-host` library. "Unmaintained" is an informational advisory, not a
     # vulnerability; nothing to upgrade to until egui migrates off it.
     "RUSTSEC-2026-0192",
+    # `zvariant`, `zvariant_derive` and `zbus_names` unmaintained as standalone crates (merged
+    # into zbus 6). Linux-only, pulled through egui's accessibility stack (accesskit_unix →
+    # atspi → zbus 5), never by the published `vst3-host` library. Informational, not a
+    # vulnerability; nothing to upgrade to until accesskit/atspi move to zbus 6.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]
