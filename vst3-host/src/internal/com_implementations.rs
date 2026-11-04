@@ -1952,7 +1952,33 @@ pub struct HostEventList {
     /// Data-event buffers reserved off the audio thread ([`Self::reserve_payloads`]). A
     /// queued data event's bytes come back here when the event leaves the list, instead of
     /// being freed, so a host can carry SysEx through `process` with no allocation or free.
-    spare_payloads: Mutex<Vec<Vec<u8>>>,
+    spare_payloads: Mutex<PayloadReserve>,
+}
+
+/// The data-event buffers a host reserved, and how to recognise them when they come back.
+///
+/// A [`PluginEvent`] carries no mark of where its bytes came from, so a reserved buffer is
+/// told apart from one `send_sysex` allocated by its heap address. Only reserved buffers
+/// take a slot in `spare`: every slot is owed to a reserved buffer that is out on a queued
+/// event, and an ordinary buffer that took one would have that reserved buffer freed on the
+/// audio thread when it returned.
+#[derive(Default)]
+struct PayloadReserve {
+    /// Reserved buffers not riding a queued event. Its capacity is held at the number of
+    /// buffers ever reserved, so a returning buffer always has a slot and the push never
+    /// allocates.
+    spare: Vec<Vec<u8>>,
+    /// Heap address of every reserved buffer, sorted. A reserved buffer is only ever filled
+    /// within its capacity, so its address never changes.
+    addresses: Vec<usize>,
+}
+
+impl PayloadReserve {
+    fn is_reserved(&self, buffer: &[u8]) -> bool {
+        self.addresses
+            .binary_search(&(buffer.as_ptr() as usize))
+            .is_ok()
+    }
 }
 
 impl HostEventList {
@@ -1960,18 +1986,32 @@ impl HostEventList {
         Self {
             events: Mutex::new(Vec::with_capacity(MAX_QUEUED_EVENTS)),
             payload_bytes: AtomicUsize::new(0),
-            spare_payloads: Mutex::new(Vec::new()),
+            spare_payloads: Mutex::new(PayloadReserve::default()),
         }
     }
 
     /// Reserve `count` data-event buffers of `bytes` capacity each, adding to those already
     /// reserved. It allocates, so call it before processing starts.
     pub fn reserve_payloads(&self, count: usize, bytes: usize) {
-        let Ok(mut spare) = self.spare_payloads.lock() else {
+        let Ok(mut reserve) = self.spare_payloads.lock() else {
             return;
         };
-        spare.reserve_exact(count);
-        spare.extend((0..count).map(|_| Vec::with_capacity(bytes)));
+        let PayloadReserve { spare, addresses } = &mut *reserve;
+        // Each buffer needs an allocation of its own for its address to identify it; a
+        // zero-capacity `Vec` shares a dangling pointer with every other.
+        let bytes = bytes.max(1);
+        // Sized against every buffer ever reserved, not just those free right now, so a
+        // buffer out on a queued event keeps a slot to come back to.
+        let total = addresses.len().saturating_add(count);
+        spare.reserve_exact(total.saturating_sub(spare.len()));
+        addresses.reserve_exact(count);
+        for _ in 0..count {
+            let buffer = Vec::with_capacity(bytes);
+            let address = buffer.as_ptr() as usize;
+            let slot = addresses.partition_point(|&known| known < address);
+            addresses.insert(slot, address);
+            spare.push(buffer);
+        }
     }
 
     /// Queue a data event carrying a copy of `bytes` in a reserved buffer, the smallest one
@@ -1984,11 +2024,12 @@ impl HostEventList {
         data_type: u32,
         bytes: &[u8],
     ) -> bool {
-        let Ok(mut spare) = self.spare_payloads.lock() else {
+        let Ok(mut reserve) = self.spare_payloads.lock() else {
             return false;
         };
         // Smallest fit, so a short message never takes the buffer a long one needs.
-        let Some(index) = spare
+        let Some(index) = reserve
+            .spare
             .iter()
             .enumerate()
             .filter(|(_, buffer)| buffer.capacity() >= bytes.len())
@@ -1997,8 +2038,8 @@ impl HostEventList {
         else {
             return false;
         };
-        let mut buffer = spare.swap_remove(index);
-        drop(spare);
+        let mut buffer = reserve.spare.swap_remove(index);
+        drop(reserve);
         buffer.clear();
         buffer.extend_from_slice(bytes);
         self.add_event(PluginEvent {
@@ -2013,17 +2054,20 @@ impl HostEventList {
         })
     }
 
-    /// Give a data event's buffer back to the reserve while it has room, and drop anything
-    /// else the event owns. An event whose buffer a reserve never held, such as one from
-    /// `send_sysex`, still frees it once the reserve is full.
+    /// Give a reserved data-event buffer back to the reserve, and drop anything else the event
+    /// owns. A buffer the reserve never held, such as one from `send_sysex`, is freed here as
+    /// it was before the reserve existed; it never takes the slot a reserved buffer is owed.
     pub fn recycle(&self, event: PluginEvent) {
         let PluginEventData::Data { bytes, .. } = event.data else {
             return;
         };
-        if let Ok(mut spare) = self.spare_payloads.lock() {
-            if spare.len() < spare.capacity() {
-                spare.push(bytes);
-            }
+        let Ok(mut reserve) = self.spare_payloads.lock() else {
+            return;
+        };
+        // A reserved buffer always has a slot; the capacity check only keeps this push from
+        // ever allocating on the audio thread.
+        if reserve.is_reserved(&bytes) && reserve.spare.len() < reserve.spare.capacity() {
+            reserve.spare.push(bytes);
         }
     }
 
@@ -3459,6 +3503,7 @@ mod host_event_list_tests {
             .spare_payloads
             .lock()
             .unwrap()
+            .spare
             .iter()
             .map(|buffer| (buffer.capacity(), buffer.as_ptr() as usize))
             .collect();
@@ -3570,6 +3615,48 @@ mod host_event_list_tests {
         let reserved_event = list.events.lock().unwrap().pop().unwrap();
         list.reset_with(staged.into_iter().chain([reserved_event]));
         assert_eq!(spare_addresses(&list), reserved);
+    }
+
+    /// `send_sysex` allocates its own buffer, and that buffer must not take the slot a
+    /// reserved buffer comes back to. Here the ordinary message leaves the list ahead of the
+    /// reserved one; if it took the slot, the reserved buffer would be freed and every later
+    /// 128-byte message would be refused despite the reservation.
+    #[test]
+    fn an_ordinary_sysex_never_takes_a_reserved_buffers_slot() {
+        let list = HostEventList::new();
+        list.reserve_payloads(1, 256);
+        let reserved = spare_addresses(&list);
+
+        assert!(list.add_event(PluginEvent::sysex(vec![0xf0, 0xf7])));
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0; 128]));
+        list.clear();
+
+        assert_eq!(spare_addresses(&list), reserved);
+        assert!(
+            list.add_data_from_slice(0, 0, 0, &[0xf0; 128]),
+            "the ordinary message evicted the reserved buffer"
+        );
+        list.clear();
+        assert_eq!(spare_addresses(&list), reserved);
+    }
+
+    /// Reservations add up, counting the buffers queued at the time: a later reservation
+    /// sized against only the buffers that happen to be free would leave the queued one with
+    /// no slot to come back to, and it would be freed on the audio thread.
+    #[test]
+    fn a_later_reservation_keeps_a_slot_for_a_buffer_already_queued() {
+        let list = HostEventList::new();
+        list.reserve_payloads(1, 8);
+        let small = spare_addresses(&list)[0];
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0, 1, 2, 3, 4, 5, 6, 0xf7]));
+        list.reserve_payloads(1, 256);
+        let large = spare_addresses(&list)[0];
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0; 128]));
+        list.clear();
+
+        assert_eq!(spare_addresses(&list), vec![small, large]);
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0; 128]));
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]));
     }
 
     #[allow(clippy::unnecessary_cast)] // the constant is i32 on Windows and u32 elsewhere
