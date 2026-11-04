@@ -1,0 +1,60 @@
+{
+  "Name": "Dexed",
+  "Version": "1.0.0",
+  "Factory Info": {
+    "Vendor": "Digital Suburban",
+    "URL": "",
+    "E-Mail": "",
+    "Flags": {
+      "Unicode": true,
+      "Classes Discardable": false,
+      "Component Non Discardable": false,
+    },
+  },
+  "Classes": [
+    {
+      "CID": "ABCDEF019182FAEB4447534244657864",
+      "Category": "Audio Module Class",
+      "Name": "Dexed",
+      "Vendor": "Digital Suburban",
+      "Version": "1.0.0",
+      "SDKVersion": "VST 3.7.8",
+      "Sub Categories": [
+        "Instrument",
+        "Synth",
+      ],
+      "Class Flags": 2,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+    {
+      "CID": "ABCDEF011234ABCD4447534244657864",
+      "Category": "Component Controller Class",
+      "Name": "Dexed",
+      "Vendor": "Digital Suburban",
+      "Version": "1.0.0",
+      "SDKVersion": "VST 3.7.8",
+      "Sub Categories": [
+        "Instrument",
+        "Synth",
+      ],
+      "Class Flags": 2,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+    {
+      "CID": "ABCDEF01C0DEF00D4447534244657864",
+      "Category": "Plugin Compatibility Class",
+      "Name": "Dexed",
+      "Vendor": "Digital Suburban",
+      "Version": "1.0.0",
+      "SDKVersion": "VST 3.7.8",
+      "Class Flags": 0,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+  ],
+}

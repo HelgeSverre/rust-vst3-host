@@ -1,5 +1,5 @@
 //! Released VST3 3.8 MIDI mapping ABI, insulated from the prerelease layout in vst3 0.3.
-//! https://github.com/steinbergmedia/vst3_pluginterfaces/blob/master/vst/ivstmidimapping2.h
+//! <https://github.com/steinbergmedia/vst3_pluginterfaces/blob/master/vst/ivstmidimapping2.h>
 use crate::midi::{MidiChannel, MidiController, MidiControllerAssignment};
 use vst3::{
     ComPtr,

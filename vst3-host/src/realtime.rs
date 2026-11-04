@@ -682,13 +682,19 @@ mod tests {
 
     #[test]
     fn dropping_teardown_receiver_off_owner_leaks_queued_value() {
+        // These tests deliberately skip Drop. Borrow stack-owned counters so the assertion
+        // does not itself leak Arc allocations and hide real leaks from LeakSanitizer.
+        let drops = AtomicUsize::new(0);
         let (teardown_tx, teardown) = teardown_handoff();
-        let (probe, drops, _threads) = drop_probe();
+        let probe = DropCounter(&drops);
         assert!(try_handoff_teardown(&teardown_tx, probe));
 
-        thread::spawn(move || drop(teardown))
-            .join()
-            .expect("off-owner drop thread");
+        thread::scope(|scope| {
+            scope
+                .spawn(move || drop(teardown))
+                .join()
+                .expect("off-owner drop thread");
+        });
         drop(teardown_tx);
 
         assert_eq!(
@@ -700,19 +706,30 @@ mod tests {
 
     #[test]
     fn disconnected_or_full_handoff_leaks_instead_of_dropping_the_value() {
+        let disconnected_drops = AtomicUsize::new(0);
         let (disconnected_tx, disconnected_rx) = teardown_handoff();
         drop(disconnected_rx);
-        let (disconnected_probe, disconnected_drops, _) = drop_probe();
+        let disconnected_probe = DropCounter(&disconnected_drops);
         assert!(!try_handoff_teardown(&disconnected_tx, disconnected_probe));
         assert_eq!(disconnected_drops.load(Ordering::SeqCst), 0);
 
+        let queued_drops = AtomicUsize::new(0);
+        let overflow_drops = AtomicUsize::new(0);
         let (full_tx, mut full_rx) = teardown_handoff();
-        let (queued_probe, queued_drops, _) = drop_probe();
-        let (overflow_probe, overflow_drops, _) = drop_probe();
+        let queued_probe = DropCounter(&queued_drops);
+        let overflow_probe = DropCounter(&overflow_drops);
         assert!(try_handoff_teardown(&full_tx, queued_probe));
         assert!(!try_handoff_teardown(&full_tx, overflow_probe));
         assert_eq!(overflow_drops.load(Ordering::SeqCst), 0);
         assert!(full_rx.service_one());
         assert_eq!(queued_drops.load(Ordering::SeqCst), 1);
+    }
+
+    struct DropCounter<'a>(&'a AtomicUsize);
+
+    impl Drop for DropCounter<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }

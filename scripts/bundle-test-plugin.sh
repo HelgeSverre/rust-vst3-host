@@ -31,12 +31,15 @@ case "$(uname -s)" in
     ;;
 esac
 
-# VST3 spells ARM64 differently per platform: `aarch64-linux`, but `arm64-win`.
-case "$(uname -m)" in
-  x86_64 | amd64) ARCH_LINUX=x86_64 ARCH_WIN=x86_64 ;;
-  arm64 | aarch64) ARCH_LINUX=aarch64 ARCH_WIN=arm64 ;;
+# The architecture cargo builds for, which is rustc's host. `uname -m` names the shell's, which
+# differs on Windows on Arm when Git Bash runs as x64. VST3 spells ARM64 differently per
+# platform: `aarch64-linux`, but `arm64-win`.
+RUST_ARCH="$(rustc -vV | sed -n 's/^host: \([^-]*\)-.*/\1/p')"
+case "$RUST_ARCH" in
+  x86_64) ARCH_LINUX=x86_64 ARCH_WIN=x86_64 ;;
+  aarch64) ARCH_LINUX=aarch64 ARCH_WIN=arm64 ;;
   *)
-    echo "error: unsupported architecture $(uname -m)" >&2
+    echo "error: unsupported architecture $RUST_ARCH" >&2
     exit 1
     ;;
 esac
@@ -53,8 +56,8 @@ if [ ! -f "$SOURCE" ]; then
 fi
 
 # Rebuild the bundle from scratch. It is a single-architecture fixture for whatever machine is
-# running this, and a leftover per-arch folder from an earlier run on a different machine would
-# win the loader's architecture search and fail the load with a confusing "wrong arch" error.
+# running this, so a per-arch folder left by an earlier run, maybe on another machine, would
+# hold a stale binary.
 rm -rf "$BUNDLE"
 mkdir -p "$(dirname "$DEST")"
 cp "$SOURCE" "$DEST"

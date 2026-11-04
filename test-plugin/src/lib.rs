@@ -976,8 +976,10 @@ unsafe fn read_state_params(stream: *mut IBStream) -> Option<Vec<f64>> {
     }
     let body = stream_read_exact(stream, count * 8)?;
     Some(
-        body.chunks_exact(8)
-            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        body.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&bytes| f64::from_le_bytes(bytes))
             .collect(),
     )
 }

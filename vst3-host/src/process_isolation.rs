@@ -1238,6 +1238,69 @@ fn read_bounded_line(reader: &mut impl BufRead, max: usize) -> ReadLine {
     }
 }
 
+/// Search the existing deployment/build locations using native executable filenames.
+fn find_helper_binary(exe_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Try different possible helper names and locations
+    let helper_names = ["vst3-host-helper", "vst3-inspector-helper"]
+        .map(|name| format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let mut helper_path = None;
+
+    // First try in the same directory as the executable
+    for name in &helper_names {
+        let path = exe_dir.join(name);
+        if path.exists() {
+            helper_path = Some(path);
+            break;
+        }
+    }
+
+    // If not found and we're in an examples directory, try parent
+    if helper_path.is_none() && exe_dir.file_name() == Some(std::ffi::OsStr::new("examples")) {
+        if let Some(parent_dir) = exe_dir.parent() {
+            for name in &helper_names {
+                let path = parent_dir.join(name);
+                if path.exists() {
+                    helper_path = Some(path);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Also check common cargo target directories.
+    //
+    // Only when *we* are running from inside a cargo target tree — that is the case this
+    // fallback exists for (test binaries live in `target/<profile>/deps`, so the checks above
+    // don't find the sibling helper). For a deployed application it would be a liability: the
+    // walk reaches into directories an unprivileged process can write, and the binary it finds
+    // is spawned and then trusted for every answer the host gets about the plugin. Deployed
+    // builds use the explicit `helper_path`/env override or a helper beside the executable.
+    if helper_path.is_none() && crate::discovery::running_from_cargo_target(exe_dir) {
+        // Try to find the workspace root and look in target/debug or target/release
+        let mut current_dir = exe_dir;
+        while let Some(parent) = current_dir.parent() {
+            let debug_path = parent.join("target").join("debug").join(&helper_names[0]);
+            let release_path = parent.join("target").join("release").join(&helper_names[0]);
+
+            if debug_path.exists() {
+                helper_path = Some(debug_path);
+                break;
+            } else if release_path.exists() {
+                helper_path = Some(release_path);
+                break;
+            }
+
+            // Check if we've reached a Cargo.toml (workspace root)
+            if parent.join("Cargo.toml").exists() {
+                break;
+            }
+            current_dir = parent;
+        }
+    }
+
+    helper_path
+}
+
 impl PluginHostProcess {
     /// Create a new isolated plugin host process
     pub fn new(
@@ -1264,67 +1327,7 @@ impl PluginHostProcess {
 
         let exe_dir = exe_path.parent().ok_or("Failed to get exe directory")?;
 
-        // Try different possible helper names and locations
-        let helper_names = ["vst3-host-helper", "vst3-inspector-helper"];
-        let mut helper_path = None;
-
-        // First try in the same directory as the executable
-        for name in &helper_names {
-            let path = exe_dir.join(name);
-            if path.exists() {
-                helper_path = Some(path);
-                break;
-            }
-        }
-
-        // If not found and we're in an examples directory, try parent
-        if helper_path.is_none() && exe_dir.file_name() == Some(std::ffi::OsStr::new("examples")) {
-            if let Some(parent_dir) = exe_dir.parent() {
-                for name in &helper_names {
-                    let path = parent_dir.join(name);
-                    if path.exists() {
-                        helper_path = Some(path);
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Also check common cargo target directories.
-        //
-        // Only when *we* are running from inside a cargo target tree — that is the case this
-        // fallback exists for (test binaries live in `target/<profile>/deps`, so the checks above
-        // don't find the sibling helper). For a deployed application it would be a liability: the
-        // walk reaches into directories an unprivileged process can write, and the binary it finds
-        // is spawned and then trusted for every answer the host gets about the plugin. Deployed
-        // builds use the explicit `helper_path`/env override or a helper beside the executable.
-        if helper_path.is_none() && crate::discovery::running_from_cargo_target(exe_dir) {
-            // Try to find the workspace root and look in target/debug or target/release
-            let mut current_dir = exe_dir;
-            while let Some(parent) = current_dir.parent() {
-                let debug_path = parent.join("target").join("debug").join("vst3-host-helper");
-                let release_path = parent
-                    .join("target")
-                    .join("release")
-                    .join("vst3-host-helper");
-
-                if debug_path.exists() {
-                    helper_path = Some(debug_path);
-                    break;
-                } else if release_path.exists() {
-                    helper_path = Some(release_path);
-                    break;
-                }
-
-                // Check if we've reached a Cargo.toml (workspace root)
-                if parent.join("Cargo.toml").exists() {
-                    break;
-                }
-                current_dir = parent;
-            }
-        }
-
-        let helper_path = helper_path
+        let helper_path = find_helper_binary(exe_dir)
             .ok_or_else(|| format!("Helper executable not found. Searched in {:?} and parent directories. Make sure to build with --bins flag.", exe_dir))?;
 
         Self::spawn(helper_path, timeout)
@@ -2371,6 +2374,31 @@ mod wire_tests {
             }
             other => panic!("NoteExpressions round-trip changed the variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn helper_lookup_uses_native_names_and_stays_within_build_locations() {
+        let root = std::env::temp_dir().join(format!("vst3-helper-lookup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let profile = root.join("target/debug");
+        let deps = profile.join("deps");
+        let examples = profile.join("examples");
+        let deployed = root.join("app/bin");
+        for directory in [&deps, &examples, &deployed] {
+            std::fs::create_dir_all(directory).expect("create executable directory");
+        }
+        let helper_name = format!("vst3-host-helper{}", std::env::consts::EXE_SUFFIX);
+        let helper = profile.join(&helper_name);
+        std::fs::write(&helper, []).expect("write helper fixture");
+        for directory in [&profile, &deps, &examples] {
+            assert_eq!(find_helper_binary(directory), Some(helper.clone()));
+        }
+        // A deployed application must not find an unrelated helper in an ancestor's target/.
+        assert_eq!(find_helper_binary(&deployed), None);
+        let beside_app = deployed.join(&helper_name);
+        std::fs::write(&beside_app, []).expect("write deployed helper fixture");
+        assert_eq!(find_helper_binary(&deployed), Some(beside_app));
+        std::fs::remove_dir_all(root).expect("remove helper fixtures");
     }
 
     #[test]
