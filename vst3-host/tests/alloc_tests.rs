@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use vst3_host::{
     audio::AudioBuffers,
-    midi::{MidiChannel, MidiEvent},
+    midi::{MidiChannel, MidiEvent, PluginEventData},
     realtime::RealtimePluginRunner,
     Vst3Host,
 };
@@ -169,5 +169,75 @@ fn realtime_runner_steady_state_is_allocation_free() {
     assert_eq!(
         n, 0,
         "runner steady-state process() should not allocate/realloc/free; saw {n} over 200 blocks"
+    );
+}
+
+/// SysEx queued through `send_sysex_from_slice_at` rides buffers `reserve_sysex` set aside
+/// before processing, and `process_audio` hands each back to the reserve, so the input side of
+/// a block that carries SysEx allocates and frees nothing. Two sizes per block: the reserve
+/// must hand out the smallest buffer that fits and take both back every block.
+///
+/// Dexed passes every SysEx it receives through to its MIDI output, and the host deep-copies
+/// each plugin-emitted SysEx into an owned event (one allocation per message, on the output
+/// side), so the count is compared against the echoes rather than against zero.
+#[test]
+#[ignore = "Requires the bundled test plugin"]
+fn reserved_sysex_through_process_is_allocation_free() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_plugins/Dexed.vst3");
+    if !std::path::Path::new(path).exists() {
+        println!("Test plugin not found, skipping");
+        return;
+    }
+    let mut host = Vst3Host::builder()
+        .sample_rate(48000.0)
+        .block_size(512)
+        .build()
+        .unwrap();
+    let mut plugin = host.load_plugin(path).unwrap();
+    plugin.reserve_sysex(2, 8).unwrap();
+    plugin.reserve_sysex(2, 256).unwrap();
+    plugin.start_processing().unwrap();
+
+    // Universal identity request, and a non-commercial (0x7d) message long enough to need a
+    // 256-byte buffer.
+    let short = [0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7];
+    let mut long = [0x00u8; 128];
+    long[0] = 0xf0;
+    long[1] = 0x7d;
+    long[127] = 0xf7;
+
+    let mut buf = AudioBuffers::new(0, 2, 512, 48000.0);
+    for _ in 0..8 {
+        assert!(plugin.send_sysex_from_slice_at(&short, 0));
+        assert!(plugin.send_sysex_from_slice_at(&long, 100));
+        plugin.process_audio(&mut buf).unwrap();
+    }
+    plugin.take_output_events();
+
+    ALLOCS.store(0, Ordering::Relaxed);
+    ON.store(true, Ordering::Relaxed);
+    let mut refused = 0usize;
+    for _ in 0..100 {
+        refused += usize::from(!plugin.send_sysex_from_slice_at(&short, 0));
+        refused += usize::from(!plugin.send_sysex_from_slice_at(&long, 100));
+        plugin.process_audio(&mut buf).unwrap();
+    }
+    ON.store(false, Ordering::Relaxed);
+
+    let n = ALLOCS.load(Ordering::Relaxed);
+    let echoed = plugin
+        .take_output_events()
+        .iter()
+        .filter(|event| matches!(event.data, PluginEventData::Data { .. }))
+        .count();
+    println!(
+        "allocations over 100 blocks carrying SysEx: {n} ({echoed} SysEx echoed by the plugin)"
+    );
+    assert_eq!(refused, 0, "a reserved buffer did not come back");
+    assert_eq!(
+        n, echoed,
+        "the input SysEx path should not allocate or free; saw {n} allocations over 100 blocks \
+         against {echoed} plugin-emitted SysEx copies"
     );
 }

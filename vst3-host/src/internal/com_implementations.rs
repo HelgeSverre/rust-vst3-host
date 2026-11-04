@@ -1949,6 +1949,36 @@ const MAX_QUEUED_EVENT_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 pub struct HostEventList {
     pub events: Mutex<Vec<PluginEvent>>,
     payload_bytes: AtomicUsize,
+    /// Data-event buffers reserved off the audio thread ([`Self::reserve_payloads`]). A
+    /// queued data event's bytes come back here when the event leaves the list, instead of
+    /// being freed, so a host can carry SysEx through `process` with no allocation or free.
+    spare_payloads: Mutex<PayloadReserve>,
+}
+
+/// The data-event buffers a host reserved, and how to recognise them when they come back.
+///
+/// A [`PluginEvent`] carries no mark of where its bytes came from, so a reserved buffer is
+/// told apart from one `send_sysex` allocated by its heap address. Only reserved buffers
+/// take a slot in `spare`: every slot is owed to a reserved buffer that is out on a queued
+/// event, and an ordinary buffer that took one would have that reserved buffer freed on the
+/// audio thread when it returned.
+#[derive(Default)]
+struct PayloadReserve {
+    /// Reserved buffers not riding a queued event. Its capacity is held at the number of
+    /// buffers ever reserved, so a returning buffer always has a slot and the push never
+    /// allocates.
+    spare: Vec<Vec<u8>>,
+    /// Heap address of every reserved buffer, sorted. A reserved buffer is only ever filled
+    /// within its capacity, so its address never changes.
+    addresses: Vec<usize>,
+}
+
+impl PayloadReserve {
+    fn is_reserved(&self, buffer: &[u8]) -> bool {
+        self.addresses
+            .binary_search(&(buffer.as_ptr() as usize))
+            .is_ok()
+    }
 }
 
 impl HostEventList {
@@ -1956,13 +1986,97 @@ impl HostEventList {
         Self {
             events: Mutex::new(Vec::with_capacity(MAX_QUEUED_EVENTS)),
             payload_bytes: AtomicUsize::new(0),
+            spare_payloads: Mutex::new(PayloadReserve::default()),
+        }
+    }
+
+    /// Reserve `count` data-event buffers of `bytes` capacity each, adding to those already
+    /// reserved. It allocates, so call it before processing starts.
+    pub fn reserve_payloads(&self, count: usize, bytes: usize) {
+        let Ok(mut reserve) = self.spare_payloads.lock() else {
+            return;
+        };
+        let PayloadReserve { spare, addresses } = &mut *reserve;
+        // Each buffer needs an allocation of its own for its address to identify it; a
+        // zero-capacity `Vec` shares a dangling pointer with every other.
+        let bytes = bytes.max(1);
+        // Sized against every buffer ever reserved, not just those free right now, so a
+        // buffer out on a queued event keeps a slot to come back to.
+        let total = addresses.len().saturating_add(count);
+        spare.reserve_exact(total.saturating_sub(spare.len()));
+        addresses.reserve_exact(count);
+        for _ in 0..count {
+            let buffer = Vec::with_capacity(bytes);
+            let address = buffer.as_ptr() as usize;
+            let slot = addresses.partition_point(|&known| known < address);
+            addresses.insert(slot, address);
+            spare.push(buffer);
+        }
+    }
+
+    /// Queue a data event carrying a copy of `bytes` in a reserved buffer, the smallest one
+    /// that fits. Allocates and frees nothing: with no reserved buffer free that fits, or the
+    /// list full, the event is not queued and `false` is returned.
+    pub fn add_data_from_slice(
+        &self,
+        bus_index: i32,
+        sample_offset: i32,
+        data_type: u32,
+        bytes: &[u8],
+    ) -> bool {
+        let Ok(mut reserve) = self.spare_payloads.lock() else {
+            return false;
+        };
+        // Smallest fit, so a short message never takes the buffer a long one needs.
+        let Some(index) = reserve
+            .spare
+            .iter()
+            .enumerate()
+            .filter(|(_, buffer)| buffer.capacity() >= bytes.len())
+            .min_by_key(|(_, buffer)| buffer.capacity())
+            .map(|(index, _)| index)
+        else {
+            return false;
+        };
+        let mut buffer = reserve.spare.swap_remove(index);
+        drop(reserve);
+        buffer.clear();
+        buffer.extend_from_slice(bytes);
+        self.add_event(PluginEvent {
+            bus_index,
+            sample_offset,
+            ppq_position: 0.0,
+            flags: 0,
+            data: PluginEventData::Data {
+                data_type,
+                bytes: buffer,
+            },
+        })
+    }
+
+    /// Give a reserved data-event buffer back to the reserve, and drop anything else the event
+    /// owns. A buffer the reserve never held, such as one from `send_sysex`, is freed here as
+    /// it was before the reserve existed; it never takes the slot a reserved buffer is owed.
+    pub fn recycle(&self, event: PluginEvent) {
+        let PluginEventData::Data { bytes, .. } = event.data else {
+            return;
+        };
+        let Ok(mut reserve) = self.spare_payloads.lock() else {
+            return;
+        };
+        // A reserved buffer always has a slot; the capacity check only keeps this push from
+        // ever allocating on the audio thread.
+        if reserve.is_reserved(&bytes) && reserve.spare.len() < reserve.spare.capacity() {
+            reserve.spare.push(bytes);
         }
     }
 
     pub fn clear(&self) {
         match self.events.lock() {
             Ok(mut events) => {
-                events.clear();
+                for event in events.drain(..) {
+                    self.recycle(event);
+                }
                 self.payload_bytes.store(0, Ordering::Relaxed);
                 log::trace!("HostEventList: Cleared all events");
             }
@@ -1988,12 +2102,15 @@ impl HostEventList {
             log::error!("HostEventList: Failed to lock events for reset_with");
             return;
         };
-        queued.clear();
+        for event in queued.drain(..) {
+            self.recycle(event);
+        }
         let mut payload_bytes = 0usize;
         for event in events {
             if queued.len() >= MAX_QUEUED_EVENTS {
                 log::warn!("HostEventList: dropping event, queue full at {MAX_QUEUED_EVENTS}");
-                break;
+                self.recycle(event);
+                continue;
             }
             let next_payload_bytes = payload_bytes.saturating_add(event.payload_bytes());
             if next_payload_bytes > MAX_QUEUED_EVENT_PAYLOAD_BYTES {
@@ -2001,6 +2118,7 @@ impl HostEventList {
                     "HostEventList: dropping event, payload budget exceeds \
                      {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
                 );
+                self.recycle(event);
                 continue;
             }
             payload_bytes = next_payload_bytes;
@@ -2029,7 +2147,9 @@ impl HostEventList {
         }
     }
 
-    pub fn add_event(&self, event: PluginEvent) {
+    /// Queue `event`. Returns `false` when the list is full or over its payload budget, and
+    /// the event is dropped.
+    pub fn add_event(&self, event: PluginEvent) -> bool {
         match self.events.lock() {
             Ok(mut events) => {
                 if events.len() >= MAX_QUEUED_EVENTS {
@@ -2037,7 +2157,9 @@ impl HostEventList {
                         "HostEventList: dropping event, queue full at {MAX_QUEUED_EVENTS} \
                          (is the plugin processing?)"
                     );
-                    return;
+                    drop(events);
+                    self.recycle(event);
+                    return false;
                 }
                 let queued_payload_bytes = self.payload_bytes.load(Ordering::Relaxed);
                 if queued_payload_bytes.saturating_add(event.payload_bytes())
@@ -2047,7 +2169,9 @@ impl HostEventList {
                         "HostEventList: dropping event, payload budget exceeds \
                          {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
                     );
-                    return;
+                    drop(events);
+                    self.recycle(event);
+                    return false;
                 }
                 self.payload_bytes.store(
                     queued_payload_bytes + event.payload_bytes(),
@@ -2058,9 +2182,12 @@ impl HostEventList {
                     "HostEventList: Added event via add_event, total count: {}",
                     events.len()
                 );
+                true
             }
             Err(_) => {
                 log::error!("HostEventList: Failed to lock events for add_event");
+                self.recycle(event);
+                false
             }
         }
     }
@@ -3368,6 +3495,169 @@ mod connection_proxy_tests {
 #[cfg(test)]
 mod host_event_list_tests {
     use super::*;
+
+    /// The address of every reserved buffer, smallest capacity first: a buffer that comes
+    /// back to the reserve is the same allocation, never a fresh one.
+    fn spare_addresses(list: &HostEventList) -> Vec<(usize, usize)> {
+        let mut spare: Vec<(usize, usize)> = list
+            .spare_payloads
+            .lock()
+            .unwrap()
+            .spare
+            .iter()
+            .map(|buffer| (buffer.capacity(), buffer.as_ptr() as usize))
+            .collect();
+        spare.sort();
+        spare
+    }
+
+    fn queued_data(list: &HostEventList) -> Vec<(i32, Vec<u8>, usize)> {
+        list.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match &event.data {
+                PluginEventData::Data { bytes, .. } => {
+                    Some((event.sample_offset, bytes.clone(), bytes.as_ptr() as usize))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A host queuing SysEx from the audio thread copies it into a reserved buffer, and the
+    /// buffer returns to the reserve when the block's events are cleared, rather than being
+    /// freed there.
+    #[test]
+    fn a_sysex_copy_rides_a_reserved_buffer_and_returns_to_it() {
+        let list = HostEventList::new();
+        list.reserve_payloads(2, 16);
+        list.reserve_payloads(1, 256);
+        let reserved = spare_addresses(&list);
+
+        let short = [0xf0, 0x7e, 0x00, 0x06, 0x01, 0xf7];
+        let long = [0xf0; 100];
+        assert!(list.add_data_from_slice(0, 3, 0, &short));
+        assert!(list.add_data_from_slice(0, 9, 0, &long));
+        let queued = queued_data(&list);
+        assert_eq!(queued[0].0, 3);
+        assert_eq!(queued[0].1, short);
+        assert_eq!(queued[1].1, long);
+        // The short message took a 16-byte buffer, leaving the 256-byte one for the long.
+        let addresses: Vec<usize> = reserved.iter().map(|&(_, a)| a).collect();
+        assert!(addresses[..2].contains(&queued[0].2));
+        assert_eq!(queued[1].2, addresses[2]);
+        assert_eq!(spare_addresses(&list).len(), 1);
+
+        list.clear();
+        assert_eq!(spare_addresses(&list), reserved);
+    }
+
+    /// With no reserved buffer free that fits, the slice path queues nothing rather than
+    /// allocate one.
+    #[test]
+    fn a_sysex_copy_with_no_free_buffer_that_fits_is_refused() {
+        let list = HostEventList::new();
+        assert!(!list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]));
+        list.reserve_payloads(1, 4);
+        assert!(!list.add_data_from_slice(0, 0, 0, &[0xf0, 1, 2, 3, 0xf7]));
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0, 1, 0xf7]));
+        assert!(!list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]));
+        assert_eq!(queued_data(&list).len(), 1);
+    }
+
+    /// An event the list refuses, or one a chunk's staging drops past the cap, gives its
+    /// buffer back to the reserve too.
+    #[test]
+    fn a_refused_sysex_copy_returns_its_buffer() {
+        let list = HostEventList::new();
+        list.reserve_payloads(2, 8);
+        let reserved = spare_addresses(&list);
+        let event: Event = unsafe { std::mem::zeroed() };
+        for _ in 0..MAX_QUEUED_EVENTS {
+            list.add_raw_event(&event);
+        }
+        assert!(!list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]));
+        assert_eq!(spare_addresses(&list), reserved);
+
+        list.clear();
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]));
+        let mut staged = Vec::new();
+        list.drain_each(|event| staged.push(event));
+        let mut over_cap = Vec::with_capacity(MAX_QUEUED_EVENTS + 1);
+        over_cap.extend((0..MAX_QUEUED_EVENTS).map(|_| {
+            PluginEvent::from(crate::midi::MidiEvent::NoteOn {
+                channel: crate::midi::MidiChannel::Ch1,
+                note: 60,
+                velocity: 100,
+            })
+        }));
+        over_cap.extend(staged);
+        list.reset_with(over_cap);
+        assert_eq!(spare_addresses(&list), reserved);
+
+        // Staging replaces whatever the list held.
+        list.clear();
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]));
+        list.reset_with(std::iter::empty());
+        assert_eq!(spare_addresses(&list), reserved);
+
+        // Over the payload budget, whether queued one at a time or staged.
+        let a_megabyte = || PluginEvent::sysex(vec![0xf0; MAX_QUEUED_EVENT_PAYLOAD_BYTES / 8]);
+        for _ in 0..8 {
+            assert!(list.add_event(a_megabyte()));
+        }
+        assert!(!list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]));
+        assert_eq!(spare_addresses(&list), reserved);
+        let mut staged = Vec::new();
+        list.drain_each(|event| staged.push(event));
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]));
+        let reserved_event = list.events.lock().unwrap().pop().unwrap();
+        list.reset_with(staged.into_iter().chain([reserved_event]));
+        assert_eq!(spare_addresses(&list), reserved);
+    }
+
+    /// `send_sysex` allocates its own buffer, and that buffer must not take the slot a
+    /// reserved buffer comes back to. Here the ordinary message leaves the list ahead of the
+    /// reserved one; if it took the slot, the reserved buffer would be freed and every later
+    /// 128-byte message would be refused despite the reservation.
+    #[test]
+    fn an_ordinary_sysex_never_takes_a_reserved_buffers_slot() {
+        let list = HostEventList::new();
+        list.reserve_payloads(1, 256);
+        let reserved = spare_addresses(&list);
+
+        assert!(list.add_event(PluginEvent::sysex(vec![0xf0, 0xf7])));
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0; 128]));
+        list.clear();
+
+        assert_eq!(spare_addresses(&list), reserved);
+        assert!(
+            list.add_data_from_slice(0, 0, 0, &[0xf0; 128]),
+            "the ordinary message evicted the reserved buffer"
+        );
+        list.clear();
+        assert_eq!(spare_addresses(&list), reserved);
+    }
+
+    /// Reservations add up, counting the buffers queued at the time: a later reservation
+    /// sized against only the buffers that happen to be free would leave the queued one with
+    /// no slot to come back to, and it would be freed on the audio thread.
+    #[test]
+    fn a_later_reservation_keeps_a_slot_for_a_buffer_already_queued() {
+        let list = HostEventList::new();
+        list.reserve_payloads(1, 8);
+        let small = spare_addresses(&list)[0];
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0, 1, 2, 3, 4, 5, 6, 0xf7]));
+        list.reserve_payloads(1, 256);
+        let large = spare_addresses(&list)[0];
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0; 128]));
+        list.clear();
+
+        assert_eq!(spare_addresses(&list), vec![small, large]);
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0; 128]));
+        assert!(list.add_data_from_slice(0, 0, 0, &[0xf0, 0xf7]));
+    }
 
     #[allow(clippy::unnecessary_cast)] // the constant is i32 on Windows and u32 elsewhere
     const MIDI_SYSEX: u32 = DataEvent_::DataTypes_::kMidiSysEx as u32;

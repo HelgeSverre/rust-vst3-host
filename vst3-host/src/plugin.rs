@@ -905,6 +905,17 @@ pub(crate) trait PluginInternal: Send {
             "owned VST3 events are not supported for this plugin".to_string(),
         ))
     }
+    /// Reserve SysEx buffers for [`Self::send_sysex_from_slice_at`]. Defaults to reserving
+    /// nothing, for implementations whose slice path allocates anyway.
+    fn reserve_sysex(&mut self, _messages: usize, _bytes: usize) -> Result<()> {
+        Ok(())
+    }
+    /// Queue a copy of a SysEx message. Defaults to an owned copy through
+    /// [`Self::send_plugin_event`], which allocates.
+    fn send_sysex_from_slice_at(&mut self, bytes: &[u8], sample_offset: i32) -> bool {
+        self.send_plugin_event(PluginEvent::sysex(bytes.to_vec()).at(sample_offset))
+            .is_ok()
+    }
     /// Silence all notes currently tracked by the implementation.
     fn midi_panic(&mut self) -> Result<()> {
         for i in 0..16 {
@@ -1907,6 +1918,36 @@ impl Plugin {
     /// Send MIDI SysEx bytes at a sample offset within the next process block.
     pub fn send_sysex_at(&mut self, bytes: Vec<u8>, sample_offset: i32) -> Result<()> {
         self.send_plugin_event(PluginEvent::sysex(bytes).at(sample_offset))
+    }
+
+    /// Reserve `messages` SysEx buffers of `bytes` capacity each for
+    /// [`send_sysex_from_slice_at`](Self::send_sysex_from_slice_at), adding to any reserved
+    /// before. It allocates, so call it before the audio thread runs, for instance right after
+    /// loading. Each call adds one size, so a host can reserve a few large buffers beside many
+    /// small ones.
+    pub fn reserve_sysex(&mut self, messages: usize, bytes: usize) -> Result<()> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .reserve_sysex(messages, bytes)
+    }
+
+    /// Queue a copy of the SysEx message `bytes` at a sample offset within the next process
+    /// block, for the audio thread.
+    ///
+    /// In process it copies into the smallest free buffer [`reserve_sysex`](Self::reserve_sysex)
+    /// reserved, and `process_audio` hands the buffer back to the reserve when the block is done,
+    /// so neither call allocates or frees for it. Returns `false`, queuing nothing, when no
+    /// reserved buffer that fits is free, the event list is full, the offset is negative or
+    /// the message is longer than [`MAX_EVENT_PAYLOAD_BYTES`]. An isolated plugin sends an
+    /// owned copy, which allocates.
+    pub fn send_sysex_from_slice_at(&mut self, bytes: &[u8], sample_offset: i32) -> bool {
+        if sample_offset < 0 || bytes.len() > MAX_EVENT_PAYLOAD_BYTES {
+            return false;
+        }
+        self.internal
+            .as_mut()
+            .is_some_and(|internal| internal.send_sysex_from_slice_at(bytes, sample_offset))
     }
 
     /// Start a note and get a per-voice [`NoteId`](crate::midi::NoteId) handle for sending
