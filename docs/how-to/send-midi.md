@@ -207,6 +207,21 @@ without writing that plumbing yourself, enable the `midi-input` feature and use
 which forwards parsed events into a running `AudioHandle`. (The inspector's "MIDI Input
 Device" picker does the same, via the `midir` crate.)
 
+## SysEx
+
+`Plugin::send_sysex` queues a System Exclusive message as an owned `Vec<u8>`; it allocates,
+which is fine from a control thread. A host that forwards SysEx *from its audio thread* uses
+the reserved path instead: call
+[`Plugin::reserve_sysex(messages, bytes)`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.Plugin.html#method.reserve_sysex)
+before processing starts (it allocates; calls add up, so a few large buffers can sit beside
+many small ones), then
+[`Plugin::send_sysex_from_slice_at(&bytes, offset)`](https://docs.rs/vst3-host/latest/vst3_host/plugin/struct.Plugin.html#method.send_sysex_from_slice_at)
+copies each message into the smallest free reserved buffer. `process_audio` hands the buffer
+back to the reserve when the block is done, so neither call allocates or frees. It returns
+`false`, queuing nothing, when no reserved buffer that fits is free or the event list is
+full — size the reservation for the most SysEx one block can carry. Across process isolation
+the slice path falls back to an owned copy.
+
 ## Program change
 
 `MidiEvent::ProgramChange` selects a program from the plugin's `IUnitInfo` program list. It

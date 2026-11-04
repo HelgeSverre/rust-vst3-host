@@ -53,8 +53,11 @@ block — but you only need it now for the rarer operations the side channels do
 (opening the editor, saving/loading state, full introspection).
 
 Parameter changes a user makes **in the plugin's own editor GUI** (the plugin calling
-`performEdit`) now also reach the audio processor, so the sound follows the editor; surface
-those edits to your UI with `drain_parameter_changes`.
+`performEdit`) also reach the audio processor, so the sound follows the editor; surface
+those edits to your UI with `drain_parameter_changes`. The audio thread never waits for the
+editor to deliver them: `process` drains the edit list with `try_lock`, and if the editor's
+thread holds it at that moment the edits stay put and land on the next block — one block
+late, none lost.
 
 ## Two paths: convenient (mutex) vs. real-time (lock-free)
 
