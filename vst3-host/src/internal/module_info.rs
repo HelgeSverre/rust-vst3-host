@@ -583,15 +583,16 @@ fn validate_compatibility(
     for (index, mapping) in raw.into_iter().enumerate() {
         let prefix = format!("Compatibility[{index}]");
         let new_class_id = normalize_uid(&format!("{prefix}.New"), &mapping.new_class_id)?;
-        if !valid_new_class_ids.contains(&new_class_id) {
-            // Shipping plugins do this (Spitfire's BBC Symphony Orchestra names a
-            // class it does not export). The mapping can never resolve, so it is
-            // dropped rather than failing the whole module.
+        // Shipping plugins do this (Spitfire's BBC Symphony Orchestra names a class it does
+        // not export). The mapping can never resolve, so it is dropped rather than failing
+        // the whole module. Its old ids are still validated and counted against the limits
+        // below; only the cross-entry uniqueness check and the result skip it.
+        let exported = valid_new_class_ids.contains(&new_class_id);
+        if !exported {
             log::warn!(
                 "{prefix}.New references class {new_class_id}, which is not a current audio \
                  class; ignoring this mapping"
             );
-            continue;
         }
         if mapping.old_class_ids.len() > MAX_OLD_IDS_PER_ENTRY {
             return invalid(format!(
@@ -618,6 +619,9 @@ fn validate_compatibility(
             if !entry_seen.insert(old_class_id.clone()) {
                 return invalid(format!("{prefix}.Old duplicates {old_class_id}"));
             }
+            if !exported {
+                continue;
+            }
             if let Some(previous) = old_to_new.insert(old_class_id.clone(), new_class_id.clone()) {
                 if previous != new_class_id {
                     return invalid(format!(
@@ -628,10 +632,12 @@ fn validate_compatibility(
             }
             old_class_ids.push(old_class_id);
         }
-        compatibility.push(ClassCompatibility {
-            new_class_id,
-            old_class_ids,
-        });
+        if exported {
+            compatibility.push(ClassCompatibility {
+                new_class_id,
+                old_class_ids,
+            });
+        }
     }
     Ok(compatibility)
 }
@@ -961,6 +967,30 @@ mod tests {
         .expect("module info");
         assert_eq!(info.compatibility.len(), 1);
         assert_eq!(info.resolve_class_id(OLD_UID), Some(CURRENT_UID));
+    }
+
+    /// A skipped mapping is still part of the file: its old ids are normalized and counted
+    /// against the limits like any other entry's.
+    #[test]
+    fn a_skipped_mapping_still_has_its_old_ids_validated() {
+        let unknown_new = "56534553616E746262632073796D7068";
+        let malformed = validate(
+            raw_module(vec![RawCompatibility {
+                new_class_id: unknown_new.to_string(),
+                old_class_ids: vec!["short".to_string()],
+            }]),
+            PathBuf::from("moduleinfo.json"),
+        );
+        assert!(malformed.is_err());
+
+        let over_limit = validate(
+            raw_module(vec![RawCompatibility {
+                new_class_id: unknown_new.to_string(),
+                old_class_ids: vec![OLD_UID.to_string(); MAX_OLD_IDS_PER_ENTRY + 1],
+            }]),
+            PathBuf::from("moduleinfo.json"),
+        );
+        assert!(over_limit.is_err());
     }
 
     #[test]
