@@ -4,6 +4,29 @@ All notable changes to `vst3-host` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: new features bump the minor version).
 
+## [0.11.0] - 2026-11-04
+
+### Added
+
+- `Plugin::reserve_sysex` and `Plugin::send_sysex_from_slice_at`: SysEx can be sent from the
+  audio thread with no allocation or free. `reserve_sysex` reserves buffers before processing
+  starts (calls add up, so a few large buffers can sit beside many small ones),
+  `send_sysex_from_slice_at` copies a message into the smallest free reserved buffer, and
+  `process_audio` hands each buffer back to the reserve instead of freeing it. `send_sysex` is
+  unchanged and still allocates; across process isolation the slice path sends an owned copy.
+  ([#14] by jasonstaczek)
+
+### Fixed
+
+- The audio thread no longer waits on a plugin editor's `performEdit`. `process` drained the
+  editor's edits under a blocking lock that `performEdit` takes on the editor's thread. It now
+  uses `try_lock`; a held lock leaves the edits for the next block, so none is lost. ([#14])
+- Plugins whose compatibility metadata is broken load again: a factory whose
+  `IPluginCompatibility::getCompatibilityJSON` fails (Kontakt 8 returns `kResultFalse`) loads
+  without old-class-id mappings, and a mapping to a class the module does not export (Spitfire's
+  BBC Symphony Orchestra) is skipped with a warning instead of failing the whole module. The
+  skipped mapping's old ids are still validated. ([#16] by gijzelaerr)
+
 ## [0.10.0] - 2026-10-09
 
 ### Added
@@ -810,7 +833,9 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 - Initial release: safe VST3 hosting — discover, load, parameters, MIDI, audio playback, state
   save/restore, and process isolation.
 
-[Unreleased]: https://github.com/HelgeSverre/rust-vst3-host/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/HelgeSverre/rust-vst3-host/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.11.0
+[0.10.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.10.0
 [0.9.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.9.0
 [0.8.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.8.0
 [0.7.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.7.0
@@ -831,3 +856,5 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 [#8]: https://github.com/HelgeSverre/rust-vst3-host/issues/8
 [#9]: https://github.com/HelgeSverre/rust-vst3-host/pull/9
 [#10]: https://github.com/HelgeSverre/rust-vst3-host/pull/10
+[#14]: https://github.com/HelgeSverre/rust-vst3-host/pull/14
+[#16]: https://github.com/HelgeSverre/rust-vst3-host/pull/16
