@@ -5,7 +5,11 @@
 
 use crate::error::{Error, Result};
 use crate::plugin::Plugin;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
+use xcb::Xid;
 
 #[cfg(target_os = "macos")]
 use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
@@ -116,6 +120,27 @@ unsafe extern "system" fn plugin_window_proc(
 struct XcbWindowState {
     connection: xcb::Connection,
     window: xcb::x::Window,
+    wm_protocols: xcb::x::Atom,
+    wm_delete_window: xcb::x::Atom,
+    close_requested: AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+fn is_wm_delete_window_event(
+    event: &xcb::Event,
+    window: xcb::x::Window,
+    wm_protocols: xcb::x::Atom,
+    wm_delete_window: xcb::x::Atom,
+) -> bool {
+    let xcb::Event::X(xcb::x::Event::ClientMessage(event)) = event else {
+        return false;
+    };
+    let xcb::x::ClientMessageData::Data32([protocol, ..]) = event.data() else {
+        return false;
+    };
+    event.window() == window
+        && event.r#type() == wm_protocols
+        && protocol == wm_delete_window.resource_id()
 }
 
 /// A plugin window that manages the native window and plugin editor lifecycle
@@ -349,12 +374,26 @@ impl PluginWindow {
 
         #[cfg(target_os = "linux")]
         {
-            use xcb::Xid;
-
             // Create an X11 window via XCB and embed the plugin editor into it using the
             // VST3 X11EmbedWindowID platform type (handled in plugin_impl::open_editor).
             let (connection, screen_number) = xcb::Connection::connect(None)
                 .map_err(|e| Error::Other(format!("Failed to connect to X server: {e}")))?;
+            let wm_protocols_request = connection.send_request(&xcb::x::InternAtom {
+                only_if_exists: false,
+                name: b"WM_PROTOCOLS",
+            });
+            let wm_delete_window_request = connection.send_request(&xcb::x::InternAtom {
+                only_if_exists: false,
+                name: b"WM_DELETE_WINDOW",
+            });
+            let wm_protocols = connection
+                .wait_for_reply(wm_protocols_request)
+                .map_err(|e| Error::Other(format!("Failed to intern WM_PROTOCOLS: {e}")))?
+                .atom();
+            let wm_delete_window = connection
+                .wait_for_reply(wm_delete_window_request)
+                .map_err(|e| Error::Other(format!("Failed to intern WM_DELETE_WINDOW: {e}")))?
+                .atom();
             let setup = connection.get_setup();
             let screen = setup
                 .roots()
@@ -393,6 +432,19 @@ impl PluginWindow {
                 data: title.as_bytes(),
             });
 
+            // ICCCM window managers may terminate a client that has no way to handle the
+            // title-bar close button. Request a ClientMessage instead, so callers can detect the
+            // request and detach the plugin before this parent window is destroyed.
+            connection
+                .send_and_check_request(&xcb::x::ChangeProperty {
+                    mode: xcb::x::PropMode::Replace,
+                    window,
+                    property: wm_protocols,
+                    r#type: xcb::x::ATOM_ATOM,
+                    data: &[wm_delete_window],
+                })
+                .map_err(|e| Error::Other(format!("Failed to enable X11 window close: {e}")))?;
+
             // Show the window, then attach the plugin editor to its X11 id.
             connection.send_request(&xcb::x::MapWindow { window });
             let _ = connection.flush();
@@ -403,7 +455,13 @@ impl PluginWindow {
                 .unwrap_or_else(|p| p.into_inner())
                 .open_editor(handle)?;
 
-            self.native_window = Some(XcbWindowState { connection, window });
+            self.native_window = Some(XcbWindowState {
+                connection,
+                window,
+                wm_protocols,
+                wm_delete_window,
+                close_requested: AtomicBool::new(false),
+            });
         }
 
         #[cfg(target_os = "android")]
@@ -418,7 +476,7 @@ impl PluginWindow {
 
     /// Pump the editor's window-level traffic that has to cross into the plugin.
     ///
-    /// **Call this from your UI event loop, once per frame, while the window is open.** Two
+    /// **Call this from your UI event loop, once per frame, while the window is open.** Three
     /// things depend on it:
     ///
     /// - **Plugin-initiated resizes.** A resizable editor (VSTGUI zoom, a "big view" toggle)
@@ -428,17 +486,24 @@ impl PluginWindow {
     ///   immediately in the window procedure and queues the new content scale for here; making
     ///   the COM call outside the window procedure prevents reentrant deadlocks on the plugin
     ///   mutex.
+    /// - **Linux/X11 title-bar closes.** `WM_DELETE_WINDOW` arrives in the XCB event queue. This
+    ///   records the request so [`Self::closed_by_user`] can report it without letting the
+    ///   window manager destroy the plugin's parent window first.
     ///
-    /// Deliberately non-blocking: if the plugin mutex is held elsewhere (the audio callback
-    /// holds it per block) this returns without doing anything, and the pending work is picked
-    /// up on the next call.
+    /// Deliberately non-blocking for plugin work: if the plugin mutex is held elsewhere (the
+    /// audio callback holds it per block), pending plugin work is picked up on the next call.
+    /// Native event processing, including Linux/X11 close requests, remains independent of that
+    /// mutex and still runs.
     ///
-    /// [`Self::is_open`] and [`Self::closed_by_user`] do *not* run this — they stay lock-free
-    /// so they are safe to call while holding the plugin lock.
+    /// [`Self::is_open`] and [`Self::closed_by_user`] never enter plugin code, so they are safe
+    /// to call while holding the plugin lock. On Linux/X11 they also perform this same
+    /// non-blocking native event poll, allowing existing callers to observe a close request even
+    /// if they have not yet added a separate event-service call.
     pub fn service_platform_events(&self) -> Result<()> {
         if self.native_window.is_none() {
             return Ok(());
         }
+        self.service_native_window_events()?;
         let Some(mut plugin) = self.try_lock_plugin() else {
             return Ok(());
         };
@@ -470,6 +535,38 @@ impl PluginWindow {
             Err(std::sync::TryLockError::Poisoned(poison)) => Some(poison.into_inner()),
             Err(std::sync::TryLockError::WouldBlock) => None,
         }
+    }
+
+    /// Read native events that the operating system delivers directly to the editor window.
+    /// This stays separate from plugin servicing: it does not enter plugin code or take the
+    /// plugin mutex, so a close request can be observed while audio is processing a block.
+    #[cfg(target_os = "linux")]
+    fn service_native_window_events(&self) -> Result<()> {
+        let Some(state) = self.native_window.as_ref() else {
+            return Ok(());
+        };
+        while let Some(event) = state
+            .connection
+            .poll_for_event()
+            .map_err(|e| Error::Other(format!("Failed to poll X11 window events: {e}")))?
+        {
+            if is_wm_delete_window_event(
+                &event,
+                state.window,
+                state.wm_protocols,
+                state.wm_delete_window,
+            ) {
+                state.close_requested.store(true, Ordering::Release);
+            }
+        }
+        Ok(())
+    }
+
+    /// Other platform event sources are either delivered by their window procedure or have no
+    /// window-level events that affect the editor lifecycle.
+    #[cfg(not(target_os = "linux"))]
+    fn service_native_window_events(&self) -> Result<()> {
+        Ok(())
     }
 
     /// The newest DPI the window procedure recorded for this window, as a VST3 content scale.
@@ -626,13 +723,12 @@ impl PluginWindow {
 
     /// Whether the user closed the window themselves, through its title-bar close button.
     ///
-    /// Neither the plugin nor the host is told when that happens, so a host that tracks "the
-    /// editor is open" in its own UI should poll this each frame and drop or
-    /// [`close`](Self::close) the window when it reports `true`. Otherwise the editor stays
-    /// attached to a window that is gone from the screen.
+    /// A host that tracks "the editor is open" in its own UI should poll this each frame. When
+    /// it reports `true`, drop or [`close`](Self::close) the window to detach the editor before
+    /// destroying its native parent.
     ///
-    /// Cheap and lock-free in the same sense as [`Self::is_open`]: native window state only,
-    /// never the plugin lock.
+    /// Never enters plugin code or takes the plugin lock. On Linux/X11 this performs a
+    /// non-blocking XCB event poll before reading the recorded close state.
     pub fn closed_by_user(&self) -> bool {
         self.native_window_dismissed()
     }
@@ -666,9 +762,20 @@ impl PluginWindow {
             .is_ok_and(|requests| requests.contains(&(hwnd as usize)))
     }
 
-    /// Platform probe behind [`Self::closed_by_user`]. X11 and Android editor windows carry no
-    /// close affordance of their own, so there is nothing to observe.
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    /// Platform probe behind [`Self::closed_by_user`]. It non-blockingly drains the XCB queue and
+    /// records the `WM_DELETE_WINDOW` ClientMessage a window manager sends.
+    #[cfg(target_os = "linux")]
+    fn native_window_dismissed(&self) -> bool {
+        if let Err(error) = self.service_native_window_events() {
+            log::debug!("could not poll X11 editor window events: {error}");
+        }
+        self.native_window
+            .as_ref()
+            .is_some_and(|state| state.close_requested.load(Ordering::Acquire))
+    }
+
+    /// Other supported editor-window backends have no host-created close affordance to observe.
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     fn native_window_dismissed(&self) -> bool {
         false
     }
@@ -712,6 +819,69 @@ mod tests {
         assert_eq!(dpi_scale_factor(120), Some(1.25));
         assert_eq!(dpi_scale_factor(144), Some(1.5));
         assert_eq!(dpi_scale_factor(192), Some(2.0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_delete_message_must_target_this_window_and_protocol() {
+        use xcb::{Xid, XidNew};
+
+        let window = xcb::x::Window::new(1);
+        let other_window = xcb::x::Window::new(2);
+        let wm_protocols = xcb::x::Atom::new(3);
+        let wm_delete_window = xcb::x::Atom::new(4);
+        let close = xcb::Event::X(xcb::x::Event::ClientMessage(
+            xcb::x::ClientMessageEvent::new(
+                window,
+                wm_protocols,
+                xcb::x::ClientMessageData::Data32([wm_delete_window.resource_id(), 0, 0, 0, 0]),
+            ),
+        ));
+
+        assert!(super::is_wm_delete_window_event(
+            &close,
+            window,
+            wm_protocols,
+            wm_delete_window
+        ));
+        assert!(!super::is_wm_delete_window_event(
+            &close,
+            other_window,
+            wm_protocols,
+            wm_delete_window
+        ));
+        assert!(!super::is_wm_delete_window_event(
+            &close,
+            window,
+            xcb::x::Atom::new(5),
+            wm_delete_window
+        ));
+        let wrong_payload = xcb::Event::X(xcb::x::Event::ClientMessage(
+            xcb::x::ClientMessageEvent::new(
+                window,
+                wm_protocols,
+                xcb::x::ClientMessageData::Data32([5, 0, 0, 0, 0]),
+            ),
+        ));
+        assert!(!super::is_wm_delete_window_event(
+            &wrong_payload,
+            window,
+            wm_protocols,
+            wm_delete_window
+        ));
+        let wrong_format = xcb::Event::X(xcb::x::Event::ClientMessage(
+            xcb::x::ClientMessageEvent::new(
+                window,
+                wm_protocols,
+                xcb::x::ClientMessageData::Data16([0; 10]),
+            ),
+        ));
+        assert!(!super::is_wm_delete_window_event(
+            &wrong_format,
+            window,
+            wm_protocols,
+            wm_delete_window
+        ));
     }
 
     #[cfg(target_os = "windows")]

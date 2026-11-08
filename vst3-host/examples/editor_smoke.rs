@@ -1,6 +1,8 @@
 //! Smoke check for the native plugin-editor path: load a plugin, open its editor in a real OS
-//! window, service it for a few frames, close it. Prints what it did and exits `0` on success,
-//! `1` on failure — so it can be wired into CI or a `just` recipe as a pass/fail gate.
+//! window, service it for a few frames, then close it. On Linux/X11 it also sends the same
+//! `WM_DELETE_WINDOW` message a title-bar close button uses. Prints what it did and exits `0`
+//! on success, `1` on failure — so it can be wired into CI or a `just` recipe as a pass/fail
+//! gate.
 //!
 //! ```bash
 //! cargo run -p vst3-host --example editor_smoke                       # test_plugins/Dexed.vst3
@@ -85,6 +87,8 @@ fn run() -> Result<(), String> {
         .load_plugin(&path)
         .map_err(|e| format!("load {path}: {e}"))?;
     println!("load: {}", plugin.info().name);
+    #[cfg(target_os = "linux")]
+    let window_title = format!("{} - VST3", plugin.info().name);
 
     if !plugin.has_editor() {
         return Err("plugin reports no editor, nothing to smoke-test".to_string());
@@ -120,12 +124,145 @@ fn run() -> Result<(), String> {
 
     check_instrumentation(&plugin.lock().unwrap_or_else(|p| p.into_inner()))?;
 
+    #[cfg(target_os = "linux")]
+    verify_x11_title_bar_close(&mut window, &plugin, &window_title)?;
+
     window.close();
     if window.is_open() {
         return Err("window still open after close()".to_string());
     }
     println!("close: editor detached and window destroyed");
     Ok(())
+}
+
+/// Drive the same ICCCM request an X11 window manager sends for a title-bar close. This proves
+/// the host advertises `WM_DELETE_WINDOW`, observes the event while servicing the editor, and
+/// keeps the parent X11 window alive until the caller performs the normal plugin-first teardown.
+#[cfg(target_os = "linux")]
+fn verify_x11_title_bar_close(
+    plugin_window: &mut PluginWindow,
+    plugin: &Arc<Mutex<Plugin>>,
+    title: &str,
+) -> Result<(), String> {
+    use xcb::Xid;
+
+    let (connection, screen_number) = xcb::Connection::connect(None)
+        .map_err(|error| format!("connect X11 close-test client: {error}"))?;
+    let wm_protocols = intern_x11_atom(&connection, b"WM_PROTOCOLS")?;
+    let wm_delete_window = intern_x11_atom(&connection, b"WM_DELETE_WINDOW")?;
+    let screen = connection
+        .get_setup()
+        .roots()
+        .nth(screen_number as usize)
+        .ok_or_else(|| "find X11 screen for close test".to_string())?;
+    let window = find_x11_window_by_title(&connection, screen.root(), title)?;
+
+    let protocols = connection
+        .wait_for_reply(connection.send_request(&xcb::x::GetProperty {
+            delete: false,
+            window,
+            property: wm_protocols,
+            r#type: xcb::x::ATOM_ATOM,
+            long_offset: 0,
+            long_length: 16,
+        }))
+        .map_err(|error| format!("read WM_PROTOCOLS: {error}"))?;
+    if protocols.r#type() != xcb::x::ATOM_ATOM
+        || protocols.format() != 32
+        || !protocols
+            .value::<u32>()
+            .contains(&wm_delete_window.resource_id())
+    {
+        return Err("editor window does not advertise WM_DELETE_WINDOW".to_string());
+    }
+
+    let close = xcb::x::ClientMessageEvent::new(
+        window,
+        wm_protocols,
+        xcb::x::ClientMessageData::Data32([wm_delete_window.resource_id(), 0, 0, 0, 0]),
+    );
+    connection
+        .send_and_check_request(&xcb::x::SendEvent {
+            propagate: false,
+            destination: xcb::x::SendEventDest::Window(window),
+            event_mask: xcb::x::EventMask::empty(),
+            event: &close,
+        })
+        .map_err(|error| format!("send WM_DELETE_WINDOW: {error}"))?;
+
+    // `closed_by_user` remains safe while a caller has the plugin lock: it polls only XCB and
+    // records the close request instead of entering the plugin from the window event path.
+    let plugin_guard = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
+    if !plugin_window.closed_by_user() {
+        return Err("editor did not report WM_DELETE_WINDOW".to_string());
+    }
+    drop(plugin_guard);
+    if plugin_window.is_open() {
+        return Err("editor stayed open after WM_DELETE_WINDOW".to_string());
+    }
+    // The host has recorded the request but has not yet detached the plugin or destroyed its X11
+    // parent. A query through a separate X11 connection verifies that invariant.
+    connection
+        .wait_for_reply(connection.send_request(&xcb::x::GetWindowAttributes { window }))
+        .map_err(|error| format!("editor parent disappeared before close(): {error}"))?;
+    println!("close: X11 WM_DELETE_WINDOW detected before teardown");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn intern_x11_atom(connection: &xcb::Connection, name: &[u8]) -> Result<xcb::x::Atom, String> {
+    let request = connection.send_request(&xcb::x::InternAtom {
+        only_if_exists: false,
+        name,
+    });
+    connection
+        .wait_for_reply(request)
+        .map(|reply| reply.atom())
+        .map_err(|error| format!("intern X11 atom {}: {error}", String::from_utf8_lossy(name)))
+}
+
+/// Find the host-created X11 window by its title. Window managers may re-parent clients under
+/// decoration windows, so walk the full tree rather than assuming a direct root child.
+#[cfg(target_os = "linux")]
+fn find_x11_window_by_title(
+    connection: &xcb::Connection,
+    root: xcb::x::Window,
+    title: &str,
+) -> Result<xcb::x::Window, String> {
+    let mut parents = vec![root];
+    let mut matches = Vec::new();
+    while let Some(parent) = parents.pop() {
+        let tree = connection
+            .wait_for_reply(connection.send_request(&xcb::x::QueryTree { window: parent }))
+            .map_err(|error| format!("list X11 child windows: {error}"))?;
+        for window in tree.children() {
+            let property =
+                connection.wait_for_reply(connection.send_request(&xcb::x::GetProperty {
+                    delete: false,
+                    window: *window,
+                    property: xcb::x::ATOM_WM_NAME,
+                    r#type: xcb::x::ATOM_STRING,
+                    long_offset: 0,
+                    long_length: title.len() as u32,
+                }));
+            if property.is_ok_and(|reply| {
+                reply.r#type() == xcb::x::ATOM_STRING
+                    && reply.format() == 8
+                    && reply.value::<u8>() == title.as_bytes()
+            }) {
+                matches.push(*window);
+            }
+            parents.push(*window);
+        }
+    }
+    match matches.as_slice() {
+        [window] => Ok(*window),
+        [] => Err(format!("find X11 editor window titled {title:?}")),
+        _ => Err(format!(
+            "found {} X11 editor windows titled {title:?}; close-test target is ambiguous",
+            matches.len()
+        )),
+    }
 }
 
 /// Verify the editor handshake against a plugin that reports what it saw.

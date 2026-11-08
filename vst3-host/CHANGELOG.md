@@ -4,6 +4,17 @@ All notable changes to `vst3-host` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: new features bump the minor version).
 
+## [0.11.1] - 2026-11-08
+
+### Fixed
+
+- Linux/X11 standalone editor windows advertise and handle `WM_DELETE_WINDOW`, so
+  closing the title bar lets the host detach the plugin before destroying its parent
+  window. This prevents fatal X11 errors when an editor repaints during closure.
+  `PluginWindow::closed_by_user` and `is_open` detect the request without taking the
+  plugin mutex. Regression coverage verifies native close delivery and teardown order.
+  ([#17], reported by MetalMan1245)
+
 ## [0.11.0] - 2026-11-04
 
 ### Added
@@ -833,7 +844,8 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 - Initial release: safe VST3 hosting — discover, load, parameters, MIDI, audio playback, state
   save/restore, and process isolation.
 
-[Unreleased]: https://github.com/HelgeSverre/rust-vst3-host/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/HelgeSverre/rust-vst3-host/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.11.1
 [0.11.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.11.0
 [0.10.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.10.0
 [0.9.0]: https://github.com/HelgeSverre/rust-vst3-host/releases/tag/v0.9.0
@@ -858,3 +870,4 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 [#10]: https://github.com/HelgeSverre/rust-vst3-host/pull/10
 [#14]: https://github.com/HelgeSverre/rust-vst3-host/pull/14
 [#16]: https://github.com/HelgeSverre/rust-vst3-host/pull/16
+[#17]: https://github.com/HelgeSverre/rust-vst3-host/issues/17
