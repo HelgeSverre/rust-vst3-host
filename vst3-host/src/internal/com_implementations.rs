@@ -322,10 +322,15 @@ pub fn create_host_application() -> ComWrapper<HostApplication> {
     ComWrapper::new(HostApplication::default())
 }
 
-/// Log the first off-thread drop, then every `DROP_LOG_INTERVAL`-th one. A plugin that
+/// Log the first dropped message, then every `DROP_LOG_INTERVAL`-th one. A plugin that
 /// notifies from its processor thread does so per block, so logging unconditionally would
 /// emit thousands of lines a second.
 const DROP_LOG_INTERVAL: u64 = 256;
+
+/// How many off-thread messages one direction holds for the control thread. A plugin that
+/// sends meter data every block fills this between two pumps; the oldest are dropped, so
+/// memory stays bounded even if the host never pumps.
+const MAX_QUEUED_MESSAGES: usize = 256;
 
 /// Host-side connection point which prevents processor-thread messages from invoking the
 /// controller directly.
@@ -338,19 +343,27 @@ const DROP_LOG_INTERVAL: u64 = 256;
 /// on the host's GUI thread (see `docs/explanation/threading.md`). Load on a worker thread
 /// and the gate follows that worker, not your GUI thread.
 ///
-/// # Dropped messages
+/// # Messages sent from another thread
 ///
-/// `notify` from any other thread is refused with `kResultFalse` and the message is
-/// **dropped**, matching the SDK reference host's `ConnectionProxy`, which also has nothing
-/// to hand a message to off the UI thread. Plugins that push meter/waveform updates from
-/// `process()` therefore lose those updates; their editors typically fall back to polling.
-/// The drop is counted ([`ConnectionPair::dropped_message_count`]) and logged rate-limited so
-/// it is diagnosable instead of silent. Queueing the message onto the UI thread would need an
-/// owned message copy plus a pump the host is not required to run, and is not implemented.
+/// VST3 requires `notify` on the UI thread, but plugins send from their processor thread or a
+/// worker of their own (LSP Plugins reports its latency that way). Such a message is copied —
+/// its id and attributes, so a plugin reusing the message object for its next send does no
+/// harm — and queued; [`ConnectionPair::deliver_queued`] hands the copies to the destination
+/// on the control thread, from `service_host_requests`. `notify` returns `kResultOk` for a
+/// queued message.
+///
+/// A message is **dropped** instead, counted ([`ConnectionPair::dropped_message_count`]) and
+/// logged rate-limited, when
+/// - it is an `IMessage` the plugin implemented itself: `IAttributeList` cannot enumerate its
+///   keys, so only a message from the host's own `createInstance` can be copied
+///   (`notify` returns `kResultFalse`);
+/// - the queue already holds [`MAX_QUEUED_MESSAGES`]: the oldest queued copy is dropped.
 pub struct ConnectionProxy {
     destination: Mutex<Option<ComPtr<IConnectionPoint>>>,
     control_thread: ThreadId,
-    /// Messages refused because `notify` came from a thread other than `control_thread`.
+    /// Off-thread messages waiting for [`Self::deliver_queued`], oldest first.
+    queued: Mutex<std::collections::VecDeque<MessageSnapshot>>,
+    /// Messages lost: off-thread ones that could not be copied, or pushed out of a full queue.
     dropped: AtomicU64,
     /// Which direction this proxy carries, for the drop log ("component→controller").
     direction: &'static str,
@@ -365,6 +378,7 @@ impl ConnectionProxy {
         Self {
             destination: Mutex::new(Some(destination)),
             control_thread,
+            queued: Mutex::new(std::collections::VecDeque::new()),
             dropped: AtomicU64::new(0),
             direction,
         }
@@ -375,26 +389,107 @@ impl ConnectionProxy {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .take();
+        self.queued
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
     }
 
-    /// Count an off-thread `notify` and log the first one plus every
-    /// [`DROP_LOG_INTERVAL`]-th one after it.
-    fn record_off_thread_drop(&self) {
+    /// Count a lost message and log the first one plus every [`DROP_LOG_INTERVAL`]-th one.
+    fn record_drop(&self, reason: &str) {
         let count = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
         if count == 1 || count % DROP_LOG_INTERVAL == 0 {
             log::warn!(
-                "ConnectionProxy ({}): dropped an off-thread IConnectionPoint::notify \
-                 ({count} so far). VST3 requires component↔controller messages on the UI \
-                 thread; the plugin sent this one from another thread (usually its processor \
-                 thread), so meter/waveform-style updates will not reach its editor.",
+                "ConnectionProxy ({}): dropped an IConnectionPoint::notify message \
+                 ({count} so far): {reason}",
                 self.direction
             );
         }
     }
 
-    /// How many `notify` calls this proxy has refused for arriving off the UI thread.
+    /// How many messages this proxy has lost (see the type docs for when).
     fn dropped_message_count(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Copy an off-thread message into the queue.
+    fn enqueue(&self, message: *mut IMessage) -> tresult {
+        let Some(snapshot) = snapshot_host_message(message) else {
+            self.record_drop(
+                "the plugin sent it off the UI thread as an IMessage it implemented itself, \
+                 which the host cannot copy for later delivery",
+            );
+            return kResultFalse;
+        };
+        let overflowed = {
+            let mut queued = self
+                .queued
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            queued.push_back(snapshot);
+            if queued.len() > MAX_QUEUED_MESSAGES {
+                queued.pop_front();
+                true
+            } else {
+                false
+            }
+        };
+        if overflowed {
+            self.record_drop(
+                "the off-thread message queue is full; is the host calling \
+                 service_host_requests on the control thread?",
+            );
+        }
+        kResultOk
+    }
+
+    /// Forward a message to the destination. Call only on the control thread.
+    unsafe fn forward(&self, message: *mut IMessage) -> tresult {
+        // Clone under the lock, then release it before calling plugin code. `notify` is allowed
+        // to re-enter the host (including disconnect/teardown).
+        let destination = self
+            .destination
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        match destination {
+            Some(destination) => destination.notify(message),
+            None => kResultFalse,
+        }
+    }
+
+    /// Deliver the messages queued so far to the destination; returns how many. Does nothing
+    /// off the control thread. Messages queued while delivering wait for the next call, so a
+    /// plugin that answers each message with another cannot keep this looping.
+    fn deliver_queued(&self) -> usize {
+        if thread::current().id() != self.control_thread {
+            return 0;
+        }
+        let pending = self
+            .queued
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .len();
+        let mut delivered = 0;
+        for _ in 0..pending {
+            // Pop one at a time, without the lock held across plugin code.
+            let Some(snapshot) = self
+                .queued
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .pop_front()
+            else {
+                break;
+            };
+            let message = create_host_message_from(snapshot);
+            if let Some(message) = message.to_com_ptr::<IMessage>() {
+                unsafe {
+                    self.forward(message.as_ptr());
+                }
+                delivered += 1;
+            }
+        }
+        delivered
     }
 }
 
@@ -418,21 +513,9 @@ impl IConnectionPointTrait for ConnectionProxy {
             return kResultFalse;
         }
         if thread::current().id() != self.control_thread {
-            self.record_off_thread_drop();
-            return kResultFalse;
+            return self.enqueue(message);
         }
-
-        // Clone under the lock, then release it before calling plugin code. `notify` is allowed
-        // to re-enter the host (including disconnect/teardown).
-        let destination = self
-            .destination
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone();
-        match destination {
-            Some(destination) => destination.notify(message),
-            None => kResultFalse,
-        }
+        self.forward(message)
     }
 }
 
@@ -495,16 +578,23 @@ impl ConnectionPair {
         })
     }
 
-    /// Total `notify` calls both directions have refused because they arrived off the UI
-    /// thread (the thread [`Self::connect`] ran on).
+    /// Messages both directions have lost: off-thread ones the host could not copy, or ones
+    /// pushed out of a full queue (see [`ConnectionProxy`]).
     ///
-    /// Non-zero means the plugin is trying to push component↔controller messages from another
-    /// thread and those messages are being dropped, exactly as the SDK reference host drops
-    /// them. Useful for answering "why is this plugin's meter frozen?" without a debugger.
+    /// Useful for answering "why is this plugin's meter frozen?" without a debugger.
     pub fn dropped_message_count(&self) -> u64 {
         self.component_to_controller
             .dropped_message_count()
             .saturating_add(self.controller_to_component.dropped_message_count())
+    }
+
+    /// Deliver the messages the plugin sent off the control thread, in both directions;
+    /// returns how many. Call on the control thread (the thread [`Self::connect`] ran on);
+    /// anywhere else it does nothing.
+    pub fn deliver_queued(&self) -> usize {
+        self.component_to_controller
+            .deliver_queued()
+            .saturating_add(self.controller_to_component.deliver_queued())
     }
 
     /// Disconnect both plugin endpoints. Safe to call more than once.
@@ -537,8 +627,8 @@ impl Drop for ConnectionPair {
         let dropped = self.dropped_message_count();
         if dropped > 0 {
             log::warn!(
-                "ConnectionPair: {dropped} component↔controller message(s) were dropped for \
-                 arriving off the UI thread over this plugin's lifetime"
+                "ConnectionPair: {dropped} component↔controller message(s) were dropped over \
+                 this plugin's lifetime"
             );
         }
         unsafe {
@@ -692,18 +782,46 @@ pub fn create_host_attribute_list() -> ComWrapper<HostAttributeList> {
     ComWrapper::new(HostAttributeList::new())
 }
 
+/// The contents of a [`HostMessage`]: its id and attribute list.
+struct MessageData {
+    id: Mutex<Option<std::ffi::CString>>,
+    attributes: ComWrapper<HostAttributeList>,
+}
+
+/// An owned copy of a [`HostMessage`]'s id and attributes, taken when a message has to
+/// outlive the `notify` call that carried it. It holds no COM pointer, so it can cross threads.
+#[derive(Debug, Clone, PartialEq)]
+struct MessageSnapshot {
+    id: Option<std::ffi::CString>,
+    attributes: HashMap<String, AttrValue>,
+}
+
+/// Every live [`HostMessage`], keyed by the address of its `IMessage` interface.
+///
+/// `IAttributeList` cannot enumerate its keys, so a message can only be copied when it is one
+/// of ours. A pointer a plugin hands to `notify` is looked up here to find out.
+fn host_messages() -> &'static Mutex<HashMap<usize, std::sync::Weak<MessageData>>> {
+    static REGISTRY: std::sync::OnceLock<Mutex<HashMap<usize, std::sync::Weak<MessageData>>>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Host implementation of `IMessage` (an id + an attribute list), used for
 /// component<->controller communication that plugins allocate via the host.
 pub struct HostMessage {
-    id: Mutex<Option<std::ffi::CString>>,
-    attributes: ComWrapper<HostAttributeList>,
+    data: Arc<MessageData>,
+    /// The registry key, set by [`create_host_message`]; unset for an unregistered message.
+    address: std::sync::OnceLock<usize>,
 }
 
 impl Default for HostMessage {
     fn default() -> Self {
         Self {
-            id: Mutex::new(None),
-            attributes: create_host_attribute_list(),
+            data: Arc::new(MessageData {
+                id: Mutex::new(None),
+                attributes: create_host_attribute_list(),
+            }),
+            address: std::sync::OnceLock::new(),
         }
     }
 }
@@ -711,6 +829,51 @@ impl Default for HostMessage {
 impl HostMessage {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn from_snapshot(snapshot: MessageSnapshot) -> Self {
+        let message = Self::default();
+        *message
+            .data
+            .id
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = snapshot.id;
+        *message
+            .data
+            .attributes
+            .attrs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = snapshot.attributes;
+        message
+    }
+}
+
+impl MessageData {
+    fn snapshot(&self) -> MessageSnapshot {
+        MessageSnapshot {
+            id: self
+                .id
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone(),
+            attributes: self
+                .attributes
+                .attrs
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone(),
+        }
+    }
+}
+
+impl Drop for HostMessage {
+    fn drop(&mut self) {
+        if let Some(address) = self.address.get() {
+            host_messages()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(address);
+        }
     }
 }
 
@@ -721,7 +884,7 @@ impl Class for HostMessage {
 impl IMessageTrait for HostMessage {
     unsafe fn getMessageID(&self) -> FIDString {
         // Pointer to the stored id (valid until replaced); null if unset.
-        if let Ok(g) = self.id.lock() {
+        if let Ok(g) = self.data.id.lock() {
             if let Some(ref s) = *g {
                 return s.as_ptr();
             }
@@ -733,22 +896,55 @@ impl IMessageTrait for HostMessage {
             return;
         }
         let owned = CStr::from_ptr(id).to_owned();
-        if let Ok(mut g) = self.id.lock() {
+        if let Ok(mut g) = self.data.id.lock() {
             *g = Some(owned);
         }
     }
     unsafe fn getAttributes(&self) -> *mut IAttributeList {
         // Borrowed pointer to the message's own attribute list (kept alive by `self`).
-        self.attributes
+        self.data
+            .attributes
             .to_com_ptr::<IAttributeList>()
             .map(|p| p.as_ptr())
             .unwrap_or(ptr::null_mut())
     }
 }
 
+/// Register a wrapped message so [`snapshot_host_message`] can recognise it.
+fn register_host_message(message: ComWrapper<HostMessage>) -> ComWrapper<HostMessage> {
+    if let Some(interface) = message.as_com_ref::<IMessage>() {
+        let address = interface.as_ptr() as usize;
+        if message.address.set(address).is_ok() {
+            host_messages()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert(address, Arc::downgrade(&message.data));
+        }
+    }
+    message
+}
+
 /// Create a host message.
 pub fn create_host_message() -> ComWrapper<HostMessage> {
-    ComWrapper::new(HostMessage::new())
+    register_host_message(ComWrapper::new(HostMessage::new()))
+}
+
+/// Recreate a message from a snapshot, for delivery on the control thread.
+fn create_host_message_from(snapshot: MessageSnapshot) -> ComWrapper<HostMessage> {
+    register_host_message(ComWrapper::new(HostMessage::from_snapshot(snapshot)))
+}
+
+/// Copy `message` if it is a live [`HostMessage`]; `None` for an `IMessage` the plugin
+/// implemented itself.
+fn snapshot_host_message(message: *mut IMessage) -> Option<MessageSnapshot> {
+    // Look up and copy under the registry lock: a message's `Drop` takes the same lock to
+    // unregister, so the entry cannot be freed and its address reused in between. The caller
+    // holds a reference to `message` for the whole `notify` call anyway.
+    let registry = host_messages()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let data = registry.get(&(message as usize))?.upgrade()?;
+    Some(data.snapshot())
 }
 
 // Host-side in-memory `IBStream`. Plugins serialize their state into a stream the host
@@ -3393,9 +3589,16 @@ mod host_application_tests {
 mod connection_proxy_tests {
     use super::*;
 
+    /// Records each delivered message's id and its `"value"` int attribute.
     #[derive(Default)]
     struct RecordingConnectionPoint {
-        notifications: AtomicUsize,
+        received: Mutex<Vec<(String, Option<i64>)>>,
+    }
+
+    impl RecordingConnectionPoint {
+        fn received(&self) -> Vec<(String, Option<i64>)> {
+            self.received.lock().unwrap().clone()
+        }
     }
 
     impl Class for RecordingConnectionPoint {
@@ -3411,9 +3614,37 @@ mod connection_proxy_tests {
             kResultOk
         }
 
-        unsafe fn notify(&self, _message: *mut IMessage) -> tresult {
-            self.notifications.fetch_add(1, Ordering::Relaxed);
+        unsafe fn notify(&self, message: *mut IMessage) -> tresult {
+            let message = ComRef::from_raw(message).expect("non-null message");
+            let id = message.getMessageID();
+            let id = if id.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(id).to_string_lossy().into_owned()
+            };
+            let attributes = ComRef::from_raw(message.getAttributes()).expect("attributes");
+            let mut value = 0i64;
+            let value =
+                (attributes.getInt(c"value".as_ptr(), &mut value) == kResultOk).then_some(value);
+            self.received.lock().unwrap().push((id, value));
             kResultOk
+        }
+    }
+
+    /// An `IMessage` the plugin implemented itself, not one from the host's `createInstance`.
+    struct ForeignMessage;
+
+    impl Class for ForeignMessage {
+        type Interfaces = (IMessage,);
+    }
+
+    impl IMessageTrait for ForeignMessage {
+        unsafe fn getMessageID(&self) -> FIDString {
+            c"foreign".as_ptr()
+        }
+        unsafe fn setMessageID(&self, _id: FIDString) {}
+        unsafe fn getAttributes(&self) -> *mut IAttributeList {
+            ptr::null_mut()
         }
     }
 
@@ -3427,68 +3658,154 @@ mod connection_proxy_tests {
         (proxy, destination)
     }
 
-    #[test]
-    fn connection_proxy_forwards_only_on_its_control_thread() {
-        let destination = ComWrapper::new(RecordingConnectionPoint::default());
-        let destination_ptr = destination.to_com_ptr::<IConnectionPoint>().unwrap();
-        let proxy = ComWrapper::new(ConnectionProxy::new(
-            destination_ptr,
-            thread::current().id(),
-            "test",
-        ));
-        let proxy_ptr = proxy.to_com_ptr::<IConnectionPoint>().unwrap();
+    /// A host message with `id` and a `"value"` int attribute.
+    fn message(id: &CStr, value: i64) -> ComPtr<IMessage> {
         let message = create_host_message().to_com_ptr::<IMessage>().unwrap();
-
         unsafe {
-            assert_eq!(proxy_ptr.notify(message.as_ptr()), kResultOk);
+            set(&message, id, value);
         }
-        assert_eq!(destination.notifications.load(Ordering::Relaxed), 1);
-
-        let message_ptr = message.as_ptr() as usize;
-        let result =
-            std::thread::spawn(move || unsafe { proxy_ptr.notify(message_ptr as *mut IMessage) })
-                .join()
-                .unwrap();
-        assert_eq!(result, kResultFalse);
-        assert_eq!(destination.notifications.load(Ordering::Relaxed), 1);
+        message
     }
 
-    /// The drop is the SDK's behaviour, but it must be countable — otherwise a plugin whose
-    /// meters never update looks identical to a plugin that sends nothing.
-    #[test]
-    fn off_thread_notifies_are_counted_so_the_drop_is_diagnosable() {
-        let (proxy, destination) = proxy_with_destination();
-        let message = create_host_message().to_com_ptr::<IMessage>().unwrap();
-        let message_ptr = message.as_ptr() as usize;
+    unsafe fn set(message: &ComPtr<IMessage>, id: &CStr, value: i64) {
+        message.setMessageID(id.as_ptr());
+        ComRef::from_raw(message.getAttributes())
+            .unwrap()
+            .setInt(c"value".as_ptr(), value);
+    }
 
-        let results = thread::scope(|scope| {
+    /// Run `notify` on another thread, as a plugin's processor or worker thread would.
+    fn notify_off_thread(proxy: &ConnectionProxy, message: *mut IMessage) -> tresult {
+        let message = message as usize;
+        thread::scope(|scope| {
             scope
-                .spawn(|| {
-                    (0..3)
-                        .map(|_| unsafe { proxy.notify(message_ptr as *mut IMessage) })
-                        .collect::<Vec<_>>()
-                })
+                .spawn(|| unsafe { proxy.notify(message as *mut IMessage) })
                 .join()
                 .expect("notify never panics")
-        });
-
-        assert_eq!(results, vec![kResultFalse; 3]);
-        assert_eq!(destination.notifications.load(Ordering::Relaxed), 0);
-        assert_eq!(proxy.dropped_message_count(), 3);
+        })
     }
 
-    /// Only the thread gate increments the counter: a forwarded message and a malformed one
-    /// must not inflate the "your plugin is messaging off-thread" signal.
     #[test]
-    fn forwarded_and_null_notifies_do_not_count_as_off_thread_drops() {
+    fn forwards_on_the_control_thread_at_once() {
         let (proxy, destination) = proxy_with_destination();
-        let message = create_host_message().to_com_ptr::<IMessage>().unwrap();
+        let message = message(c"now", 1);
 
         assert_eq!(unsafe { proxy.notify(message.as_ptr()) }, kResultOk);
+        assert_eq!(destination.received(), [("now".to_string(), Some(1))]);
+    }
+
+    /// LSP Plugins reports its latency from a worker thread; the message has to reach the
+    /// controller on the control thread instead of being lost.
+    #[test]
+    fn an_off_thread_message_is_delivered_on_the_next_pump() {
+        let (proxy, destination) = proxy_with_destination();
+        let message = message(c"latency", 240);
+
+        assert_eq!(notify_off_thread(&proxy, message.as_ptr()), kResultOk);
+        assert!(destination.received().is_empty());
+
+        assert_eq!(proxy.deliver_queued(), 1);
+        assert_eq!(destination.received(), [("latency".to_string(), Some(240))]);
+        assert_eq!(proxy.deliver_queued(), 0);
+        assert_eq!(proxy.dropped_message_count(), 0);
+    }
+
+    /// Plugins reuse one message object for every send; each queued copy keeps what the
+    /// message held when it was sent.
+    #[test]
+    fn a_queued_message_is_a_copy_taken_at_notify_time() {
+        let (proxy, destination) = proxy_with_destination();
+        let message = message(c"first", 1);
+
+        notify_off_thread(&proxy, message.as_ptr());
+        unsafe {
+            set(&message, c"second", 2);
+        }
+        notify_off_thread(&proxy, message.as_ptr());
+        drop(message);
+
+        assert_eq!(proxy.deliver_queued(), 2);
+        assert_eq!(
+            destination.received(),
+            [
+                ("first".to_string(), Some(1)),
+                ("second".to_string(), Some(2))
+            ]
+        );
+    }
+
+    #[test]
+    fn delivery_does_nothing_off_the_control_thread() {
+        let (proxy, destination) = proxy_with_destination();
+        let message = message(c"queued", 1);
+        notify_off_thread(&proxy, message.as_ptr());
+
+        let delivered =
+            thread::scope(|scope| scope.spawn(|| proxy.deliver_queued()).join().unwrap());
+        assert_eq!(delivered, 0);
+        assert!(destination.received().is_empty());
+        assert_eq!(proxy.deliver_queued(), 1);
+    }
+
+    #[test]
+    fn a_full_queue_drops_the_oldest_message_and_counts_it() {
+        let (proxy, destination) = proxy_with_destination();
+        let message = message(c"meter", 0);
+        for value in 0..(MAX_QUEUED_MESSAGES as i64 + 2) {
+            unsafe {
+                set(&message, c"meter", value);
+            }
+            notify_off_thread(&proxy, message.as_ptr());
+        }
+
+        assert_eq!(proxy.dropped_message_count(), 2);
+        assert_eq!(proxy.deliver_queued(), MAX_QUEUED_MESSAGES);
+        let received = destination.received();
+        assert_eq!(received.first(), Some(&("meter".to_string(), Some(2))));
+        assert_eq!(
+            received.last(),
+            Some(&("meter".to_string(), Some(MAX_QUEUED_MESSAGES as i64 + 1)))
+        );
+    }
+
+    /// `IAttributeList` cannot list its keys, so a message the host did not create cannot be
+    /// copied. It is dropped, and the drop is countable.
+    #[test]
+    fn an_off_thread_foreign_message_is_dropped_and_counted() {
+        let (proxy, destination) = proxy_with_destination();
+        let foreign = ComWrapper::new(ForeignMessage)
+            .to_com_ptr::<IMessage>()
+            .unwrap();
+
+        assert_eq!(notify_off_thread(&proxy, foreign.as_ptr()), kResultFalse);
+        assert_eq!(proxy.dropped_message_count(), 1);
+        assert_eq!(proxy.deliver_queued(), 0);
+        assert!(destination.received().is_empty());
+    }
+
+    /// Only lost messages increment the counter: a forwarded or queued message and a malformed
+    /// one must not inflate it.
+    #[test]
+    fn forwarded_queued_and_null_notifies_do_not_count_as_drops() {
+        let (proxy, destination) = proxy_with_destination();
+        let message = message(c"ok", 1);
+
+        assert_eq!(unsafe { proxy.notify(message.as_ptr()) }, kResultOk);
+        assert_eq!(notify_off_thread(&proxy, message.as_ptr()), kResultOk);
         assert_eq!(unsafe { proxy.notify(ptr::null_mut()) }, kResultFalse);
 
-        assert_eq!(destination.notifications.load(Ordering::Relaxed), 1);
+        assert_eq!(proxy.deliver_queued(), 1);
+        assert_eq!(destination.received().len(), 2);
         assert_eq!(proxy.dropped_message_count(), 0);
+    }
+
+    #[test]
+    fn a_dropped_host_message_leaves_the_registry() {
+        let message = create_host_message();
+        let address = message.as_com_ref::<IMessage>().unwrap().as_ptr() as usize;
+        assert!(host_messages().lock().unwrap().contains_key(&address));
+        drop(message);
+        assert!(!host_messages().lock().unwrap().contains_key(&address));
     }
 }
 

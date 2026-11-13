@@ -3598,6 +3598,13 @@ impl PluginInternal for PluginImpl {
             ));
         }
 
+        // Messages the plugin sent between its halves from another thread. Delivered first:
+        // a controller often answers one with `restartComponent` (LSP Plugins reports its
+        // latency this way), and the flags read below should include that answer.
+        if let Some(connection) = &self.connection {
+            connection.deliver_queued();
+        }
+
         for _ in 0..self.live_controllers.capacity() {
             let Some((channel, controller)) = self.live_controllers.pop() else {
                 break;
