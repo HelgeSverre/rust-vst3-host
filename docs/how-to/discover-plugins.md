@@ -178,10 +178,16 @@ if let Some(module) = vst3_host::discovery::read_module_info(path)? {
 Everything in it is bounded and validated before it is handed back, so a malformed or
 hostile file is rejected rather than parsed. When the file is absent,
 `discovery::get_plugin_compatibility` falls back to loading the factory and asking its
-`IPluginCompatibility` class instead. Two kinds of broken-but-shipping metadata are tolerated
-rather than fatal: a compatibility entry whose `New` id names a class the module does not
-export is skipped with a warning (its old ids are still validated), and a factory whose
-`IPluginCompatibility::getCompatibilityJSON` fails loads without old-class-id mappings.
+`IPluginCompatibility` class instead. Some broken-but-shipping metadata is tolerated rather
+than fatal, each with a warning:
+
+- A compatibility entry whose `New` id names a class the module does not export is skipped
+  (its old ids are still validated).
+- An old id listed under two or more classes (LSP Plugins does this) is ambiguous: it is
+  removed from every entry, so it resolves to no class. The other mappings still apply.
+- An old id listed more than once for the same class is kept once.
+- A factory whose `IPluginCompatibility::getCompatibilityJSON` fails loads without
+  old-class-id mappings.
 
 **Class ids move between plugin versions.** If a saved session's class id no longer exists,
 `ModuleInfo::resolve_class_id` maps it to the class that replaced it, and

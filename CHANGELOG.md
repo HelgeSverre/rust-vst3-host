@@ -4,6 +4,23 @@ All notable changes to `vst3-host` are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: new features bump the minor version).
 
+## [Unreleased]
+
+### Fixed
+
+- A bundle whose `moduleinfo.json` lists one old class id under two classes loads. Such an
+  ambiguous old id is removed from every entry with a warning, so it resolves to no class;
+  the bundle's other mappings and its own classes are unaffected. An old id listed twice for
+  the same class is kept once. Before, either case failed the whole module, which made every
+  plugin in the LSP Plugins bundle unloadable. ([#18], reported by AriGr-GIT)
+- Component↔controller messages a plugin sends from another thread are delivered instead of
+  dropped. The proxy copies each one (id and attributes) into a queue of up to 256 per
+  direction, and `Plugin::service_host_requests` delivers the queue on the control thread
+  before it reads restart flags. LSP Plugins reports its latency this way, so
+  `latency_samples()` now changes from 0 to the plugin's real latency. A message the plugin
+  implemented itself cannot be copied and is still dropped and counted. ([#19], reported by
+  AriGr-GIT)
+
 ## [0.11.1] - 2026-11-08
 
 ### Fixed
@@ -871,3 +888,5 @@ offline audio I/O, richer process isolation, metering, and a much more capable i
 [#14]: https://github.com/HelgeSverre/rust-vst3-host/pull/14
 [#16]: https://github.com/HelgeSverre/rust-vst3-host/pull/16
 [#17]: https://github.com/HelgeSverre/rust-vst3-host/issues/17
+[#18]: https://github.com/HelgeSverre/rust-vst3-host/issues/18
+[#19]: https://github.com/HelgeSverre/rust-vst3-host/issues/19

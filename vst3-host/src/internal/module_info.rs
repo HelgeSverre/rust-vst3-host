@@ -578,7 +578,6 @@ fn validate_compatibility(
         ));
     }
     let mut total_old_ids = 0usize;
-    let mut old_to_new = HashMap::<String, String>::new();
     let mut compatibility = Vec::with_capacity(raw.len());
     for (index, mapping) in raw.into_iter().enumerate() {
         let prefix = format!("Compatibility[{index}]");
@@ -586,7 +585,7 @@ fn validate_compatibility(
         // Shipping plugins do this (Spitfire's BBC Symphony Orchestra names a class it does
         // not export). The mapping can never resolve, so it is dropped rather than failing
         // the whole module. Its old ids are still validated and counted against the limits
-        // below; only the cross-entry uniqueness check and the result skip it.
+        // below; only the cross-entry checks and the result skip it.
         let exported = valid_new_class_ids.contains(&new_class_id);
         if !exported {
             log::warn!(
@@ -619,17 +618,6 @@ fn validate_compatibility(
             if !entry_seen.insert(old_class_id.clone()) {
                 return invalid(format!("{prefix}.Old duplicates {old_class_id}"));
             }
-            if !exported {
-                continue;
-            }
-            if let Some(previous) = old_to_new.insert(old_class_id.clone(), new_class_id.clone()) {
-                if previous != new_class_id {
-                    return invalid(format!(
-                        "old class {old_class_id} maps to both {previous} and {new_class_id}"
-                    ));
-                }
-                return invalid(format!("old class {old_class_id} is listed more than once"));
-            }
             old_class_ids.push(old_class_id);
         }
         if exported {
@@ -639,7 +627,58 @@ fn validate_compatibility(
             });
         }
     }
-    Ok(compatibility)
+    Ok(resolve_cross_entry_old_ids(compatibility))
+}
+
+/// Make every old id resolve to exactly one current class.
+///
+/// Shipping plugins get this wrong (LSP Plugins lists 24 old ids under two classes each), and
+/// the map only matters when a session asks for a retired id, so neither case fails the
+/// module:
+/// - an old id listed under two or more classes is ambiguous and is removed from **every**
+///   entry, so no class silently wins;
+/// - an old id listed again under the same class is kept once.
+fn resolve_cross_entry_old_ids(
+    mut compatibility: Vec<ClassCompatibility>,
+) -> Vec<ClassCompatibility> {
+    let mut targets = HashMap::<&str, Vec<&str>>::new();
+    for entry in &compatibility {
+        for old in &entry.old_class_ids {
+            let news = targets.entry(old.as_str()).or_default();
+            if !news.contains(&entry.new_class_id.as_str()) {
+                news.push(entry.new_class_id.as_str());
+            }
+        }
+    }
+    let ambiguous: HashSet<String> = targets
+        .into_iter()
+        .filter(|(_, news)| news.len() > 1)
+        .map(|(old, news)| {
+            log::warn!(
+                "Compatibility maps old class {old} to {}; ignoring this ambiguous old id",
+                news.join(" and ")
+            );
+            old.to_string()
+        })
+        .collect();
+
+    let mut seen = HashSet::new();
+    for entry in &mut compatibility {
+        entry.old_class_ids.retain(|old| {
+            if ambiguous.contains(old) {
+                return false;
+            }
+            if !seen.insert(old.clone()) {
+                log::warn!(
+                    "Compatibility lists old class {old} for {} more than once; using it once",
+                    entry.new_class_id
+                );
+                return false;
+            }
+            true
+        });
+    }
+    compatibility
 }
 
 fn validate_string(field: &str, value: &str) -> Result<()> {
@@ -922,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_or_conflicting_compatibility() {
+    fn rejects_a_malformed_old_id() {
         let invalid_uid = validate(
             raw_module(vec![RawCompatibility {
                 new_class_id: CURRENT_UID.to_string(),
@@ -931,8 +970,11 @@ mod tests {
             PathBuf::from("moduleinfo.json"),
         );
         assert!(invalid_uid.is_err());
+    }
 
-        let duplicate = validate(
+    #[test]
+    fn keeps_an_old_id_listed_twice_for_the_same_class_once() {
+        let info = validate(
             raw_module(vec![
                 RawCompatibility {
                     new_class_id: CURRENT_UID.to_string(),
@@ -944,8 +986,38 @@ mod tests {
                 },
             ]),
             PathBuf::from("moduleinfo.json"),
-        );
-        assert!(duplicate.is_err());
+        )
+        .expect("a repeated mapping does not fail the module")
+        .expect("module info");
+        assert_eq!(info.resolve_class_id(OLD_UID), Some(CURRENT_UID));
+        assert_eq!(info.replaced_class_ids(CURRENT_UID), [OLD_UID]);
+    }
+
+    /// LSP Plugins lists some old ids under two classes. Such an id resolves to neither, and
+    /// the module and its unambiguous mappings still load.
+    #[test]
+    fn drops_an_old_id_mapped_to_two_classes_from_both() {
+        const SECOND_UID: &str = "0F1E2D3C4B5A69788796A5B4C3D2E1F0";
+        const OTHER_OLD_UID: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let mut raw = raw_module(vec![
+            RawCompatibility {
+                new_class_id: CURRENT_UID.to_string(),
+                old_class_ids: vec![OLD_UID.to_string(), OTHER_OLD_UID.to_string()],
+            },
+            RawCompatibility {
+                new_class_id: SECOND_UID.to_string(),
+                old_class_ids: vec![OLD_UID.to_string()],
+            },
+        ]);
+        raw.classes.push(raw_class(SECOND_UID));
+
+        let info = validate(raw, PathBuf::from("moduleinfo.json"))
+            .expect("an ambiguous old id does not fail the module")
+            .expect("module info");
+        assert_eq!(info.resolve_class_id(OLD_UID), None);
+        assert_eq!(info.resolve_class_id(OTHER_OLD_UID), Some(CURRENT_UID));
+        assert_eq!(info.replaced_class_ids(CURRENT_UID), [OTHER_OLD_UID]);
+        assert!(info.replaced_class_ids(SECOND_UID).is_empty());
     }
 
     #[test]

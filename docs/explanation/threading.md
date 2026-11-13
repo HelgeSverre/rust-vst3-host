@@ -41,21 +41,26 @@ one visible place: **component↔controller messages**.
 
 A plugin split into separate component and controller halves passes data between them over
 `IConnectionPoint`. VST3 requires those messages to be delivered on the UI thread, so the
-host sits in the middle as a proxy — and the proxy refuses (and drops) any `notify` that
-arrives from another thread, exactly as the SDK's reference host does. Plugins that push
-meter levels or waveform frames from inside `process()` are doing that, so those updates
-never reach their editor; such editors normally fall back to polling and look fine.
+host sits in the middle as a proxy. A `notify` on the UI thread is passed straight on.
 
-Two consequences:
+Plugins also send from other threads: meter levels or waveform frames from inside
+`process()`, or a latency change from a worker thread (LSP Plugins). The proxy copies such a
+message (its id and attributes) into a queue, and `Plugin::service_host_requests` delivers
+the queue on the UI thread before it reads the plugin's restart requests. A latency change
+sent that way therefore shows up in the same `service_host_requests` call that delivers it.
 
-- Load on your GUI thread. If you load on a worker, the gate follows the worker and messages
-  from your actual GUI thread get dropped instead.
-- Dropped messages are not silent. The first drop and every 256th are logged at `warn`, with
-  a running total logged when the plugin unloads. A frozen meter with no log line is a
-  different bug.
+Consequences:
 
-The library does not queue these messages onto your UI thread: that would need an owned copy
-of a plugin-provided COM object plus a pump you are not required to run.
+- Call `service_host_requests` on your GUI thread each UI tick. Until you do, off-thread
+  messages wait in the queue.
+- Load on your GUI thread. If you load on a worker, the gate follows the worker: messages
+  from your actual GUI thread are queued, and only a `service_host_requests` on that worker
+  delivers them.
+- Each direction queues at most 256 messages; when it is full, the oldest is dropped.
+- A message object the plugin implemented itself, rather than one it got from the host's
+  `createInstance`, cannot be copied and is dropped when it arrives off-thread.
+- Drops are not silent. The first drop and every 256th are logged at `warn`, with a running
+  total logged when the plugin unloads.
 
 ## During playback
 

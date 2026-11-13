@@ -2428,6 +2428,11 @@ impl Plugin {
 
     /// Service pending restart requests on the caller's control thread.
     ///
+    /// First delivers the component↔controller messages the plugin sent from other threads
+    /// since the last call (they wait in a bounded queue until then), so a restart the
+    /// controller raises in answer to one is included in the returned flags. Call it each UI
+    /// tick. See `docs/explanation/threading.md`.
+    ///
     /// Latency and I/O requests are applied through the required stop/deactivate/reactivate
     /// lifecycle. The returned flags still describe every request; in particular,
     /// [`RestartFlags::reload_component`] means the caller must replace this plugin instance.
